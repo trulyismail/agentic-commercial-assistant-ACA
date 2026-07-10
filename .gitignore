@@ -1,0 +1,21 @@
+# Environnement virtuel Python
+venv/
+
+# Secrets — NE JAMAIS committer les clés API
+.env
+credentials/
+*.json
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Fichiers temporaires
+*.log
+*.tmp
