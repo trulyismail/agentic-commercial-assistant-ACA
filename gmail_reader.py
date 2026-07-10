@@ -10,6 +10,7 @@ expiration du refresh token.
 import base64
 import os
 import re
+from email.mime.text import MIMEText
 from html import unescape
 from typing import TypedDict
 
@@ -34,6 +35,7 @@ class EmailPayload(TypedDict):
     subject: str
     body: str
     attachment_pdf: bytes | None
+    gmail_thread_id: str  # vrai threadId Gmail (distinct du thread_id LangGraph) — pour les relances
 
 
 def get_gmail_service():
@@ -126,6 +128,7 @@ def get_email(service, message_id: str) -> EmailPayload:
         "subject": headers.get("Subject", "(sans objet)"),
         "body": _decode_body(payload),
         "attachment_pdf": _extract_pdf_attachment(service, message_id, payload),
+        "gmail_thread_id": message["threadId"],
     }
 
 
@@ -151,6 +154,35 @@ def mark_as_processed(service, message_id: str) -> None:
         id=message_id,
         body={"removeLabelIds": ["UNREAD"], "addLabelIds": [processed_label_id]},
     ).execute()
+
+
+def create_draft_reply(service, message_id: str, to: str, subject: str, body: str) -> str:
+    """
+    Crée un brouillon de réponse dans le MÊME fil que le message d'origine (threadId + en-têtes
+    In-Reply-To/References corrects), pour que le commercial n'ait qu'à relire dans Gmail et
+    cliquer Envoyer après avoir validé la proposition dans l'UI. Renvoie l'ID du brouillon créé ;
+    lève une exception en cas d'échec (gérée par l'appelant, cf. `action_node`).
+    """
+    original = service.users().messages().get(
+        userId="me", id=message_id, format="metadata", metadataHeaders=["Message-Id", "Subject"],
+    ).execute()
+    headers = {h["name"]: h["value"] for h in original["payload"]["headers"]}
+    original_message_id = headers.get("Message-Id", "")
+    reply_subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+
+    message = MIMEText(body)
+    message["To"] = to
+    message["Subject"] = reply_subject
+    if original_message_id:
+        message["In-Reply-To"] = original_message_id
+        message["References"] = original_message_id
+
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    draft = service.users().drafts().create(
+        userId="me",
+        body={"message": {"raw": raw, "threadId": original["threadId"]}},
+    ).execute()
+    return draft["id"]
 
 
 if __name__ == "__main__":

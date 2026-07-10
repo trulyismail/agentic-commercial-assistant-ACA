@@ -1,9 +1,14 @@
+import os
 import uuid
 import streamlit as st
 from langgraph.types import Command
 import app as aca_graph
+import audit_log
+import followup_store
 import gmail_reader
 import ingest
+import queue_store
+import sheets
 from pdf_reader import extract_text_from_pdf
 
 st.set_page_config(
@@ -11,6 +16,30 @@ st.set_page_config(
     page_icon=":material/smart_toy:",
     layout="wide",
 )
+
+
+def _check_auth() -> bool:
+    """
+    Gate mot de passe optionnel (`ACA_UI_PASSWORD`) : usage solo/petite équipe, pas un vrai système
+    multi-utilisateurs. Sans variable définie, l'UI reste ouverte comme avant (mode développement) —
+    même dégradation gracieuse que les autres options (Tavily, Gemini...).
+    """
+    required = os.getenv("ACA_UI_PASSWORD")
+    if not required or st.session_state.get("authed"):
+        return True
+    st.title("Assistant commercial agentique (ACA)")
+    pwd = st.text_input("Mot de passe", type="password")
+    if st.button("Se connecter", type="primary"):
+        if pwd == required:
+            st.session_state.authed = True
+            st.rerun()
+        else:
+            st.error("Mot de passe incorrect.", icon=":material/error:")
+    return False
+
+
+if not _check_auth():
+    st.stop()
 
 st.title("Assistant commercial agentique (ACA)")
 st.caption("Pré-lecture et qualification des e-mails entrants — validation humaine avant écriture CRM.")
@@ -24,6 +53,7 @@ st.session_state.setdefault(
 )
 st.session_state.setdefault("gmail_attachment_text", "")
 st.session_state.setdefault("gmail_message_id", None)
+st.session_state.setdefault("gmail_thread_id", None)
 
 # Étapes du graphe LangGraph — libellés affichés en direct pendant le stream (par nom de nœud).
 NODE_STEPS = {
@@ -34,7 +64,9 @@ NODE_STEPS = {
     "supervisor": ("Le superviseur oriente l'équipe d'agents", ":material/hub:"),
     "enrichissement": ("Agent Enrichissement : profil entreprise", ":material/travel_explore:"),
     "connaissance": ("Agent Connaissance : RAG sémantique (base de connaissances)", ":material/search:"),
+    "veille": ("Agent Veille : recherche web (FAQ sans correspondance)", ":material/travel_explore:"),
     "stratege": ("Agent Stratège : rédaction de la proposition", ":material/edit_note:"),
+    "notification": ("Notification de l'équipe commerciale", ":material/notifications_active:"),
 }
 
 CATEGORY_STYLE = {
@@ -64,13 +96,51 @@ def advance_graph(payload):
             st.write(f"{icon} {label}")
         status.update(label="Analyse terminée", state="complete")
 
+    _sync_result(st.session_state.thread_id)
+
+
+def _sync_result(thread_id: str) -> None:
+    """Recharge `result`/`pending_clarification` depuis l'état courant du graphe pour ce thread."""
+    config = {"configurable": {"thread_id": thread_id}}
     state = aca_graph.app.get_state(config)
     st.session_state.result = state.values
     # `state.interrupts` non vide = clarification dynamique en attente ; sinon pause avant action.
     st.session_state.pending_clarification = state.interrupts[0].value if state.interrupts else None
 
 
+def load_queued_thread(thread_id: str) -> None:
+    """
+    Charge dans la session une analyse déjà traitée par le poller (poller.py) : le graphe a déjà
+    tourné jusqu'à la pause de validation dans un autre processus, donc pas de `stream()` ici —
+    juste une lecture de l'état persistant (`checkpoints.sqlite`).
+    """
+    st.session_state.thread_id = thread_id
+    _sync_result(thread_id)
+
+
 with st.sidebar:
+    st.text_input(
+        "Validé par", key="validator_name", placeholder="Ton nom (traçabilité)",
+        help="Enregistré dans le journal d'audit local à chaque validation (audit_log.py).",
+    )
+    st.divider()
+    pending_queue = queue_store.list_pending()
+    st.subheader(f"File d'attente ({len(pending_queue)})", anchor=False)
+    st.caption(
+        "E-mails traités automatiquement par le poller en arrière-plan (`poller.py`), en attente "
+        "de validation humaine."
+    )
+    if not pending_queue:
+        st.caption("Aucune analyse en attente pour le moment.")
+    for item in pending_queue:
+        with st.container(border=True):
+            st.markdown(f"**{item['subject']}**")
+            st.caption(f"{item['sender']} · {item['created_at']}")
+            if st.button("Ouvrir", icon=":material/open_in_new:", key=f"open_{item['thread_id']}"):
+                load_queued_thread(item["thread_id"])
+                st.rerun()
+
+    st.divider()
     st.subheader("Import Gmail", anchor=False)
     if st.button("Rechercher les e-mails non lus", icon=":material/mail:"):
         with st.spinner("Connexion à Gmail..."):
@@ -91,6 +161,7 @@ with st.sidebar:
                     st.session_state.email_subject = email["subject"]
                     st.session_state.email_body = email["body"]
                     st.session_state.gmail_message_id = email["id"]
+                    st.session_state.gmail_thread_id = email["gmail_thread_id"]
                     st.session_state.gmail_attachment_text = (
                         extract_text_from_pdf(email["attachment_pdf"]) if email["attachment_pdf"] else ""
                     )
@@ -123,6 +194,25 @@ with st.sidebar:
                                icon=":material/check_circle:")
                 else:
                     st.warning("Aucune paire Q/R extraite du document.", icon=":material/warning:")
+
+    st.divider()
+    pending_rows = sheets.get_pending_knowledge_rows()
+    st.subheader(f"FAQ en attente ({len(pending_rows)})", anchor=False)
+    st.caption(
+        "Réponses trouvées en ligne par l'agent Veille — invisibles du RAG jusqu'à validation "
+        "humaine (contenu web non vérifié, cf. CLAUDE.md)."
+    )
+    for row in pending_rows:
+        with st.container(border=True):
+            st.markdown(f"**Q :** {row['question']}")
+            st.caption(f"R : {row['reponse']}")
+            col_ok, col_ko = st.columns(2)
+            if col_ok.button("Valider", icon=":material/check:", key=f"approve_{row['row_index']}"):
+                sheets.approve_knowledge_row(row["row_index"])
+                st.rerun()
+            if col_ko.button("Rejeter", icon=":material/close:", key=f"reject_{row['row_index']}"):
+                sheets.reject_knowledge_row(row["row_index"])
+                st.rerun()
 
     st.divider()
     st.caption(
@@ -172,6 +262,8 @@ if launch:
         "attachment_text": attachment_text,
         # ID Gmail (ou None) : consommé par action_node pour marquer l'e-mail traité après validation
         "gmail_message_id": st.session_state.gmail_message_id,
+        # Vrai threadId Gmail (ou None) : consommé après validation par followup_store.track()
+        "gmail_thread_id": st.session_state.gmail_thread_id,
     }
 
     # Chaque analyse = un fil (thread) distinct pour le checkpointer (mémoire court terme).
@@ -266,9 +358,23 @@ if "result" in st.session_state:
                     final = aca_graph.app.invoke(None, config=graph_config)
                     action_status = final.get("action_status", "Lead ajouté au CRM.")
                     st.success(action_status, icon=":material/check_circle:")
+                    # Retire l'entrée de la file d'attente si elle en venait (no-op sinon).
+                    queue_store.mark_validated(st.session_state.thread_id)
+                    # Traçabilité minimale : qui a validé, quoi, quand (audit_log.py).
+                    audit_log.log_validation(
+                        st.session_state.thread_id, st.session_state.get("validator_name", ""),
+                        res.get("classification", ""), res.get("email_raw", {}).get("sender", ""),
+                    )
+                    # Suivi des relances (no-op si pas de fil Gmail — saisie manuelle par exemple).
+                    followup_store.track(
+                        st.session_state.thread_id, res.get("gmail_thread_id"),
+                        res.get("email_raw", {}).get("sender", ""),
+                        res.get("email_raw", {}).get("subject", ""),
+                    )
                     # On efface le résultat pour passer au suivant
                     st.session_state.gmail_attachment_text = ""
                     st.session_state.gmail_message_id = None
+                    st.session_state.gmail_thread_id = None
                     st.session_state.pending_clarification = None
                     del st.session_state.result
                 except Exception as e:

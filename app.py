@@ -1,15 +1,18 @@
 import os
 import json
 import operator
+import sqlite3
 from typing import TypedDict, Optional, Annotated
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import interrupt
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.types import interrupt, RetryPolicy, default_retry_on
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 import sheets
 import enrichment
+import veille
+import notify
 
 # Charger toutes les clés API du fichier .env
 load_dotenv()
@@ -48,6 +51,7 @@ class AgentState(TypedDict):
     sender_history: str        # Résumé de l'historique de l'expéditeur (client récurrent)
     is_duplicate: bool         # True si l'expéditeur existe déjà dans l'onglet Leads
     gmail_message_id: Optional[str]  # ID Gmail (sérialisable) pour marquer l'e-mail traité
+    gmail_thread_id: Optional[str]   # Vrai threadId Gmail (relances, cf. relance.py) — hors graphe
     action_status: str         # Message de résultat de l'écriture CRM (rempli par action_node)
     # ── Orchestration multi-agents (superviseur) ──
     next_agent: str            # Décision du superviseur : prochain worker ou "FINISH"
@@ -60,6 +64,30 @@ class AgentState(TypedDict):
 CATEGORIES_VALIDES = {"DEMANDE_DEMO", "DEVIS", "SUPPORT", "SPAM", "AUTRE"}
 # Catégories qui court-circuitent la génération de brouillon / l'écriture CRM.
 CATEGORIES_SANS_SUITE = {"SPAM", "AUTRE"}
+
+# Lien de réservation réel (Calendly, gratuit) pour les demandes de démo (P1 §11.4 item 12).
+# Ajouté déterministiquement au brouillon par stratege_node (jamais généré par le LLM, pour éviter
+# qu'il déforme l'URL) — absent = repli gracieux, le brouillon reste comme avant (promesse vague).
+CALENDLY_URL = os.getenv("CALENDLY_URL", "")
+
+
+def _retry_on(exc: Exception) -> bool:
+    """
+    Étend le prédicat par défaut de LangGraph : retry aussi sur un 429 (rate limit Groq/Tavily/
+    Gemini, ~30 req/min sur le free tier — le cas le plus probable en usage réel), en plus des 5xx/
+    erreurs réseau déjà couverts par `default_retry_on`. Ne retry jamais une erreur de programmation
+    (ValueError/TypeError...) : ça rejouerait à l'identique sans jamais réussir.
+    """
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status == 429:
+        return True
+    return default_retry_on(exc)
+
+
+# Retry automatique (3 tentatives, backoff exponentiel avec jitter) sur les nœuds qui appellent une
+# API externe (Groq/Sheets/Gemini/Tavily/Gmail) — évite qu'une erreur transitoire fasse planter tout
+# `app.invoke()` (P1 §11.4 item 9). N'est PAS appliqué à `clarification_node` (aucun appel externe).
+RETRY_POLICY = RetryPolicy(retry_on=_retry_on, max_attempts=3, initial_interval=1.0)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Nœud 1 — Classification (Llama 3.1 8B → vitesse maximale)
@@ -144,6 +172,27 @@ def connaissance_node(state: AgentState) -> dict:
     print(f"   → {'Contexte trouvé.' if context else 'Aucune correspondance.'}")
     reason = "Connaissance : contexte FAQ injecté." if context else "Connaissance : aucune correspondance FAQ."
     return {"faq_context": context, "completed_agents": ["connaissance"], "reasoning_log": [reason]}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent Veille (worker) — recherche web de repli si la FAQ n'a rien trouvé (Tavily → enrichit la FAQ)
+# ─────────────────────────────────────────────────────────────────────────────
+def veille_node(state: AgentState) -> dict:
+    """
+    Agent Veille : appelé par le superviseur uniquement quand `connaissance` n'a rien trouvé dans la
+    FAQ. Cherche en ligne (Tavily) une réponse, l'ajoute à la Knowledge_Base (mémoire long terme) pour
+    que la prochaine question similaire soit trouvée directement par le RAG sémantique, et renvoie la
+    réponse pour ce tour-ci. Dégradation gracieuse (clé absente / recherche infructueuse → "").
+    """
+    print("\n🌐 [Agent Veille] FAQ sans correspondance → recherche en ligne...")
+    email = state["email_raw"]
+    besoin = (state.get("extracted_info") or {}).get("besoin_principal") or ""
+    query = besoin or f"{email.get('subject', '')} {email.get('body', '')}"
+    answer = veille.search_faq_online(query)
+    print(f"   → {'FAQ enrichie, réponse injectée.' if answer else 'Aucune réponse en ligne.'}")
+    reason = ("Veille : FAQ enrichie via recherche web." if answer
+              else "Veille : recherche web infructueuse (clé absente ou pas de résultat).")
+    return {"faq_context": answer, "completed_agents": ["veille"], "reasoning_log": [reason]}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -259,6 +308,12 @@ def stratege_node(state: AgentState) -> dict:
 
     response = creative_llm().invoke(messages)
     draft = response.content.strip()
+
+    # Créneaux réels pour une démo (P1 §11.4 item 12) : lien ajouté par le code, pas par le LLM,
+    # pour ne jamais risquer une URL déformée.
+    if state["classification"] == "DEMANDE_DEMO" and CALENDLY_URL:
+        draft += f"\n\nVous pouvez réserver directement un créneau qui vous convient ici : {CALENDLY_URL}"
+
     print(f"   → Proposition rédigée ({len(draft)} caractères)")
     return {"draft_response": draft, "completed_agents": ["stratege"],
             "reasoning_log": [f"Stratège : proposition rédigée ({len(draft)} car.)."]}
@@ -286,6 +341,7 @@ def action_node(state: AgentState) -> dict:
     status = "Lead ajouté au CRM."
     msg_id = state.get("gmail_message_id")
     if msg_id:
+        service = None
         try:
             import gmail_reader
             service = gmail_reader.get_gmail_service()
@@ -293,6 +349,17 @@ def action_node(state: AgentState) -> dict:
             status += " E-mail Gmail marqué comme traité."
         except Exception as e:
             status += f" (Échec du marquage Gmail : {e})"
+
+        draft_text = state.get("draft_response", "")
+        if draft_text and service is not None:
+            try:
+                gmail_reader.create_draft_reply(
+                    service, msg_id, to=email.get("sender", ""),
+                    subject=email.get("subject", ""), body=draft_text,
+                )
+                status += " Brouillon de réponse créé dans Gmail."
+            except Exception as e:
+                status += f" (Échec de la création du brouillon Gmail : {e})"
     print(f"   → {status}")
     return {"action_status": status}
 
@@ -346,6 +413,13 @@ def supervisor_node(state: AgentState) -> dict:
         return {"next_agent": "FINISH",
                 "reasoning_log": ["Superviseur : proposition rédigée → FINISH (attente validation)."]}
 
+    # Garde-fou déterministe : FAQ vide après la Connaissance → une tentative de Veille (web)
+    # avant de laisser le Stratège rédiger sans aucun contexte FAQ.
+    if "connaissance" in completed and not state.get("faq_context") and "veille" not in completed:
+        print("   → veille (FAQ vide, tentative de recherche web)")
+        return {"next_agent": "veille",
+                "reasoning_log": ["Superviseur : FAQ vide → veille (recherche web) avant le stratège."]}
+
     helpers_left = [w for w in ("enrichissement", "connaissance") if w not in completed]
     if helpers_left:
         # Le LLM peut lancer un helper ou décider de passer directement au stratège.
@@ -377,6 +451,32 @@ def enrichissement_node(state: AgentState) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Notification — alerte humaine juste avant la pause de validation (P0-2, ACAM_roadmap.md §11.4)
+# ─────────────────────────────────────────────────────────────────────────────
+def notification_node(state: AgentState) -> dict:
+    """
+    Alerte le commercial qu'une analyse attend sa validation (Slack ou e-mail, cf. notify.py).
+    Toujours exécuté juste avant la pause `interrupt_before=["action"]`, sauf SPAM/AUTRE (rien à
+    valider dans ces cas). Dégradation gracieuse : ne bloque jamais le graphe si aucun canal n'est
+    configuré ou si l'envoi échoue.
+    """
+    if state["classification"] in CATEGORIES_SANS_SUITE:
+        return {}
+
+    print("\n🔔 [Notification] Alerte de l'analyse en attente de validation...")
+    email = state["email_raw"]
+    info = state.get("extracted_info", {})
+    message = (
+        f"ACA — nouveau lead à valider : {state['classification']} de {email.get('sender', '?')} "
+        f"({info.get('entreprise') or 'entreprise inconnue'}). Urgence : {info.get('urgence') or '?'}."
+    )
+    sent = notify.send(message)
+    print(f"   → {'Notification envoyée.' if sent else 'Aucun canal configuré (repli gracieux).'}")
+    reason = "Notification envoyée." if sent else "Notification : aucun canal configuré."
+    return {"reasoning_log": [reason]}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Construction du graphe LangGraph (superviseur + équipe, mémoire hybride)
 # ─────────────────────────────────────────────────────────────────────────────
 #
@@ -384,24 +484,27 @@ def enrichissement_node(state: AgentState) -> dict:
 #              (8B)          (CRM read)         (70B)         (8B, routage)
 #                                                              ├─ enrichissement (Tavily + cache)
 #                                                              ├─ connaissance   (RAG sémantique)
+#                                                              ├─ veille         (Tavily si FAQ vide → enrichit la FAQ)
 #                                                              └─ stratege        (proposition)
-#          [SUPERVISEUR] --FINISH--> --interrupt-- [action] → END
-#                                     (validation humaine)   (write CRM + Gmail)
+#          [SUPERVISEUR] --FINISH--> [notification] --interrupt-- [action] → END
+#                                     (Slack/e-mail)   (validation humaine) (write CRM + Gmail)
 #
-# - Mémoire court terme : MemorySaver conserve l'état partagé (accessible à tous les agents)
-#   pendant la pause de validation.
+# - Mémoire court terme : SqliteSaver (fichier local) conserve l'état partagé (accessible à tous
+#   les agents) pendant la pause de validation, y compris à travers un redémarrage de l'app.
 # - Mémoire long terme  : Google Sheets (Leads = CRM, FAQ = Knowledge_Base, Enrichissement_Cache).
 #
 workflow = StateGraph(AgentState)
-workflow.add_node("classifier", classifier_node)
-workflow.add_node("memory_lookup", memory_lookup_node)
-workflow.add_node("extractor", extractor_node)
-workflow.add_node("clarification", clarification_node)
-workflow.add_node("supervisor", supervisor_node)
-workflow.add_node("enrichissement", enrichissement_node)
-workflow.add_node("connaissance", connaissance_node)
-workflow.add_node("stratege", stratege_node)
-workflow.add_node("action", action_node)
+workflow.add_node("classifier", classifier_node, retry_policy=RETRY_POLICY)
+workflow.add_node("memory_lookup", memory_lookup_node, retry_policy=RETRY_POLICY)
+workflow.add_node("extractor", extractor_node, retry_policy=RETRY_POLICY)
+workflow.add_node("clarification", clarification_node)  # aucun appel externe (interrupt uniquement)
+workflow.add_node("supervisor", supervisor_node, retry_policy=RETRY_POLICY)
+workflow.add_node("enrichissement", enrichissement_node, retry_policy=RETRY_POLICY)
+workflow.add_node("connaissance", connaissance_node, retry_policy=RETRY_POLICY)
+workflow.add_node("veille", veille_node, retry_policy=RETRY_POLICY)
+workflow.add_node("stratege", stratege_node, retry_policy=RETRY_POLICY)
+workflow.add_node("notification", notification_node, retry_policy=RETRY_POLICY)
+workflow.add_node("action", action_node, retry_policy=RETRY_POLICY)
 
 workflow.add_edge(START, "classifier")
 workflow.add_edge("classifier", "memory_lookup")
@@ -409,25 +512,32 @@ workflow.add_edge("memory_lookup", "extractor")
 workflow.add_edge("extractor", "clarification")
 workflow.add_edge("clarification", "supervisor")
 
-# Le superviseur route dynamiquement vers un worker (qui lui revient) ou vers l'action (FINISH).
+# Le superviseur route dynamiquement vers un worker (qui lui revient) ou vers la notification (FINISH).
 workflow.add_conditional_edges(
     "supervisor",
     lambda s: s["next_agent"],
     {
         "enrichissement": "enrichissement",
         "connaissance": "connaissance",
+        "veille": "veille",
         "stratege": "stratege",
-        "FINISH": "action",
+        "FINISH": "notification",
     },
 )
 workflow.add_edge("enrichissement", "supervisor")
 workflow.add_edge("connaissance", "supervisor")
+workflow.add_edge("veille", "supervisor")
 workflow.add_edge("stratege", "supervisor")
+workflow.add_edge("notification", "action")
 workflow.add_edge("action", END)
 
 # Checkpointer = mémoire court terme ; interrupt_before = pause Human-in-the-loop
 # juste avant l'écriture CRM. L'UI reprend le graphe (invoke(None, config)) après « Valider ».
-checkpointer = MemorySaver()
+# SqliteSaver (fichier local, 0 €) au lieu de MemorySaver : une analyse en attente de validation
+# survit désormais à un redémarrage de l'app (le process gardait tout en RAM auparavant).
+CHECKPOINT_DB = os.getenv("ACA_CHECKPOINT_DB", "checkpoints.sqlite")
+_checkpoint_conn = sqlite3.connect(CHECKPOINT_DB, check_same_thread=False)
+checkpointer = SqliteSaver(_checkpoint_conn)
 app = workflow.compile(checkpointer=checkpointer, interrupt_before=["action"])
 
 

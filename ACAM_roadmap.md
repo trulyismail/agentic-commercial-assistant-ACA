@@ -112,23 +112,23 @@ Chaque analyse reçoit un `thread_id` (UUID) stocké dans `st.session_state`, qu
 
 ## 9. Capacités LangGraph non exploitées
 
-ACAM n'utilise aujourd'hui qu'une fraction de ce que LangGraph permet. Le graphe est un
-**pipeline linéaire à 6 nœuds** avec un seul point de pause fixe ; les capacités ci-dessous sont
-disponibles dans la même librairie mais pas encore mobilisées :
+État réconcilié après ACAM v2 : le graphe n'est plus un pipeline linéaire mais un **superviseur +
+équipe d'agents** avec deux types d'interruption. Plusieurs capacités listées ici comme « non
+utilisées » sont désormais implémentées (marquées ✅) ; les autres restent des pistes :
 
 | Capacité LangGraph | Ce qu'elle apporterait à ACAM | État actuel |
 |---|---|---|
-| **`add_conditional_edges`** (routage dynamique) | Le classifieur pourrait router directement vers des chemins spécialisés (ex : un nœud d'escalade pour `SUPPORT` urgent) au lieu d'un `if` statique dans chaque nœud (`CATEGORIES_SANS_SUITE`) | Non utilisé — le graphe n'a que des `add_edge` fixes |
-| **`interrupt()` dynamique** (au lieu de `interrupt_before` statique) | Permettrait à l'agent de demander une clarification humaine *au milieu* d'un nœud (ex : « urgence ambiguë, confirmez SVP ») plutôt qu'un seul point de pause fixe avant `action` | Non utilisé — un seul `interrupt_before=["action"]` |
+| **`add_conditional_edges`** (routage dynamique) | Le classifieur pourrait router directement vers des chemins spécialisés (ex : un nœud d'escalade pour `SUPPORT` urgent) au lieu d'un `if` statique dans chaque nœud (`CATEGORIES_SANS_SUITE`) | ✅ **Fait (ACAM v2)** — le superviseur route dynamiquement vers `enrichissement`/`connaissance`/`veille`/`stratege`/`action` via `add_conditional_edges` |
+| **`interrupt()` dynamique** (au lieu de `interrupt_before` statique) | Permettrait à l'agent de demander une clarification humaine *au milieu* d'un nœud (ex : « urgence ambiguë, confirmez SVP ») plutôt qu'un seul point de pause fixe avant `action` | ✅ **Fait (ACAM v2)** — `clarification_node` pose une question via `interrupt()` quand `besoin_principal` est vide, reprise par `Command(resume=...)` |
 | **Store API** (`langgraph.store`, mémoire long terme native, cross-thread) | Remplacerait/compléterait la lecture manuelle de Google Sheets par une mémoire sémantique interrogeable (embeddings) partagée entre threads, gérée par le framework | Non utilisé — la mémoire long terme passe entièrement par des appels `gspread` custom dans `sheets.py` |
 | **Checkpointer persistant** (`SqliteSaver` / `PostgresSaver` au lieu de `MemorySaver`) | Les pauses de validation survivraient à un redémarrage de l'app (actuellement perdues en mémoire RAM) | Non utilisé — `MemorySaver()` est volatile |
-| **Streaming** (`astream_events` / `stream_mode="messages"`) | L'UI pourrait afficher la progression nœud par nœud (« classification en cours... », « rédaction... ») au lieu d'un `st.spinner` bloquant unique | Non utilisé — `app.invoke()` synchrone, tout ou rien |
+| **Streaming** (`astream_events` / `stream_mode="messages"`) | L'UI pourrait afficher la progression nœud par nœud (« classification en cours... », « rédaction... ») au lieu d'un `st.spinner` bloquant unique | ✅ **Fait** — `ui.py` utilise `app.stream()` et affiche chaque nœud en direct dans un `st.status` |
 | **Exécution parallèle (fan-out/fan-in)** | `memory_lookup_node` et `rag_retrieval_node` sont indépendants (l'un lit `Leads`, l'autre `FAQ`) — ils pourraient s'exécuter en parallèle au lieu de séquentiellement | Non utilisé — chaîne strictement séquentielle |
 | **`RetryPolicy` par nœud** | Retry automatique en cas d'erreur API Groq/Sheets transitoire, sans faire échouer tout le graphe | Non utilisé — aucun `try/except` autour des appels LLM dans les nœuds |
 | **Sous-graphes (`subgraphs`)** | Un sous-graphe `ingestion` dédié (PDF + e-mail) réutilisable indépendamment du pipeline de qualification, conforme à l'architecture cible du document de vision | Non utilisé — l'extraction PDF vit dans `ui.py`, hors du graphe |
 | **Time travel / `get_state_history()`** | Permettrait de rejouer ou d'auditer une décision passée de l'agent (utile pour justifier une classification en cas de litige) | Non utilisé — seul `get_state()` (état courant) est appelé, dans le `__main__` de démo |
 | **Agents à outils (`bind_tools` / ReAct)** | Le `draft_writer_node` pourrait appeler des outils (vérifier un agenda, calculer un tarif exact) plutôt que produire un texte figé en un seul appel LLM | Non utilisé — aucun tool-calling, uniquement des prompts système/humain fixes |
-| **Orchestration multi-agents (superviseur)** | Un agent superviseur pourrait déléguer `DEVIS` vs `SUPPORT` vs `DEMANDE_DEMO` à des sous-agents spécialisés avec leurs propres prompts/outils | Non utilisé — un seul graphe monolithique traite toutes les catégories |
+| **Orchestration multi-agents (superviseur)** | Un agent superviseur pourrait déléguer `DEVIS` vs `SUPPORT` vs `DEMANDE_DEMO` à des sous-agents spécialisés avec leurs propres prompts/outils | ✅ **Fait (ACAM v2)** — `supervisor_node` (Llama-8B + garde-fous) orchestre l'équipe `enrichissement`/`connaissance`/`veille`/`stratege` |
 
 ## 10. Pistes d'amélioration de l'agent
 
@@ -151,9 +151,8 @@ Classées par effort estimé (croissant) :
 - **Traitement par lot des e-mails non lus** — `list_unread_emails` remonte déjà jusqu'à 10
   e-mails ; l'UI ne permet d'en traiter qu'un à la fois manuellement, sans file d'attente ni
   traitement automatique en série.
-- **UI asynchrone / streaming** — remplacer le `st.spinner` bloquant par un affichage progressif
-  nœud par nœud (cf. capacité `astream_events` ci-dessus), pour une meilleure perception de
-  latence sur les cas avec pièce jointe volumineuse.
+- ✅ **UI asynchrone / streaming** — fait : `ui.py` remplace le `st.spinner` bloquant par
+  `app.stream()` + un `st.status` affichant chaque nœud en direct.
 - **Nœud « Reflect » (auto-critique)** — avant de proposer le brouillon à validation, un second
   passage LLM qui relit sa propre réponse (ton, exactitude vis-à-vis de la FAQ, absence
   d'engagement commercial non autorisé) et la corrige si besoin.
@@ -168,3 +167,200 @@ Classées par effort estimé (croissant) :
 - **Persistance `SqliteSaver`** — pour que les analyses en attente de validation survivent à un
   redémarrage de l'app Streamlit (actuellement perdues si le process redémarre entre l'analyse et
   le clic « Valider »).
+
+## 11. Production — usage réel en entreprise (contrainte : 0 €)
+
+Analyse de ce qu'il faudrait pour qu'une vraie entreprise utilise ce workflow au quotidien.
+Tout ce qui suit respecte la contrainte du projet : **aucun coût** (free tiers uniquement).
+
+### 11.1 Vector DB : verdict — NON pour l'instant, Sheets suffit
+
+Le premier mur n'est **pas la taille de la FAQ mais les quotas de l'API Sheets** (~300 lectures/min
+par projet, 60/min par utilisateur) : c'est un polling automatique ou plusieurs instances de l'app
+qui provoqueraient des erreurs 429, bien avant que la base soit « trop grande ». La similarité
+cosinus en mémoire tient sans problème mesurable jusqu'à **~1 000–2 000 lignes** de FAQ (le cache
+`_faq_embedding_cache` de `sheets.py` ne coûte qu'un appel Gemini par requête).
+
+Limites réelles du design actuel (acceptables en prototype, à connaître) :
+- cache d'embeddings **par processus** : non partagé entre instances, perdu au redémarrage ;
+- `get_all_records()` relit tout l'onglet à chaque vérification de signature ;
+- aucune écriture concurrente sûre (course possible entre `ingest.py` et l'agent `veille`).
+
+**Déclencheurs de migration** (un seul suffit) : FAQ > ~1 000 lignes · plus d'une instance de
+l'app · p95 de récupération > ~2 s · besoin de filtres métadonnées / recherche hybride.
+
+Exemples réels : la FAQ produit de 200 lignes d'une PME → Sheets suffit indéfiniment ; importer
+les 50 000 articles d'un helpdesk Zendesk → vector DB obligatoire.
+
+### 11.2 Quel vector DB plus tard — décision : Supabase (pgvector)
+
+| Option | Coût | Points forts | Limites | Nœud n8n natif ? |
+|---|---|---|---|---|
+| **Supabase (pgvector)** ⭐ **décision actée** | Free tier (500 Mo, sans carte) | UN service gratuit couvre TOUT : vector store + Postgres (`PostgresSaver` + table Leads + auth) | Projet gratuit en pause après 7 j d'inactivité (réveil en 1 clic) | ✅ (les templates « Agentic RAG » n8n l'utilisent) |
+| Qdrant Cloud free | 1 Go gratuit à vie, sans carte | Dédié vecteur, jamais en pause | Ne résout QUE le vecteur | ✅ |
+| Chroma (embarqué) | 0 € (pip install) | Zéro serveur, migration la plus simple | Mono-instance | ❌ |
+| Pinecone free | Gratuit mais propriétaire | — | Lock-in, limites floues | ✅ |
+
+**Décision (2026-07-10) : Supabase (pgvector)** sera la cible de migration — un seul free tier
+remplace à la fois le vector DB, le `MemorySaver` (→ `PostgresSaver`) et à terme l'onglet Leads,
+et c'est ce que les workflows « Agentic RAG » n8n (l'inspiration d'origine du projet) utilisent
+nativement. Qdrant reste le plan B si la pause de 7 jours gêne.
+
+### 11.3 Quelles données dans le vector DB, d'où viennent-elles, est-ce automatique ?
+
+Trois familles — c'est l'onglet FAQ d'aujourd'hui, généralisé. **Rien à acheter, aucun corpus
+externe à trouver : le workflow produit et ingère déjà ces données**, la migration ne change que
+le lieu de stockage.
+
+1. **Connaissance produit** (paires Q/R) — *source : documents fournis par l'entreprise* (docs
+   produit, grille tarifaire, CGV, fiches techniques). *Alimentation : semi-automatique* —
+   l'humain fournit le document, `ingest.py` / l'uploader Streamlit fait le découpage Q/R et
+   l'écriture. **Déjà construit.**
+2. **Connaissance auto-apprise** — *sources :* l'agent `veille` (web) et, à ajouter, **chaque
+   proposition validée** : au clic « Valider », la paire (besoin du prospect → proposition
+   approuvée) peut être archivée automatiquement comme exemple pour le `stratege` (« retrouve
+   3 devis passés similaires » = few-shot récupéré, 0 appel web, 0 coût). *Alimentation :
+   automatique* — MAIS la partie web (veille) exige le staging humain (§11.4, item 6) ;
+   l'auto-apprentissage sur les validations est sûr, car déjà validé par l'humain.
+3. **Historique relationnel** — *source : les leads/échanges passés* (aujourd'hui cherchés par
+   simple égalité d'expéditeur dans `find_leads_by_sender`) ; vectorisés, ils permettraient « ce
+   prospect ressemble à tel client gagné ». *Alimentation : automatique* (chaque lead validé).
+
+### 11.4 Ce qui manque pour un usage réel — la boucle n'est pas bouclée
+
+Le constat central : **le brouillon validé ne part jamais** — après « Valider », la proposition
+reste affichée dans Streamlit et le commercial doit la copier-coller. Priorités :
+
+**P0 — Boucler la boucle (sans ça, aucune entreprise ne l'utilise)**
+
+1. ✅ **Fait — Créer la réponse dans Gmail** après « Valider » : `action_node` appelle
+   `gmail_reader.create_draft_reply()`, qui crée un **brouillon Gmail dans le fil d'origine**
+   (`threadId` + en-têtes `In-Reply-To`/`References` corrects, scope `gmail.modify` déjà accordé) —
+   le commercial relit dans Gmail et clique Envoyer, rien n'est jamais auto-envoyé. Vérifié : compile
+   + run CLI mock sans régression (le brouillon n'est créé que si l'e-mail vient de Gmail, via
+   `gmail_message_id`). Modèle Fyxer/Superhuman : l'IA drafte dans la boîte, l'humain envoie.
+2. ✅ **Fait — Notification humaine** : [notify.py](notify.py) tente Slack (`SLACK_WEBHOOK_URL`,
+   webhook entrant gratuit) puis un e-mail à soi-même via l'API Gmail déjà authentifiée
+   (`NOTIFY_EMAIL`, zéro nouveau service) — chaîne de repli gracieux, comme Tavily/Gemini. Appelé
+   par un nouveau nœud `notification_node` juste avant la pause de validation (sauf SPAM/AUTRE).
+   Vérifié : run CLI complet sans les deux variables (repli gracieux, log "aucun canal configuré",
+   pas de crash) + webhook volontairement invalide (404 absorbé, `send()` renvoie `False`). Pas
+   encore testé contre un vrai canal Slack/e-mail (aucune destination configurée pour l'instant).
+   Sans signal, l'outil devient une page qu'on oublie d'ouvrir — or la latence de réponse est LE
+   facteur de conversion inbound (répondre < 1 h vs > 24 h change radicalement le taux de contact).
+3. ✅ **Fait — Intake automatique + traitement par lot** : [poller.py](poller.py), un process
+   séparé (`python poller.py`, indépendant de Streamlit) qui interroge `list_unread_emails` toutes
+   les `POLL_INTERVAL_SECONDS` (défaut 60s), fait avancer chaque nouvel e-mail dans le graphe
+   jusqu'à la même pause de validation que le flux manuel (jamais au-delà — un humain valide
+   toujours), et l'enregistre dans [queue_store.py](queue_store.py) (registre SQLite local,
+   `queue.sqlite`) pour ne pas le retraiter à chaque cycle (l'e-mail reste `UNREAD` côté Gmail
+   jusqu'à validation). L'UI affiche une section « File d'attente » en haut de la sidebar ; un
+   clic sur « Ouvrir » charge l'état déjà calculé (pas de re-calcul) via `load_queued_thread()`.
+   Vérifié en direct (sans écrire sur le vrai CRM) : mise en file → visible dans l'UI → chargement
+   de l'état en pause → retrait de la file après validation simulée. Rôle naturel du futur shell
+   n8n (trigger Gmail natif remplacerait le poller maison).
+4. ✅ **Fait — Persistance du checkpointer** : `MemorySaver` → `SqliteSaver`
+   (`langgraph-checkpoint-sqlite`, fichier local `checkpoints.sqlite`, 0 €). Vérifié en direct :
+   une analyse lancée dans un process Python, puis relue dans un second process totalement
+   indépendant (nouvelle connexion SQLite = redémarrage simulé), récupère l'état intact (pause,
+   classification, proposition). Migration future vers `PostgresSaver` (Supabase) inchangée au
+   §11.2 si le volume l'exige.
+5. **Router TOUTES les catégories** : `SUPPORT` et `AUTRE` sont classés puis… abandonnés. Réel :
+   SUPPORT → transfert boîte support / ticket ; AUTRE-candidature → transfert RH. Une
+   classification sans action de routage ne fait que la moitié du travail d'un triage humain.
+6. ✅ **Fait — Staging pour l'agent `veille`** (défaut de conception corrigé) : la FAQ a désormais
+   une colonne `Statut` (`Question | Réponse | Statut`, en-tête legacy 2 colonnes étendu
+   automatiquement) ; `veille` écrit avec `statut="à valider"`, invisible du RAG
+   (`sheets._get_knowledge_records()` filtre `à valider`/`rejeté`) jusqu'à validation humaine via le
+   panneau « FAQ en attente » de la sidebar Streamlit (`get_pending_knowledge_rows` +
+   boutons Valider/Rejeter → `approve_knowledge_row`/`reject_knowledge_row`). Scénario réel évité :
+   un prospect demande « intégrez-vous Salesforce ? », Tavily trouve la page d'un AUTRE éditeur,
+   l'agent écrit « oui » — cette ligne reste invisible du RAG jusqu'à ce qu'un humain la valide.
+   Vérifié en direct sur la vraie feuille : écriture en attente → invisible du RAG → validée →
+   visible du RAG → ligne de test supprimée (round-trip complet, aucune trace laissée).
+
+**P1 — Fiabilité (dès la première semaine d'usage réel)**
+
+7. ✅ **Fait — Relances automatiques** : [followup_store.py](followup_store.py) (registre local des
+   leads validés venant de Gmail) + [relance.py](relance.py) — pour chaque lead suivi, lit le
+   dernier message du VRAI fil Gmail (`threads().get()`, distinct du `thread_id` LangGraph) ; si
+   c'est nous qui avons parlé en dernier et que `RELANCE_DAYS` (défaut 4) sont passés, crée un
+   brouillon de relance dans le fil (`create_draft_reply`, jamais un envoi automatique) ; si c'est
+   le prospect, rien à faire. Une seule relance par lead dans cette version (pas de cadence
+   multi-round — ~80 % des ventes demandent 5+ contacts, donc une vraie cadence reste une piste
+   d'amélioration). Vérifié avec un service Gmail factice couvrant les 3 cas : prospect a répondu
+   (rien), trop tôt (rien), seuil atteint (brouillon créé + lead retiré du suivi). Trivial à
+   porter en n8n (Wait node) plus tard.
+8. ✅ **Fait — Idempotence + conscience du fil** : [queue_store.py](queue_store.py) marque un
+   e-mail `en_cours` **avant** `app.invoke()` (plus après) — un crash du poller en cours d'analyse
+   n'entraîne plus de retraitement en double (`is_known()` est déjà vrai). `mark_ready()` bascule
+   vers `en_attente` une fois la pause atteinte sans erreur ; `reset_stale()` récupère les entrées
+   bloquées en `en_cours` après un délai (défaut 15 min), pour qu'un vrai crash ne perde pas
+   l'e-mail indéfiniment. Vérifié en direct (entrée délibérément vieillie → récupérée par
+   `reset_stale`, cycle complet enqueue→mark_ready→visible dans la file). La partie « réponse du
+   prospect enrichit le lead existant » reste non traitée (nécessiterait de suivre les réponses
+   dans le fil Gmail, cf. item 7).
+9. ✅ **Fait — Retries / limites de débit** : `RetryPolicy` LangGraph (`app.RETRY_POLICY`) sur tous
+   les nœuds qui appellent une API externe (Groq/Sheets/Gemini/Tavily/Gmail), avec un prédicat
+   `_retry_on` qui étend le comportement par défaut pour couvrir aussi les 429 (le cas Groq free
+   tier ≈ 30 req/min le plus probable), en plus des 5xx/erreurs réseau déjà couverts. Jamais de
+   retry sur une erreur de programmation (`ValueError`/`TypeError`...). Vérifié en direct : une
+   erreur 429 simulée sur le premier appel d'un nœud est absorbée (2 appels, résultat correct,
+   pas de crash de `app.invoke()`).
+10. ✅ **Fait — Auth + traçabilité minimale** : gate mot de passe optionnel
+    (`ACA_UI_PASSWORD`, [ui.py](ui.py) `_check_auth()`) devant toute l'UI ; absent = pas de gate
+    (mode développement, dégradation gracieuse comme les autres options). Traçabilité :
+    [audit_log.py](audit_log.py) enregistre qui (champ « Validé par » dans la sidebar), quoi,
+    quand à chaque clic sur « Valider ». Pas un vrai système multi-utilisateurs — suffisant pour
+    un usage solo/petite équipe. Vérifié : `AppTest` headless (gate bloque sans bon mot de passe,
+    débloque avec) + appel direct de `log_validation`/`list_recent`.
+11. ✅ **Fait — Observabilité + évaluation** : traçage LangSmith activé (`LANGCHAIN_TRACING_V2`
+    + `LANGCHAIN_API_KEY` + `LANGCHAIN_PROJECT=ACA` dans `.env`) — aucun changement de code requis,
+    `langchain`/`langgraph` s'auto-instrumentent. Vérifié en direct : connexion au client confirmée
+    et 5 traces retrouvées dans le projet "ACA" (détail par nœud : `classifier`, `supervisor`,
+    `notification`...) après un run mock. [eval_dataset.json](eval_dataset.json) (50 e-mails
+    synthétiques, 10/catégorie, dont quelques cas volontairement ambigus) +
+    [eval_classifier.py](eval_classifier.py) mesurent la précision réelle du classifieur — **résultat
+    mesuré : 96 % (48/50)**, DEMANDE_DEMO/DEVIS/SPAM à 100 %, AUTRE et SUPPORT à 90 % chacun. Les 2
+    erreurs sont sur des cas ambigus délibérés (« compte suspendu par erreur » classé AUTRE au lieu
+    de SUPPORT ; un message très vague classé SPAM au lieu d'AUTRE) — cohérent avec le comportement
+    attendu, pas un signal d'alarme. À refaire périodiquement avec de vrais e-mails une fois
+    disponibles, pour suivre la précision en conditions réelles.
+12. ✅ **Fait — Créneaux réels pour DEMANDE_DEMO** : lien Calendly réel (`CALENDLY_URL`,
+    Google Meet, gratuit) ajouté **déterministiquement** par le code à la fin du brouillon quand
+    `classification == "DEMANDE_DEMO"` — jamais généré par le LLM, pour ne pas risquer une URL
+    déformée. Absent = repli gracieux (brouillon inchangé, promesse vague comme avant). Vérifié en
+    direct : le lien apparaît uniquement sur le cas `DEMANDE_DEMO` du mock, absent sur `DEVIS`.
+13. ✅ **Fait — RGPD / PII** : [retention.py](retention.py) purge les leads (onglet `Leads`),
+    leurs threads `checkpoints.sqlite` correspondants (`checkpointer.delete_thread` — retire le
+    corps brut de l'e-mail de l'état du graphe) et les entrées `queue.sqlite` validées, tous plus
+    anciens que `RETENTION_DAYS` (défaut 365 jours). Ne touche jamais `Enrichissement_Cache`
+    (données d'entreprise, pas personnelles) ni la `FAQ`. Vérifié en direct : ligne de test datée
+    de l'an 2000 insérée dans le vrai onglet Leads → supprimée par `purge_old_leads(365)`, les 6
+    vrais leads (tous de 2026) intacts. Audit des logs console confirmé : aucun ne journalise le
+    corps brut de l'e-mail, seul l'extrait déjà destiné au CRM. Bon point déjà existant : seul le
+    domaine (jamais le contenu de l'e-mail) part vers Tavily.
+
+**P2 — Échelle / produit**
+
+14. **Migration Supabase/pgvector** selon les déclencheurs du §11.1.
+15. **Vrai CRM** (HubSpot free tier / Pipedrive) à la place de l'onglet Leads — Sheets-as-CRM
+    tient pour ~1–3 commerciaux, pas au-delà (pas de pipeline, pas de relances natives, pas de
+    droits d'accès).
+16. **Multi-boîtes / multi-tenant**, **tableau de bord** (volume par catégorie, temps de réponse,
+    conversion), **pièces jointes multiples** (les vrais appels d'offres = plusieurs PDF + Word +
+    Excel ; `pdf_reader` ne lit que le premier PDF).
+
+### 11.5 Garantie 0 € + correspondance n8n
+
+Toute la stack actuelle ET recommandée reste gratuite : Groq (free tier — la seule vraie limite
+est ~30 req/min), Gemini embeddings (free tier), Tavily (1 000 req/mois), Google Sheets/Gmail API
+(gratuits), Streamlit (open source ; Community Cloud gratuit), `SqliteSaver` (fichier local),
+Supabase/Qdrant (free tiers sans carte bancaire), Calendly (plan gratuit).
+
+⚠️ **Point de vigilance : n8n Cloud est PAYANT** — pour le port n8n, utiliser **n8n self-hosted**
+(Docker, community edition gratuite).
+
+Correspondance n8n : les items P0-1/2/3 et P1-7 sont des nœuds n8n **natifs** (Gmail trigger,
+Slack, Wait) — le port n8n prévu résout donc naturellement l'intake, les notifications et les
+relances, ce qui renforce le choix de cette cible.

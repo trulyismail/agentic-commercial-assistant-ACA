@@ -94,9 +94,17 @@ def _get_knowledge_worksheet():
 
 
 def _get_knowledge_records() -> list:
-    """Renvoie les lignes de l'onglet Knowledge_Base (liste de dicts), ou [] si indisponible."""
+    """
+    Renvoie les lignes VALIDÉES de l'onglet Knowledge_Base (liste de dicts), ou [] si indisponible.
+    Exclut les lignes en attente de validation humaine (Statut = "à valider", écrites par l'agent
+    Veille — contenu web non vérifié) ou rejetées ("rejeté") ; les lignes sans colonne Statut
+    (contenu historique / ingestion documentaire, implicitement fiable) restent visibles.
+    """
     ws = _get_knowledge_worksheet()
-    return ws.get_all_records() if ws else []
+    if not ws:
+        return []
+    records = ws.get_all_records()
+    return [r for r in records if str(r.get("Statut", "")).strip().lower() not in ("à valider", "rejeté")]
 
 
 def search_knowledge_base(query: str, top_n: int = 3) -> str:
@@ -208,11 +216,16 @@ def search_knowledge_base_semantic(query: str, top_n: int = 3) -> str:
     return "\n".join(f"- Q: {q}\n  R: {r}" for _, q, r in top)
 
 
-def write_knowledge_rows(pairs: list, mode: str = "append") -> int:
+def write_knowledge_rows(pairs: list, mode: str = "append", statut: str = "validé") -> int:
     """
     Écrit des paires (question, réponse) dans l'onglet Knowledge_Base (point d'entrée de l'ingestion
-    doc/PDF → Sheets, le "remplacement du Vector DB").
-    - mode="append"  : ajoute les lignes à la suite (crée l'en-tête si l'onglet est vide).
+    doc/PDF → Sheets, le "remplacement du Vector DB"), avec une colonne `Statut` :
+    - statut="validé"    (défaut) : visible immédiatement du RAG — utilisé par l'ingestion documentaire
+      (`ingest.py`), où le contenu est fourni par un humain et donc implicitement fiable.
+    - statut="à valider" : invisible du RAG jusqu'à approbation humaine — utilisé par l'agent Veille
+      (contenu web non vérifié, cf. `get_pending_knowledge_rows`/`approve_knowledge_row`).
+    - mode="append"  : ajoute les lignes à la suite (crée l'en-tête si l'onglet est vide ; étend
+      l'en-tête legacy à 2 colonnes vers 3 sans toucher aux données existantes).
     - mode="replace" : efface l'onglet et réécrit l'en-tête + les lignes.
     Invalide le cache d'embeddings de la FAQ (recalcul au prochain RAG sémantique). Renvoie le nombre
     de lignes écrites, ou 0 en cas d'échec.
@@ -226,13 +239,16 @@ def write_knowledge_rows(pairs: list, mode: str = "append") -> int:
         return 0
 
     try:
-        rows = [[q, r] for q, r in clean]
+        rows = [[q, r, statut] for q, r in clean]
         if mode == "replace":
             ws.clear()
-            ws.update(range_name="A1", values=[["Question", "Réponse"], *rows])
+            ws.update(range_name="A1", values=[["Question", "Réponse", "Statut"], *rows])
         else:  # append
-            if not ws.get_all_values():
-                rows = [["Question", "Réponse"], *rows]
+            existing = ws.get_all_values()
+            if not existing:
+                rows = [["Question", "Réponse", "Statut"], *rows]
+            elif len(existing[0]) < 3:
+                ws.update(range_name="C1", values=[["Statut"]])  # en-tête legacy 2 colonnes → 3
             ws.append_rows(rows)
     except Exception as e:
         print(f"⚠️ Échec de l'écriture dans la Knowledge_Base : {e}")
@@ -240,8 +256,57 @@ def write_knowledge_rows(pairs: list, mode: str = "append") -> int:
 
     # Le contenu FAQ a changé → invalider le cache d'embeddings (recalcul au prochain RAG sémantique).
     _faq_embedding_cache["signature"] = None
-    print(f"✅ [Knowledge_Base] {len(clean)} ligne(s) écrite(s) (mode={mode}).")
+    print(f"✅ [Knowledge_Base] {len(clean)} ligne(s) écrite(s) (mode={mode}, statut={statut}).")
     return len(clean)
+
+
+def get_pending_knowledge_rows() -> list:
+    """
+    Lignes de la Knowledge_Base en attente de validation humaine (Statut = "à valider"), écrites
+    automatiquement par l'agent Veille (contenu web non vérifié). Renvoie une liste de dicts
+    {row_index, question, reponse} — `row_index` = numéro de ligne réel (1-based, en-tête compris),
+    requis par `approve_knowledge_row`/`reject_knowledge_row`.
+    """
+    ws = _get_knowledge_worksheet()
+    if ws is None:
+        return []
+    try:
+        records = ws.get_all_records()
+    except Exception as e:
+        print(f"⚠️ Lecture des lignes en attente échouée : {e}")
+        return []
+
+    pending = []
+    for i, row in enumerate(records, start=2):  # ligne 1 = en-tête
+        if str(row.get("Statut", "")).strip().lower() == "à valider":
+            q, r = _row_qr(row)
+            if q and r:
+                pending.append({"row_index": i, "question": q, "reponse": r})
+    return pending
+
+
+def _set_knowledge_status(row_index: int, statut: str) -> bool:
+    """Met à jour la colonne Statut (C) d'une ligne de la Knowledge_Base par son numéro de ligne."""
+    ws = _get_knowledge_worksheet()
+    if ws is None:
+        return False
+    try:
+        ws.update_cell(row_index, 3, statut)
+    except Exception as e:
+        print(f"⚠️ Mise à jour du statut (ligne {row_index}) échouée : {e}")
+        return False
+    _faq_embedding_cache["signature"] = None  # la visibilité RAG change → invalider le cache
+    return True
+
+
+def approve_knowledge_row(row_index: int) -> bool:
+    """Valide une ligne en attente (agent Veille) : elle devient visible du RAG sémantique/mots-clés."""
+    return _set_knowledge_status(row_index, "validé")
+
+
+def reject_knowledge_row(row_index: int) -> bool:
+    """Rejette une ligne en attente (agent Veille) : reste dans la feuille pour audit, invisible du RAG."""
+    return _set_knowledge_status(row_index, "rejeté")
 
 
 def _open_spreadsheet():

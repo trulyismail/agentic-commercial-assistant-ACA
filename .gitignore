@@ -4,7 +4,6 @@ venv/
 # Secrets — NE JAMAIS committer les clés API
 .env
 credentials/
-*.json
 
 # Cache Python
 __pycache__/
@@ -19,3 +18,7 @@ __pycache__/
 # Fichiers temporaires
 *.log
 *.tmp
+
+# Checkpointer LangGraph (persistance des analyses en attente de validation)
+*.sqlite
+*.sqlite-journal
