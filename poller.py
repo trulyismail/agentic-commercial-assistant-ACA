@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 import app as aca_graph
 import gmail_reader
 import queue_store
-from pdf_reader import extract_text_from_pdf
+from attachment_reader import extract_text_from_attachments
 
 load_dotenv()
 
@@ -49,7 +49,7 @@ def process_one(service, summary: dict) -> None:
     thread_id = f"poll-{email['id']}"
     queue_store.enqueue(email["id"], thread_id, email["sender"], email["subject"])
 
-    attachment_text = extract_text_from_pdf(email["attachment_pdf"]) if email["attachment_pdf"] else ""
+    attachment_text = extract_text_from_attachments(email["attachments"])
     config = {"configurable": {"thread_id": thread_id}}
     aca_graph.app.invoke(_initial_state(email, attachment_text), config)
 

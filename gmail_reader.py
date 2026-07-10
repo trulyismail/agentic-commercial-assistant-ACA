@@ -34,7 +34,7 @@ class EmailPayload(TypedDict):
     sender: str
     subject: str
     body: str
-    attachment_pdf: bytes | None
+    attachments: list[tuple[str, bytes]]  # (nom de fichier, contenu) — PDF/Word/Excel, cf. attachment_reader.py
     gmail_thread_id: str  # vrai threadId Gmail (distinct du thread_id LangGraph) — pour les relances
 
 
@@ -78,21 +78,27 @@ def _decode_body(payload: dict) -> str:
     return ""
 
 
-def _extract_pdf_attachment(service, message_id: str, payload: dict) -> bytes | None:
-    """Récupère le premier PDF joint au message (parcours récursif des parties MIME), s'il existe."""
+_SUPPORTED_ATTACHMENT_EXTENSIONS = (".pdf", ".docx", ".xlsx")
+
+
+def _extract_attachments(service, message_id: str, payload: dict) -> list[tuple[str, bytes]]:
+    """
+    Récupère TOUTES les pièces jointes PDF/Word/Excel du message (parcours récursif des parties
+    MIME) — un vrai appel d'offres arrive souvent avec plusieurs documents, pas un seul PDF
+    (P2 §11.4 item 16). Chaque résultat = (nom de fichier, contenu binaire décodé).
+    """
+    found: list[tuple[str, bytes]] = []
     for part in payload.get("parts", []):
         filename = part.get("filename", "")
         attachment_id = part.get("body", {}).get("attachmentId")
-        if filename.lower().endswith(".pdf") and attachment_id:
+        if filename.lower().endswith(_SUPPORTED_ATTACHMENT_EXTENSIONS) and attachment_id:
             attachment = service.users().messages().attachments().get(
                 userId="me", messageId=message_id, id=attachment_id
             ).execute()
-            return _b64url_decode(attachment["data"])
+            found.append((filename, _b64url_decode(attachment["data"])))
 
-        nested = _extract_pdf_attachment(service, message_id, part)
-        if nested:
-            return nested
-    return None
+        found.extend(_extract_attachments(service, message_id, part))
+    return found
 
 
 def list_unread_emails(service, max_results: int = 10) -> list[dict]:
@@ -127,7 +133,7 @@ def get_email(service, message_id: str) -> EmailPayload:
         "sender": headers.get("From", ""),
         "subject": headers.get("Subject", "(sans objet)"),
         "body": _decode_body(payload),
-        "attachment_pdf": _extract_pdf_attachment(service, message_id, payload),
+        "attachments": _extract_attachments(service, message_id, payload),
         "gmail_thread_id": message["threadId"],
     }
 
@@ -176,6 +182,41 @@ def create_draft_reply(service, message_id: str, to: str, subject: str, body: st
     if original_message_id:
         message["In-Reply-To"] = original_message_id
         message["References"] = original_message_id
+
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    draft = service.users().drafts().create(
+        userId="me",
+        body={"message": {"raw": raw, "threadId": original["threadId"]}},
+    ).execute()
+    return draft["id"]
+
+
+def create_forward_draft(
+    service, message_id: str, to: str,
+    original_sender: str, original_subject: str, original_body: str,
+) -> str:
+    """
+    Crée un brouillon de TRANSFERT (jamais auto-envoyé) dans le même fil que le message d'origine,
+    prérempli avec l'expéditeur/objet/corps original — pour router SUPPORT/AUTRE vers l'équipe
+    compétente (support ou RH, cf. `routing_node` dans app.py) sans jamais envoyer quoi que ce soit
+    sans relecture humaine. Même pattern que `create_draft_reply`, mais adressé à un tiers plutôt
+    qu'à l'expéditeur d'origine.
+    """
+    original = service.users().messages().get(
+        userId="me", id=message_id, format="metadata", metadataHeaders=["Subject"],
+    ).execute()
+    fwd_subject = original_subject if original_subject.lower().startswith("fwd:") else f"Fwd: {original_subject}"
+
+    body_text = (
+        "---------- Message transféré ---------\n"
+        f"De : {original_sender}\n"
+        f"Objet : {original_subject}\n\n"
+        f"{original_body}"
+    )
+
+    message = MIMEText(body_text)
+    message["To"] = to
+    message["Subject"] = fwd_subject
 
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
     draft = service.users().drafts().create(

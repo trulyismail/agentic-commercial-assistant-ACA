@@ -41,7 +41,7 @@ def creative_llm():
 # ─────────────────────────────────────────────────────────────────────────────
 class AgentState(TypedDict):
     email_raw: dict            # {sender, subject, body}
-    attachment_text: str       # Texte extrait de la pièce jointe PDF
+    attachment_text: str       # Texte extrait des pièces jointes (PDF/Word/Excel, cf. attachment_reader.py)
     classification: str        # DEMANDE_DEMO | DEVIS | SUPPORT | SPAM | AUTRE
     extracted_info: dict       # Infos structurées extraites
     faq_context: str           # Contexte RAG issu de la Knowledge_Base (Google Sheets)
@@ -62,13 +62,38 @@ class AgentState(TypedDict):
 # Catégories valides. AUTRE = e-mail légitime mais hors périmètre commercial
 # (candidature, partenariat, question générale) — à ne pas confondre avec du vrai SPAM.
 CATEGORIES_VALIDES = {"DEMANDE_DEMO", "DEVIS", "SUPPORT", "SPAM", "AUTRE"}
-# Catégories qui court-circuitent la génération de brouillon / l'écriture CRM.
-CATEGORIES_SANS_SUITE = {"SPAM", "AUTRE"}
+# Catégories qui court-circuitent la génération de brouillon / l'écriture CRM : ce ne sont pas des
+# leads commerciaux, donc jamais de Stratège ni de fiche CRM. SUPPORT y a rejoint SPAM/AUTRE (P0
+# §11.4 item 5) — une réponse commerciale (devis, réservation de démo) ne correspond pas à un
+# ticket technique ; SUPPORT/AUTRE sont à la place pris en charge par `routing_node` ci-dessous.
+CATEGORIES_SANS_SUITE = {"SPAM", "AUTRE", "SUPPORT"}
 
 # Lien de réservation réel (Calendly, gratuit) pour les demandes de démo (P1 §11.4 item 12).
 # Ajouté déterministiquement au brouillon par stratege_node (jamais généré par le LLM, pour éviter
 # qu'il déforme l'URL) — absent = repli gracieux, le brouillon reste comme avant (promesse vague).
 CALENDLY_URL = os.getenv("CALENDLY_URL", "")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Routage SUPPORT/AUTRE vers l'équipe compétente (P0 §11.4 item 5)
+# ─────────────────────────────────────────────────────────────────────────────
+# Table déclarative catégorie → destination : ajouter une nouvelle catégorie routée plus tard ne
+# demande qu'une entrée ici + une paire de variables d'environnement, sans toucher au reste du
+# graphe. Chaque destination est individuellement optionnelle (dégradation gracieuse — même
+# principe que TAVILY_API_KEY/SLACK_WEBHOOK_URL absents) : `routing_node` n'échoue jamais si rien
+# n'est configuré, il journalise juste qu'aucun canal n'était disponible.
+ROUTING_CATEGORIES = {"SUPPORT", "AUTRE"}
+ROUTING_DESTINATIONS = {
+    "SUPPORT": {
+        "label": "l'équipe support",
+        "email": os.getenv("SUPPORT_EMAIL", ""),
+        "webhook": os.getenv("SUPPORT_SLACK_WEBHOOK_URL", ""),
+    },
+    "AUTRE": {
+        "label": "les RH",
+        "email": os.getenv("HR_EMAIL", ""),
+        "webhook": os.getenv("HR_SLACK_WEBHOOK_URL", ""),
+    },
+}
 
 
 def _retry_on(exc: Exception) -> bool:
@@ -211,7 +236,7 @@ def extractor_node(state: AgentState) -> dict:
         f"Corps : {email['body']}\n"
     )
     if attachment:
-        email_text += f"\n--- PIÈCE JOINTE ---\n{attachment}\n"
+        email_text += f"\n--- PIÈCES JOINTES ---\n{attachment}\n"
 
     messages = [
         SystemMessage(content=(
@@ -302,7 +327,7 @@ def stratege_node(state: AgentState) -> dict:
             f"Expéditeur : {email.get('sender', '')}\n"
             f"Informations extraites : {json.dumps(info, ensure_ascii=False)}\n"
             f"Message original : {email['body']}\n"
-            f"Pièce jointe : {'(Présente)' if state.get('attachment_text') else '(Aucune)'}"
+            f"Pièces jointes : {'(Présentes)' if state.get('attachment_text') else '(Aucune)'}"
         )),
     ]
 
@@ -477,6 +502,60 @@ def notification_node(state: AgentState) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Routage — SUPPORT/AUTRE vers l'équipe compétente, pas vers le pipeline commercial (P0 §11.4 item 5)
+# ─────────────────────────────────────────────────────────────────────────────
+def routing_node(state: AgentState) -> dict:
+    """
+    Route SUPPORT/AUTRE vers l'équipe compétente au lieu de les laisser sans suite. No-op pour
+    DEMANDE_DEMO/DEVIS (pas dans ROUTING_CATEGORIES) et pour SPAM (aucune équipe à alerter pour du
+    spam). Deux actions indépendantes, chacune dégradée gracieusement si rien n'est configuré :
+    1. Alerte immédiate (Slack ou e-mail) — même fonction que `notify.send`, mais avec la
+       destination support/RH au lieu du canal générique des leads.
+    2. Brouillon de transfert Gmail (jamais auto-envoyé) prérempli avec le message d'origine — le
+       commercial n'a qu'à relire et cliquer Envoyer, même logique que les brouillons de réponse
+       (item P0-1). Ne s'exécute que si l'e-mail vient de Gmail ET qu'une adresse est configurée.
+    """
+    classification = state["classification"]
+    if classification not in ROUTING_CATEGORIES:
+        return {}
+
+    print(f"\n📮 [Routage] {classification} → équipe compétente...")
+    dest = ROUTING_DESTINATIONS.get(classification, {})
+    email = state["email_raw"]
+    reasons = []
+
+    message = (
+        f"ACA — e-mail {classification} à transférer à {dest.get('label', 'une autre équipe')} : "
+        f"de {email.get('sender', '?')}, objet « {email.get('subject', '(sans objet)')} »."
+    )
+    sent = notify.send(message, webhook_url=dest.get("webhook") or None, email_to=dest.get("email") or None)
+    print(f"   → {'Alerte envoyée.' if sent else 'Aucun canal d’alerte configuré.'}")
+    reasons.append(
+        f"Routage : alerte envoyée à {dest.get('label')}." if sent
+        else f"Routage : aucun canal d'alerte configuré pour {classification}."
+    )
+
+    msg_id = state.get("gmail_message_id")
+    forward_to = dest.get("email")
+    if msg_id and forward_to:
+        try:
+            import gmail_reader
+            service = gmail_reader.get_gmail_service()
+            gmail_reader.create_forward_draft(
+                service, msg_id, to=forward_to,
+                original_sender=email.get("sender", ""), original_subject=email.get("subject", ""),
+                original_body=email.get("body", ""),
+            )
+            print(f"   → Brouillon de transfert créé vers {forward_to}.")
+            reasons.append(f"Routage : brouillon de transfert créé vers {forward_to}.")
+        except Exception as e:
+            print(f"   → Échec du brouillon de transfert : {e}")
+            reasons.append(f"Routage : échec du brouillon de transfert ({e}).")
+
+    return {"reasoning_log": reasons}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Construction du graphe LangGraph (superviseur + équipe, mémoire hybride)
 # ─────────────────────────────────────────────────────────────────────────────
 #
@@ -486,8 +565,10 @@ def notification_node(state: AgentState) -> dict:
 #                                                              ├─ connaissance   (RAG sémantique)
 #                                                              ├─ veille         (Tavily si FAQ vide → enrichit la FAQ)
 #                                                              └─ stratege        (proposition)
-#          [SUPERVISEUR] --FINISH--> [notification] --interrupt-- [action] → END
-#                                     (Slack/e-mail)   (validation humaine) (write CRM + Gmail)
+#          [SUPERVISEUR] --FINISH--> [routing] → [notification] --interrupt-- [action] → END
+#                                     (SUPPORT/AUTRE   (Slack/e-mail,   (validation humaine) (write CRM + Gmail)
+#                                      → équipe,        no-op pour
+#                                      no-op sinon)     SUPPORT/AUTRE/SPAM)
 #
 # - Mémoire court terme : SqliteSaver (fichier local) conserve l'état partagé (accessible à tous
 #   les agents) pendant la pause de validation, y compris à travers un redémarrage de l'app.
@@ -503,6 +584,7 @@ workflow.add_node("enrichissement", enrichissement_node, retry_policy=RETRY_POLI
 workflow.add_node("connaissance", connaissance_node, retry_policy=RETRY_POLICY)
 workflow.add_node("veille", veille_node, retry_policy=RETRY_POLICY)
 workflow.add_node("stratege", stratege_node, retry_policy=RETRY_POLICY)
+workflow.add_node("routing", routing_node, retry_policy=RETRY_POLICY)
 workflow.add_node("notification", notification_node, retry_policy=RETRY_POLICY)
 workflow.add_node("action", action_node, retry_policy=RETRY_POLICY)
 
@@ -521,13 +603,14 @@ workflow.add_conditional_edges(
         "connaissance": "connaissance",
         "veille": "veille",
         "stratege": "stratege",
-        "FINISH": "notification",
+        "FINISH": "routing",
     },
 )
 workflow.add_edge("enrichissement", "supervisor")
 workflow.add_edge("connaissance", "supervisor")
 workflow.add_edge("veille", "supervisor")
 workflow.add_edge("stratege", "supervisor")
+workflow.add_edge("routing", "notification")
 workflow.add_edge("notification", "action")
 workflow.add_edge("action", END)
 
@@ -570,6 +653,11 @@ if __name__ == "__main__":
             "sender": "jean.candidat@gmail.com",
             "subject": "Candidature — Stage développeur",
             "body": "Bonjour, je vous envoie ma candidature spontanée pour un stage. Mon CV est en pièce jointe.",
+        },
+        {
+            "sender": "client.existant@pme-industrie.com",
+            "subject": "Problème de connexion à la plateforme",
+            "body": "Bonjour, je n'arrive plus à me connecter depuis ce matin, erreur 500. Pouvez-vous m'aider ?",
         },
     ]
 

@@ -265,9 +265,22 @@ reste affichée dans Streamlit et le commercial doit la copier-coller. Priorité
    indépendant (nouvelle connexion SQLite = redémarrage simulé), récupère l'état intact (pause,
    classification, proposition). Migration future vers `PostgresSaver` (Supabase) inchangée au
    §11.2 si le volume l'exige.
-5. **Router TOUTES les catégories** : `SUPPORT` et `AUTRE` sont classés puis… abandonnés. Réel :
-   SUPPORT → transfert boîte support / ticket ; AUTRE-candidature → transfert RH. Une
-   classification sans action de routage ne fait que la moitié du travail d'un triage humain.
+5. ✅ **Fait — Router TOUTES les catégories** : `SUPPORT` et `AUTRE` rejoignent désormais
+   `CATEGORIES_SANS_SUITE` (plus de Stratège/CRM pour elles — une proposition commerciale ne
+   correspond pas à un ticket technique ou une candidature) et sont prises en charge par un nouveau
+   nœud `routing_node`, inséré entre le superviseur (FINISH) et `notification`. Table déclarative
+   `ROUTING_DESTINATIONS` (catégorie → libellé/e-mail/webhook), pour qu'ajouter une future catégorie
+   routée ne demande qu'une entrée + une paire de variables d'environnement. Deux actions par
+   catégorie routée, chacune dégradée gracieusement (repli silencieux si rien n'est configuré, même
+   principe que Tavily/Slack/Calendly) : (a) une alerte immédiate via `notify.send()` — généralisé
+   pour accepter un webhook/e-mail/sujet différents du canal générique des leads — vers
+   `SUPPORT_EMAIL`/`SUPPORT_SLACK_WEBHOOK_URL` ou `HR_EMAIL`/`HR_SLACK_WEBHOOK_URL` ; (b) un
+   brouillon de **transfert** Gmail (`gmail_reader.create_forward_draft`, jamais auto-envoyé — même
+   pattern que `create_draft_reply`) prérempli avec le message d'origine, si l'e-mail vient de Gmail
+   et qu'une adresse est configurée. L'UI affiche SUPPORT comme AUTRE (encart + détail du routage
+   dans un panneau dépliant), sans fiche CRM ni bouton « Valider ». Vérifié : run CLI mock (cas
+   SUPPORT ajouté) sans crash, `reasoning_log` journalise correctement l'absence de canal configuré
+   (aucune destination réelle dans `.env` pour l'instant — voir note ci-dessous).
 6. ✅ **Fait — Staging pour l'agent `veille`** (défaut de conception corrigé) : la FAQ a désormais
    une colonne `Statut` (`Question | Réponse | Statut`, en-tête legacy 2 colonnes étendu
    automatiquement) ; `veille` écrit avec `statut="à valider"`, invisible du RAG
@@ -347,9 +360,22 @@ reste affichée dans Streamlit et le commercial doit la copier-coller. Priorité
 15. **Vrai CRM** (HubSpot free tier / Pipedrive) à la place de l'onglet Leads — Sheets-as-CRM
     tient pour ~1–3 commerciaux, pas au-delà (pas de pipeline, pas de relances natives, pas de
     droits d'accès).
-16. **Multi-boîtes / multi-tenant**, **tableau de bord** (volume par catégorie, temps de réponse,
-    conversion), **pièces jointes multiples** (les vrais appels d'offres = plusieurs PDF + Word +
-    Excel ; `pdf_reader` ne lit que le premier PDF).
+16. ✅ **Fait — Pièces jointes multiples (PDF + Word + Excel)** : `gmail_reader._extract_attachments`
+    parcourt maintenant récursivement TOUTES les parties MIME et collecte chaque PDF/Word(.docx)/
+    Excel(.xlsx), au lieu de s'arrêter au premier PDF trouvé. Nouveau module
+    [attachment_reader.py](attachment_reader.py) : dispatch par extension (`python-docx` pour
+    `.docx`, `openpyxl` pour `.xlsx`, réutilise `pdf_reader.extract_raw_text_from_pdf` pour `.pdf`),
+    concatène chaque pièce jointe préfixée par son nom de fichier, puis tronque l'ENSEMBLE à
+    `MAX_CHARS` (un seul budget token global par e-mail, pas un budget par fichier — sinon 5 pièces
+    jointes exploseraient le contexte LLM). `pdf_reader.py` reste inchangé pour ses usages existants
+    (ingestion Knowledge_Base, upload PDF unique) — refactorisé en interne pour exposer
+    `extract_raw_text_from_pdf` (sans troncature) + la constante `MAX_CHARS`, réutilisées par
+    `attachment_reader.py`. L'UI accepte désormais plusieurs fichiers (`accept_multiple_files=True`,
+    types `pdf`/`docx`/`xlsx`) dans le formulaire manuel. Vérifié : script de test avec un PDF + un
+    `.docx` + un `.xlsx` synthétiques → les trois textes extraits et concaténés correctement, une
+    extension non supportée (`.png`) silencieusement ignorée ; suite `python app.py` sans
+    régression. **Multi-boîtes / multi-tenant** et **tableau de bord** (volume par catégorie, temps
+    de réponse, conversion) restent à faire.
 
 ### 11.5 Garantie 0 € + correspondance n8n
 

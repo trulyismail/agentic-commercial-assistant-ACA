@@ -9,7 +9,7 @@ import gmail_reader
 import ingest
 import queue_store
 import sheets
-from pdf_reader import extract_text_from_pdf
+from attachment_reader import extract_text_from_attachments
 
 st.set_page_config(
     page_title="ACA — Assistant commercial",
@@ -66,13 +66,13 @@ NODE_STEPS = {
     "connaissance": ("Agent Connaissance : RAG sémantique (base de connaissances)", ":material/search:"),
     "veille": ("Agent Veille : recherche web (FAQ sans correspondance)", ":material/travel_explore:"),
     "stratege": ("Agent Stratège : rédaction de la proposition", ":material/edit_note:"),
+    "routing": ("Routage vers l'équipe compétente (SUPPORT/AUTRE)", ":material/forward_to_inbox:"),
     "notification": ("Notification de l'équipe commerciale", ":material/notifications_active:"),
 }
 
 CATEGORY_STYLE = {
     "DEMANDE_DEMO": ("green", ":material/videocam:"),
     "DEVIS": ("blue", ":material/request_quote:"),
-    "SUPPORT": ("orange", ":material/support_agent:"),
 }
 
 
@@ -163,7 +163,7 @@ with st.sidebar:
                     st.session_state.gmail_message_id = email["id"]
                     st.session_state.gmail_thread_id = email["gmail_thread_id"]
                     st.session_state.gmail_attachment_text = (
-                        extract_text_from_pdf(email["attachment_pdf"]) if email["attachment_pdf"] else ""
+                        extract_text_from_attachments(email["attachments"])
                     )
                 except Exception as e:
                     st.error(f"Erreur lors du chargement de l'e-mail : {e}", icon=":material/error:")
@@ -231,24 +231,27 @@ with st.container(border=True):
         body = st.text_area("Corps du message", height=150, key="email_body")
 
     with col2:
-        st.markdown("**Pièce jointe (optionnel)**")
-        uploaded_file = st.file_uploader(
-            "Importer un PDF (cahier des charges, brief...)",
-            type=["pdf"],
+        st.markdown("**Pièces jointes (optionnel)**")
+        uploaded_files = st.file_uploader(
+            "Importer un ou plusieurs documents (cahier des charges, devis, tableur...)",
+            type=["pdf", "docx", "xlsx"],
+            accept_multiple_files=True,
             label_visibility="collapsed",
         )
         if st.session_state.gmail_attachment_text:
-            st.caption(":material/attach_file: Pièce jointe PDF récupérée automatiquement depuis Gmail.")
+            st.caption(":material/attach_file: Pièce(s) jointe(s) récupérée(s) automatiquement depuis Gmail.")
 
     launch = st.button("Lancer l'analyse IA", type="primary", icon=":material/bolt:")
 
 # Bouton déclencheur de l'agent
 if launch:
-    # Extraction texte de la potentielle pièce jointe (upload manuel prioritaire sur l'import Gmail)
+    # Extraction texte des éventuelles pièces jointes (upload manuel prioritaire sur l'import Gmail)
     attachment_text = ""
-    if uploaded_file:
-        with st.spinner("Extraction du texte du PDF..."):
-            attachment_text = extract_text_from_pdf(uploaded_file.getvalue())
+    if uploaded_files:
+        with st.spinner("Extraction du texte des pièces jointes..."):
+            attachment_text = extract_text_from_attachments(
+                [(f.name, f.getvalue()) for f in uploaded_files]
+            )
     elif st.session_state.gmail_attachment_text:
         attachment_text = st.session_state.gmail_attachment_text
 
@@ -296,12 +299,29 @@ if "result" in st.session_state:
     if classif == "SPAM":
         st.error("E-mail classé comme spam. Aucune action requise.", icon=":material/block:")
 
+    elif classif == "SUPPORT":
+        st.warning(
+            "E-mail classé SUPPORT : ce n'est pas un lead commercial, donc pas de proposition ni "
+            "de fiche CRM. L'e-mail a été routé vers l'équipe support (alerte et/ou brouillon de "
+            "transfert Gmail, selon la configuration).",
+            icon=":material/support_agent:",
+        )
+        if res.get("reasoning_log"):
+            with st.expander("Détail du routage", icon=":material/network_node:"):
+                for line in res["reasoning_log"]:
+                    st.markdown(f"- {line}")
+
     elif classif == "AUTRE":
         st.info(
-            "E-mail hors périmètre commercial (candidature, partenariat, question générale). "
-            "Aucune fiche CRM n'est créée automatiquement.",
+            "E-mail hors périmètre commercial (candidature, partenariat, question générale) — "
+            "routé vers les RH (alerte et/ou brouillon de transfert Gmail, selon la "
+            "configuration). Aucune fiche CRM n'est créée automatiquement.",
             icon=":material/help:",
         )
+        if res.get("reasoning_log"):
+            with st.expander("Détail du routage", icon=":material/network_node:"):
+                for line in res["reasoning_log"]:
+                    st.markdown(f"- {line}")
 
     else:
         color, icon = CATEGORY_STYLE.get(classif, ("gray", ":material/label:"))

@@ -16,7 +16,7 @@ transient Groq/Sheets/Gemini/Tavily/Gmail errors instead of crashing `app.invoke
 
 ```
 START → classifier (8B) → memory_lookup → extractor (70B) → clarification (❓dynamic interrupt)
-      → SUPERVISOR (8B) ⇄ workers ──FINISH── notification ── interrupt ── action → END
+      → SUPERVISOR (8B) ⇄ workers ──FINISH── routing ── notification ── interrupt ── action → END
                         ├─ enrichissement (Tavily + Sheets cache → company_profile)
                         ├─ connaissance   (semantic RAG → faq_context)
                         ├─ veille         (Tavily fallback if FAQ empty → enriches FAQ tab)
@@ -25,20 +25,22 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
 
 - `classifier_node` — labels the email `DEMANDE_DEMO | DEVIS | SUPPORT | AUTRE | SPAM`. `AUTRE` =
   legitimate but out-of-scope; unknown output falls back to `AUTRE`. Valid/no-suite sets are
-  `CATEGORIES_VALIDES` / `CATEGORIES_SANS_SUITE`.
+  `CATEGORIES_VALIDES` / `CATEGORIES_SANS_SUITE` (`{SPAM, AUTRE, SUPPORT}` — none of these three are
+  sales leads, so none reach `stratege`/the CRM; `SUPPORT`/`AUTRE` are instead handled by
+  `routing_node` below).
 - `memory_lookup_node` — **long-term memory read**: `sheets.find_leads_by_sender()` fills
   `sender_history` + `is_duplicate` from the "Leads" tab. No LLM.
 - `extractor_node` — extracts `{entreprise, contact, urgence, besoin_principal}` as JSON (falls back to
   `{"raw": ...}`).
 - `clarification_node` — **interactive reasoning**: if `besoin_principal` is missing/ambiguous (and not
-  SPAM/AUTRE), calls LangGraph's dynamic `interrupt()` to ask the human one question; the answer is
-  merged into `extracted_info` on resume (`Command(resume=...)`). Otherwise passes through.
+  SPAM/AUTRE/SUPPORT), calls LangGraph's dynamic `interrupt()` to ask the human one question; the
+  answer is merged into `extracted_info` on resume (`Command(resume=...)`). Otherwise passes through.
 - `supervisor_node` — **orchestrator** (Llama-8B): picks the next worker
   (`enrichissement | connaissance | stratege | FINISH`) from `completed_agents`, with deterministic
-  guardrails (SPAM/AUTRE→FINISH; never repeat an agent; `stratege` last; FINISH after it; `veille`
-  forced right after `connaissance` if `faq_context` is still empty — not offered to the LLM as a free
-  choice, purely a deterministic guardrail). Appends to `reasoning_log`. Workers each return to the
-  supervisor (`add_conditional_edges`).
+  guardrails (SPAM/AUTRE/SUPPORT→FINISH; never repeat an agent; `stratege` last; FINISH after it;
+  `veille` forced right after `connaissance` if `faq_context` is still empty — not offered to the LLM
+  as a free choice, purely a deterministic guardrail). Appends to `reasoning_log`. Workers each return
+  to the supervisor (`add_conditional_edges`).
 - `enrichissement_node` — **hybrid-memory agent**: `enrichment.research_company()` reads the
   `Enrichissement_Cache` tab first, else calls Tavily (free tier) and caches. Graceful fallback (`""`)
   if the domain is generic / `TAVILY_API_KEY` absent / error.
@@ -60,8 +62,17 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   worker. For `DEMANDE_DEMO`, appends the real Calendly link (`CALENDLY_URL`) to the draft
   **deterministically in code** (not LLM-generated, to avoid a mangled URL) — absent = graceful
   no-op, draft unchanged (vague promise, as before).
+- `routing_node` — routes `SUPPORT`/`AUTRE` to the right team instead of dropping them after
+  classification (P0 §11.4 item 5; no-op for `DEMANDE_DEMO`/`DEVIS`/`SPAM`). Declarative
+  `ROUTING_DESTINATIONS` dict (category → label/email/webhook) so adding a future routed category is
+  one dict entry + one env-var pair. Two independent, gracefully-degrading actions per routed
+  category: (1) an immediate alert via `notify.send()` (generalized to accept a webhook/email/subject
+  override) to `SUPPORT_EMAIL`/`SUPPORT_SLACK_WEBHOOK_URL` or `HR_EMAIL`/`HR_SLACK_WEBHOOK_URL`; (2) a
+  Gmail **forward** draft (`gmail_reader.create_forward_draft`, never auto-sent — same pattern as
+  `create_draft_reply`) prefilled with the original message, only if Gmail-sourced and a destination
+  address is configured. Sits between the supervisor's FINISH and `notification` in the graph.
 - `notification_node` — alerts a human that an analysis is waiting to be validated, right before the
-  pause (skipped for `SPAM`/`AUTRE` — nothing to validate there). `notify.send()` tries Slack
+  pause (skipped for `SPAM`/`AUTRE`/`SUPPORT` — nothing to validate there). `notify.send()` tries Slack
   (`SLACK_WEBHOOK_URL`) then a real Gmail send-to-self (`NOTIFY_EMAIL` — an internal alert, not a
   customer-facing action, so auto-sending doesn't violate the "drafts and waits" rule); no-ops if
   neither is configured.
@@ -125,10 +136,12 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   removes the raw email body from graph state), and old validated `queue.sqlite` entries older
   than the retention window. Never touches `Enrichissement_Cache` (company data, not personal) or
   `FAQ`. Run via `python retention.py`, meant to be scheduled (e.g. weekly).
-- [notify.py](notify.py) — `send(message)`: Slack webhook (`SLACK_WEBHOOK_URL`) then Gmail
-  send-to-self (`NOTIFY_EMAIL`) as a graceful-degradation chain, same pattern as
-  `enrichment.py`/`veille.py`. Called by `notification_node`. `python notify.py` sends a one-off
-  test message on whichever channel is configured.
+- [notify.py](notify.py) — `send(message, webhook_url=None, email_to=None, subject=None)`: Slack
+  webhook (`SLACK_WEBHOOK_URL`, or `webhook_url` override) then Gmail send-to-self (`NOTIFY_EMAIL`,
+  or `email_to` override) as a graceful-degradation chain, same pattern as `enrichment.py`/`veille.py`.
+  Called by `notification_node` (generic leads channel) and `routing_node` (per-category
+  `SUPPORT_EMAIL`/`HR_EMAIL` overrides). `python notify.py` sends a one-off test message on whichever
+  channel is configured.
 - [ingest.py](ingest.py) — knowledge ingestion: `ingest_document(source, mode)` extracts text (PDF via
   `pdf_reader`, or `.md`/`.txt`), asks Groq to split it into Q/R pairs, and writes them to the
   Knowledge_Base tab via `sheets.write_knowledge_rows`. CLI (`python ingest.py <path> [append|replace]`)
@@ -162,12 +175,15 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   `SPAM`/`AUTRE` show an info/error box and no validation button.
 - [gmail_reader.py](gmail_reader.py) — Gmail API integration (OAuth "installed app" flow):
   `get_gmail_service()` (auths, caches token in `credentials/gmail_token.json`), `list_unread_emails()`,
-  `get_email()` (body + first PDF attachment, decoded, plus the real Gmail `gmail_thread_id` — used
-  by `relance.py`, distinct from the LangGraph `thread_id` used everywhere else),
-  `mark_as_processed()` (removes `UNREAD`, adds
+  `get_email()` (body + **all** PDF/Word/Excel attachments — `_extract_attachments()` walks every
+  MIME part recursively instead of stopping at the first PDF, P2 §11.4 item 16 — plus the real
+  Gmail `gmail_thread_id` — used by `relance.py`, distinct from the LangGraph `thread_id` used
+  everywhere else), `mark_as_processed()` (removes `UNREAD`, adds
   `ACA-Traite` label, creating it if needed), `create_draft_reply()` (creates a Gmail draft in the
   original thread — correct `threadId` + `In-Reply-To`/`References` headers — so the drafted proposal
-  is ready to reread and send, never auto-sent). First run requires an interactive browser consent —
+  is ready to reread and send, never auto-sent), `create_forward_draft()` (same never-auto-sent draft
+  pattern, but addressed to a third party — support/HR — instead of replying to the original sender;
+  used by `routing_node` for `SUPPORT`/`AUTRE`). First run requires an interactive browser consent —
   see Setup notes below.
 - [sheets.py](sheets.py) — Google Sheets integration via `gspread` + service account:
   `get_sheet()` (opens the "Leads" tab), `search_knowledge_base_semantic(query)` (Gemini embeddings +
@@ -189,7 +205,19 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   an in-memory dict (`_faq_embedding_cache`), recomputed only when the FAQ tab's visible content
   changes — so a normal run costs one Gemini call for the query, not one per FAQ row.
 - [pdf_reader.py](pdf_reader.py) — `extract_text_from_pdf()` using PyMuPDF (`fitz`); accepts bytes or a
-  path; truncates output to 15,000 chars to bound LLM token usage.
+  path; truncates output to `MAX_CHARS` (15,000) to bound LLM token usage. Used as-is by
+  `ingest.py`/the Knowledge_Base uploader (single PDF, unchanged). Internally also exposes
+  `extract_raw_text_from_pdf()` (no truncation) + the `MAX_CHARS` constant, reused by
+  `attachment_reader.py` below so multi-file truncation happens once, on the combined text.
+- [attachment_reader.py](attachment_reader.py) — `extract_text_from_attachments(attachments)`: the
+  multi-format email-attachment path (P2 §11.4 item 16) — a real RFP arrives with several PDF/Word/
+  Excel documents, not one PDF. Dispatches by extension (`.pdf` → `pdf_reader.extract_raw_text_from_pdf`,
+  `.docx` → `python-docx`, `.xlsx` → `openpyxl`, reading all sheets), concatenates each file prefixed
+  by its filename, then truncates the **combined** text to `MAX_CHARS` once (not per file, so N
+  attachments can't blow up the LLM context). Unsupported extensions / failed extraction are
+  silently skipped (graceful degradation, same pattern as the rest of the project). Consumed by
+  `gmail_reader.get_email()`'s `attachments` list, `poller.py`, and `ui.py`'s manual multi-file
+  uploader.
 - [setup_sheets.py](setup_sheets.py) — one-off script to insert/bold-format the "Leads" header row.
 - [setup_faq.py](setup_faq.py) — one-off script to seed sample Q&A into the "FAQ" tab.
 - [format_sheets.py](format_sheets.py) — one-off, idempotent visual polish for all 3 tabs: frozen +
@@ -209,7 +237,8 @@ LangGraph (supervisor graph, `SqliteSaver`, static + dynamic `interrupt`) · `la
 (Gemini embeddings, free tier, semantic RAG only) · `tavily-python` (web enrichment, free tier) ·
 Streamlit (Fluent theme via [.streamlit/config.toml](.streamlit/config.toml)) · `gspread` + `google-auth`
 (Google Sheets as CRM + knowledge base) · `google-api-python-client` + `google-auth-oauthlib` (Gmail) ·
-PyMuPDF · `python-dotenv`. Pinned in [requirements.txt](requirements.txt).
+PyMuPDF (PDF) · `python-docx` (Word) · `openpyxl` (Excel) · `python-dotenv`. Pinned in
+[requirements.txt](requirements.txt).
 
 Required env vars (`.env`, gitignored): `GOOGLE_SERVICE_ACCOUNT_FILE`, `GOOGLE_SHEETS_ID`, a Groq API
 key for `langchain_groq`, `GOOGLE_API_KEY` (Gemini, for `search_knowledge_base_semantic`; RAG silently
@@ -225,9 +254,11 @@ webhook steps, no new account needed for `NOTIFY_EMAIL` since it reuses the exis
 `ACA_FOLLOWUP_DB` (default `followup.sqlite`) / `RELANCE_DAYS` (default `4`) for
 [relance.py](relance.py), optionally `LANGCHAIN_TRACING_V2=true` + `LANGCHAIN_API_KEY` +
 `LANGCHAIN_PROJECT` for LangSmith tracing (free tier, 5k traces/mo — no code change needed,
-`langchain`/`langgraph` auto-instrument from these env vars alone), and optionally `CALENDLY_URL`
+`langchain`/`langgraph` auto-instrument from these env vars alone), optionally `CALENDLY_URL`
 (real booking link appended to `DEMANDE_DEMO` proposals by `stratege_node`; absent = vague promise
-as before).
+as before), and optionally `SUPPORT_EMAIL` / `SUPPORT_SLACK_WEBHOOK_URL` / `HR_EMAIL` /
+`HR_SLACK_WEBHOOK_URL` for `routing_node` (each independently optional; absent = graceful no-op,
+same pattern as everything else — see `ACAM_roadmap.md` §11.4 item 5).
 
 `credentials/` (gitignored) holds `service_account.json` (Sheets) and `gmail_credentials.json` (Gmail
 OAuth client secret, "installed app" type). `gmail_token.json` is created there on first Gmail auth.
@@ -255,8 +286,11 @@ afterward.
 - ✅ **Fixed**: P0 item 2 (Slack/e-mail notification) is now coded (`notify.py` + `notification_node`,
   graceful no-op without `SLACK_WEBHOOK_URL`/`NOTIFY_EMAIL`) — not yet exercised against a real
   webhook/inbox (no destination configured in `.env` yet, only the graceful-fallback path verified).
-- P0 item 5 (routing `SUPPORT`/`AUTRE` to real destinations) from `ACAM_roadmap.md` §11.4 remains
-  explicitly deferred — no support/HR destination address configured yet.
+- ✅ **Fixed**: P0 item 5 (routing `SUPPORT`/`AUTRE`) is now coded (`routing_node` + declarative
+  `ROUTING_DESTINATIONS`, alert via generalized `notify.send()` + Gmail forward draft via
+  `gmail_reader.create_forward_draft()`) — same as item 2, only the graceful-fallback path is
+  verified so far; `SUPPORT_EMAIL`/`HR_EMAIL`/webhooks are left commented-out in `.env` pending real
+  addresses.
 - `TAVILY_API_KEY` is not set in the current `.env`, so the enrichment agent always hits its graceful
   fallback (`company_profile = ""`); the Tavily + `Enrichissement_Cache` path is coded and unit-safe but
   not yet exercised against the live API.
@@ -281,14 +315,16 @@ phase: document ingestion → Sheets, supervisor + enrichissement/connaissance/s
 and interactive clarification (dynamic `interrupt`). See `ACAM_roadmap.md`. A fourth worker, `veille`
 (web search that self-enriches the FAQ tab when `connaissance` finds nothing), was added afterward —
 wired into the graph and verified not to loop/crash, though its trigger condition rarely fires against
-the current 2-row FAQ seed data (see Known gaps). Five of the six §11.4 P0 production gaps are now
-closed: Gmail draft-reply after "Valider" (item 1, live-verified), background intake via
+the current 2-row FAQ seed data (see Known gaps). **All six §11.4 P0 production gaps are now
+closed**: Gmail draft-reply after "Valider" (item 1, live-verified), background intake via
 `poller.py` + the "File d'attente" sidebar (item 3, live-verified without touching the real CRM),
 `SqliteSaver` persistence surviving a simulated restart (item 4, live-verified), human-facing
 notification via `notify.py` (item 2, coded + graceful-fallback path verified, not yet exercised
-against a real Slack/e-mail destination), and human staging/approval for `veille`'s web content
-(item 6, live-verified). Item 5 (routing `SUPPORT`/`AUTRE` to real destinations) remains explicitly
-deferred pending a support/HR address. Also done this session: `format_sheets.py` visual polish
+against a real Slack/e-mail destination), human staging/approval for `veille`'s web content
+(item 6, live-verified), and routing `SUPPORT`/`AUTRE` via `routing_node` (item 5, coded +
+graceful-fallback path verified — `SUPPORT` now bypasses Stratège/CRM like SPAM/AUTRE, alert +
+Gmail forward draft ready as soon as real `SUPPORT_EMAIL`/`HR_EMAIL` destinations are configured).
+Also done this session: `format_sheets.py` visual polish
 (frozen/bold headers, conditional coloring, wrapped columns) on all 3 Sheets tabs, and 4 of the 7
 §11.4 P1 items — `RetryPolicy` on every external-call node (item 9, verified with a simulated 429),
 idempotent `poller.py` intake via `en_cours`/`en_attente` staging + `reset_stale()` (item 8, verified
@@ -302,7 +338,14 @@ follow-up triggered), LangSmith tracing (item 11 — connection + 5 traces live-
 project, plus a 50-email labeled eval set (`eval_dataset.json` + `eval_classifier.py`) that measured
 **96% classifier accuracy** (48/50), with the 2 errors both on deliberately ambiguous cases), and a
 real Calendly link appended deterministically to `DEMANDE_DEMO` drafts (item 12, verified: link
-present on the `DEMANDE_DEMO` mock case, absent on `DEVIS`). **All 7 §11.4 P1 items are now done.**
-Remaining: item 5, exercise `notify.py`/the enrichment agent/`veille`/`relance.py` against real
-Slack+`TAVILY_API_KEY`+Gmail-thread-with-a-reply credentials, tune the RAG similarity threshold,
-§11.4 P2, and the eventual n8n port (design already n8n-ready).
+present on the `DEMANDE_DEMO` mock case, absent on `DEVIS`). **All 7 §11.4 P1 items are now done,
+and so are all 6 §11.4 P0 items.** Also done: the multi-attachment part of P2 item 16 —
+`gmail_reader.py` now collects every PDF/Word/Excel attachment instead of just the first PDF, and
+the new [attachment_reader.py](attachment_reader.py) extracts/concatenates all of them (capped once
+at `MAX_CHARS`, not per file); verified with a synthetic PDF+docx+xlsx test (all three extracted,
+an unsupported extension silently skipped) and a full `python app.py` regression run. Remaining:
+exercise `notify.py`/`routing_node`/the enrichment agent/`veille`/`relance.py` against real
+Slack+`TAVILY_API_KEY`+support/HR-address+Gmail-thread-with-a-reply credentials, tune the RAG
+similarity threshold, the rest of §11.4 P2 (real CRM, multi-tenant, dashboard — item 14 stays
+gated behind the migration triggers in §11.1, none of which have fired yet), and the eventual n8n
+port (design already n8n-ready).

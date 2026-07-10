@@ -20,8 +20,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def _notify_slack(message: str) -> bool:
-    webhook_url = os.getenv("SLACK_WEBHOOK_URL")
+def _notify_slack(message: str, webhook_url: str | None = None) -> bool:
+    webhook_url = webhook_url or os.getenv("SLACK_WEBHOOK_URL")
     if not webhook_url:
         return False
     try:
@@ -33,8 +33,8 @@ def _notify_slack(message: str) -> bool:
         return False
 
 
-def _notify_email(message: str) -> bool:
-    to = os.getenv("NOTIFY_EMAIL")
+def _notify_email(message: str, to: str | None = None, subject: str | None = None) -> bool:
+    to = to or os.getenv("NOTIFY_EMAIL")
     if not to:
         return False
     try:
@@ -42,7 +42,7 @@ def _notify_email(message: str) -> bool:
         service = gmail_reader.get_gmail_service()
         mime = MIMEText(message)
         mime["To"] = to
-        mime["Subject"] = "ACA — nouveau lead en attente de validation"
+        mime["Subject"] = subject or "ACA — nouveau lead en attente de validation"
         raw = base64.urlsafe_b64encode(mime.as_bytes()).decode()
         service.users().messages().send(userId="me", body={"raw": raw}).execute()
         return True
@@ -51,11 +51,21 @@ def _notify_email(message: str) -> bool:
         return False
 
 
-def send(message: str) -> bool:
-    """Tente Slack puis e-mail. Renvoie True si un canal a réussi, False sinon (silencieux)."""
-    if _notify_slack(message):
+def send(
+    message: str,
+    webhook_url: str | None = None,
+    email_to: str | None = None,
+    subject: str | None = None,
+) -> bool:
+    """
+    Tente Slack puis e-mail. Renvoie True si un canal a réussi, False sinon (silencieux).
+    `webhook_url`/`email_to`/`subject` permettent à un appelant de cibler une destination différente
+    du canal générique (`SLACK_WEBHOOK_URL`/`NOTIFY_EMAIL`) — ex. router SUPPORT/AUTRE vers une
+    boîte support ou RH (cf. `routing_node` dans app.py) sans dupliquer cette logique d'envoi.
+    """
+    if _notify_slack(message, webhook_url):
         return True
-    if _notify_email(message):
+    if _notify_email(message, email_to, subject):
         return True
     return False
 
