@@ -13,7 +13,7 @@ import os
 import sqlite3
 from datetime import datetime, timedelta
 
-DB_PATH = os.getenv("ACA_QUEUE_DB", "queue.sqlite")
+DB_PATH = os.getenv("ACA_QUEUE_DB", "data/queue.sqlite")
 
 
 def _connect() -> sqlite3.Connection:

@@ -4,7 +4,7 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
-import vector_store
+from . import vector_store
 
 # Charger les variables d'environnement
 load_dotenv()

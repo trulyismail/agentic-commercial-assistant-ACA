@@ -9,10 +9,8 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import interrupt, RetryPolicy, default_retry_on
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
-import sheets
-import enrichment
-import veille
-import notify
+from aca.integrations import sheets, notify
+from aca.agents import enrichment, veille
 
 # Charger toutes les clés API du fichier .env
 load_dotenv()
@@ -632,7 +630,7 @@ if DATABASE_URL:
     checkpointer = PostgresSaver(_pg_pool)
     checkpointer.setup()  # idempotent : crée les tables si absentes
 else:
-    CHECKPOINT_DB = os.getenv("ACA_CHECKPOINT_DB", "checkpoints.sqlite")
+    CHECKPOINT_DB = os.getenv("ACA_CHECKPOINT_DB", "data/checkpoints.sqlite")
     _checkpoint_conn = sqlite3.connect(CHECKPOINT_DB, check_same_thread=False)
     checkpointer = SqliteSaver(_checkpoint_conn)
 app = workflow.compile(checkpointer=checkpointer, interrupt_before=["action"])

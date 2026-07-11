@@ -15,11 +15,10 @@ import time
 import traceback
 from dotenv import load_dotenv
 
-import analytics_store
-import app as aca_graph
-import gmail_reader
-import queue_store
-from attachment_reader import extract_text_from_attachments
+from aca.storage import analytics_store, queue_store
+from aca.core import app as aca_graph
+from aca.integrations import gmail_reader
+from aca.ingestion.attachment_reader import extract_text_from_attachments
 
 load_dotenv()
 

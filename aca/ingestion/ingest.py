@@ -16,8 +16,8 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 
-import sheets
-from pdf_reader import extract_text_from_pdf
+from aca.integrations import sheets
+from .pdf_reader import extract_text_from_pdf
 
 load_dotenv()
 

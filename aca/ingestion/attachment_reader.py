@@ -11,7 +11,7 @@ import io
 from docx import Document
 from openpyxl import load_workbook
 
-from pdf_reader import MAX_CHARS, extract_raw_text_from_pdf
+from .pdf_reader import MAX_CHARS, extract_raw_text_from_pdf
 
 SUPPORTED_EXTENSIONS = ("pdf", "docx", "xlsx")
 

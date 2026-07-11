@@ -12,8 +12,8 @@ import os
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
-import followup_store
-import gmail_reader
+from aca.storage import followup_store
+from aca.integrations import gmail_reader
 
 load_dotenv()
 

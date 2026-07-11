@@ -208,7 +208,7 @@ aurait suffi indéfiniment ; importer les 50 000 articles d'un helpdesk Zendesk 
 | Pinecone free | Gratuit mais propriétaire | — | Lock-in, limites floues | ✅ |
 
 **Décision (2026-07-10, mise en œuvre le 2026-07-11) : Supabase (pgvector).** Un seul free tier
-sert à la fois de vector store ([vector_store.py](vector_store.py)) et de checkpointer LangGraph
+sert à la fois de vector store ([vector_store.py](aca/integrations/vector_store.py)) et de checkpointer LangGraph
 (`PostgresSaver` dans `app.py`, remplaçant `SqliteSaver`) — et c'est ce que les workflows
 « Agentic RAG » n8n (l'inspiration d'origine du projet) utilisent nativement. L'onglet Leads reste
 sur Google Sheets pour l'instant (cf. item 15, « vrai CRM » — un choix distinct, pas résolu par un
@@ -248,7 +248,7 @@ reste affichée dans Streamlit et le commercial doit la copier-coller. Priorité
    le commercial relit dans Gmail et clique Envoyer, rien n'est jamais auto-envoyé. Vérifié : compile
    + run CLI mock sans régression (le brouillon n'est créé que si l'e-mail vient de Gmail, via
    `gmail_message_id`). Modèle Fyxer/Superhuman : l'IA drafte dans la boîte, l'humain envoie.
-2. ✅ **Fait — Notification humaine** : [notify.py](notify.py) tente Slack (`SLACK_WEBHOOK_URL`,
+2. ✅ **Fait — Notification humaine** : [notify.py](aca/integrations/notify.py) tente Slack (`SLACK_WEBHOOK_URL`,
    webhook entrant gratuit) puis un e-mail à soi-même via l'API Gmail déjà authentifiée
    (`NOTIFY_EMAIL`, zéro nouveau service) — chaîne de repli gracieux, comme Tavily/Gemini. Appelé
    par un nouveau nœud `notification_node` juste avant la pause de validation (sauf SPAM/AUTRE).
@@ -257,19 +257,19 @@ reste affichée dans Streamlit et le commercial doit la copier-coller. Priorité
    encore testé contre un vrai canal Slack/e-mail (aucune destination configurée pour l'instant).
    Sans signal, l'outil devient une page qu'on oublie d'ouvrir — or la latence de réponse est LE
    facteur de conversion inbound (répondre < 1 h vs > 24 h change radicalement le taux de contact).
-3. ✅ **Fait — Intake automatique + traitement par lot** : [poller.py](poller.py), un process
-   séparé (`python poller.py`, indépendant de Streamlit) qui interroge `list_unread_emails` toutes
+3. ✅ **Fait — Intake automatique + traitement par lot** : [poller.py](aca/core/poller.py), un process
+   séparé (`python -m aca.core.poller`, indépendant de Streamlit) qui interroge `list_unread_emails` toutes
    les `POLL_INTERVAL_SECONDS` (défaut 60s), fait avancer chaque nouvel e-mail dans le graphe
    jusqu'à la même pause de validation que le flux manuel (jamais au-delà — un humain valide
-   toujours), et l'enregistre dans [queue_store.py](queue_store.py) (registre SQLite local,
-   `queue.sqlite`) pour ne pas le retraiter à chaque cycle (l'e-mail reste `UNREAD` côté Gmail
+   toujours), et l'enregistre dans [queue_store.py](aca/storage/queue_store.py) (registre SQLite local,
+   `data/queue.sqlite`) pour ne pas le retraiter à chaque cycle (l'e-mail reste `UNREAD` côté Gmail
    jusqu'à validation). L'UI affiche une section « File d'attente » en haut de la sidebar ; un
    clic sur « Ouvrir » charge l'état déjà calculé (pas de re-calcul) via `load_queued_thread()`.
    Vérifié en direct (sans écrire sur le vrai CRM) : mise en file → visible dans l'UI → chargement
    de l'état en pause → retrait de la file après validation simulée. Rôle naturel du futur shell
    n8n (trigger Gmail natif remplacerait le poller maison).
 4. ✅ **Fait — Persistance du checkpointer** : `MemorySaver` → `SqliteSaver`
-   (`langgraph-checkpoint-sqlite`, fichier local `checkpoints.sqlite`, 0 €). Vérifié en direct :
+   (`langgraph-checkpoint-sqlite`, fichier local `data/checkpoints.sqlite`, 0 €). Vérifié en direct :
    une analyse lancée dans un process Python, puis relue dans un second process totalement
    indépendant (nouvelle connexion SQLite = redémarrage simulé), récupère l'état intact (pause,
    classification, proposition). Migration future vers `PostgresSaver` (Supabase) inchangée au
@@ -303,8 +303,8 @@ reste affichée dans Streamlit et le commercial doit la copier-coller. Priorité
 
 **P1 — Fiabilité (dès la première semaine d'usage réel)**
 
-7. ✅ **Fait — Relances automatiques** : [followup_store.py](followup_store.py) (registre local des
-   leads validés venant de Gmail) + [relance.py](relance.py) — pour chaque lead suivi, lit le
+7. ✅ **Fait — Relances automatiques** : [followup_store.py](aca/storage/followup_store.py) (registre local des
+   leads validés venant de Gmail) + [relance.py](aca/core/relance.py) — pour chaque lead suivi, lit le
    dernier message du VRAI fil Gmail (`threads().get()`, distinct du `thread_id` LangGraph) ; si
    c'est nous qui avons parlé en dernier et que `RELANCE_DAYS` (défaut 4) sont passés, crée un
    brouillon de relance dans le fil (`create_draft_reply`, jamais un envoi automatique) ; si c'est
@@ -313,7 +313,7 @@ reste affichée dans Streamlit et le commercial doit la copier-coller. Priorité
    d'amélioration). Vérifié avec un service Gmail factice couvrant les 3 cas : prospect a répondu
    (rien), trop tôt (rien), seuil atteint (brouillon créé + lead retiré du suivi). Trivial à
    porter en n8n (Wait node) plus tard.
-8. ✅ **Fait — Idempotence + conscience du fil** : [queue_store.py](queue_store.py) marque un
+8. ✅ **Fait — Idempotence + conscience du fil** : [queue_store.py](aca/storage/queue_store.py) marque un
    e-mail `en_cours` **avant** `app.invoke()` (plus après) — un crash du poller en cours d'analyse
    n'entraîne plus de retraitement en double (`is_known()` est déjà vrai). `mark_ready()` bascule
    vers `en_attente` une fois la pause atteinte sans erreur ; `reset_stale()` récupère les entrées
@@ -332,7 +332,7 @@ reste affichée dans Streamlit et le commercial doit la copier-coller. Priorité
 10. ✅ **Fait — Auth + traçabilité minimale** : gate mot de passe optionnel
     (`ACA_UI_PASSWORD`, [ui.py](ui.py) `_check_auth()`) devant toute l'UI ; absent = pas de gate
     (mode développement, dégradation gracieuse comme les autres options). Traçabilité :
-    [audit_log.py](audit_log.py) enregistre qui (champ « Validé par » dans la sidebar), quoi,
+    [audit_log.py](aca/storage/audit_log.py) enregistre qui (champ « Validé par » dans la sidebar), quoi,
     quand à chaque clic sur « Valider ». Pas un vrai système multi-utilisateurs — suffisant pour
     un usage solo/petite équipe. Vérifié : `AppTest` headless (gate bloque sans bon mot de passe,
     débloque avec) + appel direct de `log_validation`/`list_recent`.
@@ -340,9 +340,9 @@ reste affichée dans Streamlit et le commercial doit la copier-coller. Priorité
     + `LANGCHAIN_API_KEY` + `LANGCHAIN_PROJECT=ACA` dans `.env`) — aucun changement de code requis,
     `langchain`/`langgraph` s'auto-instrumentent. Vérifié en direct : connexion au client confirmée
     et 5 traces retrouvées dans le projet "ACA" (détail par nœud : `classifier`, `supervisor`,
-    `notification`...) après un run mock. [eval_dataset.json](eval_dataset.json) (50 e-mails
+    `notification`...) après un run mock. [eval_dataset.json](aca/eval/eval_dataset.json) (50 e-mails
     synthétiques, 10/catégorie, dont quelques cas volontairement ambigus) +
-    [eval_classifier.py](eval_classifier.py) mesurent la précision réelle du classifieur — **résultat
+    [eval_classifier.py](aca/eval/eval_classifier.py) mesurent la précision réelle du classifieur — **résultat
     mesuré : 96 % (48/50)**, DEMANDE_DEMO/DEVIS/SPAM à 100 %, AUTRE et SUPPORT à 90 % chacun. Les 2
     erreurs sont sur des cas ambigus délibérés (« compte suspendu par erreur » classé AUTRE au lieu
     de SUPPORT ; un message très vague classé SPAM au lieu d'AUTRE) — cohérent avec le comportement
@@ -353,9 +353,9 @@ reste affichée dans Streamlit et le commercial doit la copier-coller. Priorité
     `classification == "DEMANDE_DEMO"` — jamais généré par le LLM, pour ne pas risquer une URL
     déformée. Absent = repli gracieux (brouillon inchangé, promesse vague comme avant). Vérifié en
     direct : le lien apparaît uniquement sur le cas `DEMANDE_DEMO` du mock, absent sur `DEVIS`.
-13. ✅ **Fait — RGPD / PII** : [retention.py](retention.py) purge les leads (onglet `Leads`),
-    leurs threads `checkpoints.sqlite` correspondants (`checkpointer.delete_thread` — retire le
-    corps brut de l'e-mail de l'état du graphe) et les entrées `queue.sqlite` validées, tous plus
+13. ✅ **Fait — RGPD / PII** : [retention.py](aca/core/retention.py) purge les leads (onglet `Leads`),
+    leurs threads `data/checkpoints.sqlite` correspondants (`checkpointer.delete_thread` — retire le
+    corps brut de l'e-mail de l'état du graphe) et les entrées `data/queue.sqlite` validées, tous plus
     anciens que `RETENTION_DAYS` (défaut 365 jours). Ne touche jamais `Enrichissement_Cache`
     (données d'entreprise, pas personnelles) ni la `FAQ`. Vérifié en direct : ligne de test datée
     de l'an 2000 insérée dans le vrai onglet Leads → supprimée par `purge_old_leads(365)`, les 6
@@ -367,7 +367,7 @@ reste affichée dans Streamlit et le commercial doit la copier-coller. Priorité
 
 14. ✅ **Fait (par anticipation) — Migration Supabase/pgvector**, avancée avant que les
     déclencheurs du §11.1 ne soient atteints, à la demande explicite de l'utilisateur (voir §11.1
-    pour le raisonnement complet). [vector_store.py](vector_store.py) remplace le cache
+    pour le raisonnement complet). [vector_store.py](aca/integrations/vector_store.py) remplace le cache
     d'embeddings en mémoire de `sheets.py` par une table Postgres pgvector (`faq_embeddings`),
     partagée entre `ui.py` et `poller.py` ; `app.py` utilise `PostgresSaver` au lieu de
     `SqliteSaver` pour le checkpointer quand `DATABASE_URL` est configurée. Repli gracieux complet
@@ -375,7 +375,7 @@ reste affichée dans Streamlit et le commercial doit la copier-coller. Priorité
     vrai projet Supabase de l'utilisateur** : `vector_store.search()` renvoie exactement les mêmes
     résultats que l'ancien chemin en mémoire pour la même requête ; un checkpoint écrit par un
     process (`PostgresSaver`) est relu correctement depuis un process totalement séparé (le
-    problème que cette migration visait à résoudre) ; suite complète `python app.py` (5 cas) sans
+    problème que cette migration visait à résoudre) ; suite complète `python -m aca.core.app` (5 cas) sans
     régression. Deux vrais bugs trouvés et corrigés pendant la vérification :
     (1) l'hôte de connexion directe de Supabase (`db.<ref>.supabase.co`) est IPv6 uniquement et ne
     résolvait pas sur ce réseau — corrigé en utilisant le **Session pooler** de Supabase
@@ -391,7 +391,7 @@ reste affichée dans Streamlit et le commercial doit la copier-coller. Priorité
 16. ✅ **Fait — Pièces jointes multiples (PDF + Word + Excel)** : `gmail_reader._extract_attachments`
     parcourt maintenant récursivement TOUTES les parties MIME et collecte chaque PDF/Word(.docx)/
     Excel(.xlsx), au lieu de s'arrêter au premier PDF trouvé. Nouveau module
-    [attachment_reader.py](attachment_reader.py) : dispatch par extension (`python-docx` pour
+    [attachment_reader.py](aca/ingestion/attachment_reader.py) : dispatch par extension (`python-docx` pour
     `.docx`, `openpyxl` pour `.xlsx`, réutilise `pdf_reader.extract_raw_text_from_pdf` pour `.pdf`),
     concatène chaque pièce jointe préfixée par son nom de fichier, puis tronque l'ENSEMBLE à
     `MAX_CHARS` (un seul budget token global par e-mail, pas un budget par fichier — sinon 5 pièces
@@ -401,10 +401,10 @@ reste affichée dans Streamlit et le commercial doit la copier-coller. Priorité
     `attachment_reader.py`. L'UI accepte désormais plusieurs fichiers (`accept_multiple_files=True`,
     types `pdf`/`docx`/`xlsx`) dans le formulaire manuel. Vérifié : script de test avec un PDF + un
     `.docx` + un `.xlsx` synthétiques → les trois textes extraits et concaténés correctement, une
-    extension non supportée (`.png`) silencieusement ignorée ; suite `python app.py` sans
+    extension non supportée (`.png`) silencieusement ignorée ; suite `python -m aca.core.app` sans
     régression.
 17. ✅ **Fait — Tableau de bord** (volume par catégorie, temps de réponse, conversion) : nouveau
-    module [analytics_store.py](analytics_store.py) — un registre SQLite léger qui capture
+    module [analytics_store.py](aca/storage/analytics_store.py) — un registre SQLite léger qui capture
     TOUTES les classifications (contrairement à l'onglet Sheets `Leads`, qui ne reçoit que les
     DEMANDE_DEMO/DEVIS validés, et à `audit_log.py`, qui ne trace que les validations). Trois points
     d'enregistrement : `poller.py` (source `poller`, dès que le graphe atteint la pause),

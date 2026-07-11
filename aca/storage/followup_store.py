@@ -10,7 +10,7 @@ import os
 import sqlite3
 from datetime import datetime
 
-DB_PATH = os.getenv("ACA_FOLLOWUP_DB", "followup.sqlite")
+DB_PATH = os.getenv("ACA_FOLLOWUP_DB", "data/followup.sqlite")
 
 
 def _connect() -> sqlite3.Connection:

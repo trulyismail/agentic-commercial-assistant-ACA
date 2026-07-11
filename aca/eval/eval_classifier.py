@@ -9,7 +9,7 @@ Lancement : `python eval_classifier.py`
 import json
 import os
 
-import app
+from aca.core import app
 
 DATASET_PATH = os.path.join(os.path.dirname(__file__), "eval_dataset.json")
 

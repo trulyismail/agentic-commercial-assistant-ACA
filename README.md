@@ -49,7 +49,7 @@ START → classifier → memory_lookup → extractor → clarification (❓quest
 
 Le superviseur (Llama-8B) oriente dynamiquement l'équipe ; deux interruptions humaines : *clarification*
 en cours de route (interrupt dynamique) et *validation* finale avant écriture CRM. Voir
-[ACAM_roadmap.md](ACAM_roadmap.md) pour les piliers d'innovation, la mémoire par agent et la conception
+[docs/ACAM_roadmap.md](docs/ACAM_roadmap.md) pour les piliers d'innovation, la mémoire par agent et la conception
 « n8n-ready ».
 
 ## Stack
@@ -100,15 +100,15 @@ Placer les secrets dans `credentials/` (gitignoré) :
 ## Initialisation des onglets (une seule fois)
 
 ```bash
-python setup_sheets.py           # crée/formate l'en-tête de l'onglet Leads
-python setup_faq.py              # insère des Q/R d'exemple dans l'onglet FAQ
+python scripts/setup_sheets.py   # crée/formate l'en-tête de l'onglet Leads
+python scripts/setup_faq.py      # insère des Q/R d'exemple dans l'onglet FAQ
 ```
 
 ## Alimenter la base de connaissances depuis un document (optionnel)
 
 ```bash
-python ingest.py chemin/vers/doc.pdf           # ajoute des Q/R extraites du doc à l'onglet Knowledge_Base
-python ingest.py chemin/vers/doc.md replace     # ou remplace tout le contenu existant
+python -m aca.ingestion.ingest chemin/vers/doc.pdf           # ajoute des Q/R extraites du doc à l'onglet Knowledge_Base
+python -m aca.ingestion.ingest chemin/vers/doc.md replace     # ou remplace tout le contenu existant
 ```
 
 (Également possible via l'uploader dans la barre latérale de l'interface Streamlit.)
@@ -123,22 +123,22 @@ Test rapide en ligne de commande (exécute le graphe sur 4 faux e-mails, **s'arr
 écrire au CRM**) :
 
 ```bash
-python app.py
+python -m aca.core.app
 ```
 
 ## Structure du projet
 
 | Fichier | Rôle |
 |---|---|
-| [app.py](app.py) | Graphe LangGraph multi-agents : `AgentState`, classifier/mémoire/extraction/clarification, superviseur + 3 agents workers, action, checkpointer + interruptions |
+| [app.py](aca/core/app.py) | Graphe LangGraph multi-agents : `AgentState`, classifier/mémoire/extraction/clarification, superviseur + 3 agents workers, action, checkpointer + interruptions |
 | [ui.py](ui.py) | Interface Streamlit (thème Fluent) : formulaire/import Gmail, progression en direct, clarification interactive, raisonnement, validation, uploader base de connaissances |
-| [sheets.py](sheets.py) | Google Sheets : CRM (`Leads`), base de connaissances (`FAQ`), cache d'enrichissement, RAG sémantique, écriture d'ingestion |
-| [ingest.py](ingest.py) | Ingestion doc/PDF/Markdown → Q/R (Groq) → onglet Knowledge_Base (remplace un Vector DB) |
-| [enrichment.py](enrichment.py) | Agent Enrichissement : profil entreprise via Tavily + cache Sheets (mémoire long terme) |
-| [gmail_reader.py](gmail_reader.py) | API Gmail : lecture des non-lus, extraction PDF, marquage `ACA-Traite` |
-| [pdf_reader.py](pdf_reader.py) | Extraction de texte PDF (PyMuPDF) |
-| [setup_sheets.py](setup_sheets.py) / [setup_faq.py](setup_faq.py) | Scripts d'initialisation (one-off) des onglets |
-| [CLAUDE.md](CLAUDE.md) · [ACAM_roadmap.md](ACAM_roadmap.md) · [ACA project description.md](ACA%20project%20description.md) | Documentation projet |
+| [sheets.py](aca/integrations/sheets.py) | Google Sheets : CRM (`Leads`), base de connaissances (`FAQ`), cache d'enrichissement, RAG sémantique, écriture d'ingestion |
+| [ingest.py](aca/ingestion/ingest.py) | Ingestion doc/PDF/Markdown → Q/R (Groq) → onglet Knowledge_Base (remplace un Vector DB) |
+| [enrichment.py](aca/agents/enrichment.py) | Agent Enrichissement : profil entreprise via Tavily + cache Sheets (mémoire long terme) |
+| [gmail_reader.py](aca/integrations/gmail_reader.py) | API Gmail : lecture des non-lus, extraction PDF, marquage `ACA-Traite` |
+| [pdf_reader.py](aca/ingestion/pdf_reader.py) | Extraction de texte PDF (PyMuPDF) |
+| [setup_sheets.py](scripts/setup_sheets.py) / [setup_faq.py](scripts/setup_faq.py) | Scripts d'initialisation (one-off) des onglets |
+| [CLAUDE.md](CLAUDE.md) · [docs/ACAM_roadmap.md](docs/ACAM_roadmap.md) · [docs/ACA project description.md](docs/ACA%20project%20description.md) | Documentation projet |
 
 Onglets Google Sheets — **`Leads`** : `Date · Expéditeur · Entreprise · Contact · Urgence · Besoin ·
 Catégorie · Brouillon` · **`FAQ`** (Knowledge_Base) : `Question · Réponse` · **`Enrichissement_Cache`**
@@ -148,4 +148,4 @@ Catégorie · Brouillon` · **`FAQ`** (Knowledge_Base) : `Question · Réponse` 
 
 **ACAM v2** (architecture multi-agents à superviseur, ingestion database-less, raisonnement +
 clarification interactive, mémoire hybride par agent) est implémenté et vérifié par phases. Détails,
-mémoire par agent et conception « n8n-ready » dans [ACAM_roadmap.md](ACAM_roadmap.md).
+mémoire par agent et conception « n8n-ready » dans [docs/ACAM_roadmap.md](docs/ACAM_roadmap.md).

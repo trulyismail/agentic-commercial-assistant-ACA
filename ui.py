@@ -2,15 +2,11 @@ import os
 import uuid
 import streamlit as st
 from langgraph.types import Command
-import analytics_store
-import app as aca_graph
-import audit_log
-import followup_store
-import gmail_reader
-import ingest
-import queue_store
-import sheets
-from attachment_reader import extract_text_from_attachments
+from aca.storage import analytics_store, audit_log, followup_store, queue_store
+from aca.core import app as aca_graph
+from aca.integrations import gmail_reader, sheets
+from aca.ingestion import ingest
+from aca.ingestion.attachment_reader import extract_text_from_attachments
 
 st.set_page_config(
     page_title="ACA — Assistant commercial",

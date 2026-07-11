@@ -16,7 +16,7 @@ import json
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
-import sheets
+from aca.integrations import sheets
 
 load_dotenv()
 

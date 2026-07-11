@@ -11,7 +11,7 @@ import os
 import sqlite3
 from datetime import datetime, timedelta
 
-DB_PATH = os.getenv("ACA_ANALYTICS_DB", "analytics.sqlite")
+DB_PATH = os.getenv("ACA_ANALYTICS_DB", "data/analytics.sqlite")
 
 
 def _connect() -> sqlite3.Connection:
