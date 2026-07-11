@@ -616,11 +616,25 @@ workflow.add_edge("action", END)
 
 # Checkpointer = mémoire court terme ; interrupt_before = pause Human-in-the-loop
 # juste avant l'écriture CRM. L'UI reprend le graphe (invoke(None, config)) après « Valider ».
-# SqliteSaver (fichier local, 0 €) au lieu de MemorySaver : une analyse en attente de validation
-# survit désormais à un redémarrage de l'app (le process gardait tout en RAM auparavant).
-CHECKPOINT_DB = os.getenv("ACA_CHECKPOINT_DB", "checkpoints.sqlite")
-_checkpoint_conn = sqlite3.connect(CHECKPOINT_DB, check_same_thread=False)
-checkpointer = SqliteSaver(_checkpoint_conn)
+# PostgresSaver (Supabase, P2 §11.1/§11.2 — migration avancée à la demande de l'utilisateur, avant
+# que les déclencheurs de volume ne soient atteints) si DATABASE_URL est configurée : un seul
+# Postgres partagé entre `ui.py` et `poller.py` au lieu de deux process ouvrant le même fichier
+# SQLite. Repli gracieux sur SqliteSaver (fichier local, 0 €) si absente — comportement identique
+# à avant cette migration, aucune régression pour qui n'a pas encore de Supabase configuré.
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+if DATABASE_URL:
+    from psycopg_pool import ConnectionPool
+    from langgraph.checkpoint.postgres import PostgresSaver
+
+    _pg_pool = ConnectionPool(
+        conninfo=DATABASE_URL, max_size=10, kwargs={"autocommit": True, "prepare_threshold": 0},
+    )
+    checkpointer = PostgresSaver(_pg_pool)
+    checkpointer.setup()  # idempotent : crée les tables si absentes
+else:
+    CHECKPOINT_DB = os.getenv("ACA_CHECKPOINT_DB", "checkpoints.sqlite")
+    _checkpoint_conn = sqlite3.connect(CHECKPOINT_DB, check_same_thread=False)
+    checkpointer = SqliteSaver(_checkpoint_conn)
 app = workflow.compile(checkpointer=checkpointer, interrupt_before=["action"])
 
 

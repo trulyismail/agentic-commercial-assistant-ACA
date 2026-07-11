@@ -4,6 +4,7 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
+import vector_store
 
 # Charger les variables d'environnement
 load_dotenv()
@@ -158,13 +159,43 @@ def _cosine_similarity(a: list, b: list) -> float:
     return dot / (norm_a * norm_b)
 
 
+def _embed_documents(client, pairs: list) -> list:
+    """Embeddings Gemini pour une liste de paires (question, réponse) — un appel, plusieurs docs."""
+    from google.genai import types
+
+    docs = [f"title: {q} | text: {r}" for q, r in pairs]
+    result = client.models.embed_content(
+        model=EMBEDDING_MODEL,
+        contents=docs,
+        config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
+    )
+    return [e.values for e in result.embeddings]
+
+
+def _embed_query(client, query: str) -> list:
+    """Embedding Gemini pour la requête (type RETRIEVAL_QUERY, distinct de RETRIEVAL_DOCUMENT)."""
+    from google.genai import types
+
+    result = client.models.embed_content(
+        model=EMBEDDING_MODEL,
+        contents=[query],
+        config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"),
+    )
+    return result.embeddings[0].values
+
+
 def search_knowledge_base_semantic(query: str, top_n: int = 3) -> str:
     """
     RAG sémantique : embeddings Gemini (gratuit — Groq n'expose pas d'API d'embeddings)
-    + similarité cosinus sur l'onglet Knowledge_Base (FAQ). Contrairement à
+    + recherche vectorielle sur l'onglet Knowledge_Base (FAQ). Contrairement à
     `search_knowledge_base` (recouvrement de mots-clés), capte les reformulations
     ("tarif" ~ "prix"). Se rabat automatiquement sur la recherche par mots-clés si
     GOOGLE_API_KEY est absente ou si l'appel Gemini échoue (quota, réseau, etc.).
+
+    Stockage vectoriel : `vector_store.py` (pgvector/Supabase) si `DATABASE_URL` est configurée —
+    partagé entre tous les process (`ui.py`/`poller.py`), sinon repli sur le cache en mémoire par
+    process (`_faq_embedding_cache`) + similarité cosinus calculée ici. Les deux chemins partagent
+    la même logique d'invalidation (`signature` = contenu FAQ visible actuel).
     """
     client = _get_genai_client()
     if client is None:
@@ -178,31 +209,31 @@ def search_knowledge_base_semantic(query: str, top_n: int = 3) -> str:
     if not pairs:
         return ""
 
-    from google.genai import types
-
     signature = tuple(pairs)
+
+    if vector_store.is_enabled():
+        try:
+            if _faq_embedding_cache["signature"] != signature:
+                vector_store.sync_embeddings(pairs, lambda p: _embed_documents(client, p))
+                _faq_embedding_cache["signature"] = signature
+            q_vector = _embed_query(client, query)
+            top = vector_store.search(q_vector, top_n=top_n, max_distance=0.5)
+            return "\n".join(f"- Q: {q}\n  R: {r}" for q, r in top)
+        except Exception as e:
+            print(f"⚠️ Échec pgvector (FAQ), repli sur la recherche par mots-clés : {e}")
+            return search_knowledge_base(query, top_n)
+
     if _faq_embedding_cache["signature"] != signature:
         try:
-            docs = [f"title: {q} | text: {r}" for q, r in pairs]
-            result = client.models.embed_content(
-                model=EMBEDDING_MODEL,
-                contents=docs,
-                config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
-            )
+            _faq_embedding_cache["vectors"] = _embed_documents(client, pairs)
             _faq_embedding_cache["signature"] = signature
             _faq_embedding_cache["pairs"] = pairs
-            _faq_embedding_cache["vectors"] = [e.values for e in result.embeddings]
         except Exception as e:
             print(f"⚠️ Échec des embeddings Gemini (FAQ), repli sur la recherche par mots-clés : {e}")
             return search_knowledge_base(query, top_n)
 
     try:
-        q_result = client.models.embed_content(
-            model=EMBEDDING_MODEL,
-            contents=[query],
-            config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"),
-        )
-        q_vector = q_result.embeddings[0].values
+        q_vector = _embed_query(client, query)
     except Exception as e:
         print(f"⚠️ Échec de l'embedding de la requête, repli sur la recherche par mots-clés : {e}")
         return search_knowledge_base(query, top_n)

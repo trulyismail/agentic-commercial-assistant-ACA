@@ -173,38 +173,47 @@ Classées par effort estimé (croissant) :
 Analyse de ce qu'il faudrait pour qu'une vraie entreprise utilise ce workflow au quotidien.
 Tout ce qui suit respecte la contrainte du projet : **aucun coût** (free tiers uniquement).
 
-### 11.1 Vector DB : verdict — NON pour l'instant, Sheets suffit
+### 11.1 Vector DB : verdict initial — NON nécessaire par la seule volumétrie (migré quand même, à la demande explicite de l'utilisateur)
 
-Le premier mur n'est **pas la taille de la FAQ mais les quotas de l'API Sheets** (~300 lectures/min
-par projet, 60/min par utilisateur) : c'est un polling automatique ou plusieurs instances de l'app
-qui provoqueraient des erreurs 429, bien avant que la base soit « trop grande ». La similarité
-cosinus en mémoire tient sans problème mesurable jusqu'à **~1 000–2 000 lignes** de FAQ (le cache
-`_faq_embedding_cache` de `sheets.py` ne coûte qu'un appel Gemini par requête).
+Le premier mur n'aurait **pas été la taille de la FAQ mais les quotas de l'API Sheets** (~300
+lectures/min par projet, 60/min par utilisateur) : c'est un polling automatique ou plusieurs
+instances de l'app qui auraient provoqué des erreurs 429, bien avant que la base soit « trop
+grande ». La similarité cosinus en mémoire tenait sans problème mesurable jusqu'à **~1 000–2 000
+lignes** de FAQ.
 
-Limites réelles du design actuel (acceptables en prototype, à connaître) :
+Limites réelles de l'ancien design (acceptables en prototype, corrigées par la migration ci-dessous) :
 - cache d'embeddings **par processus** : non partagé entre instances, perdu au redémarrage ;
 - `get_all_records()` relit tout l'onglet à chaque vérification de signature ;
 - aucune écriture concurrente sûre (course possible entre `ingest.py` et l'agent `veille`).
 
-**Déclencheurs de migration** (un seul suffit) : FAQ > ~1 000 lignes · plus d'une instance de
-l'app · p95 de récupération > ~2 s · besoin de filtres métadonnées / recherche hybride.
+**Déclencheurs de migration initialement prévus** (un seul aurait suffi) : FAQ > ~1 000 lignes ·
+plus d'une instance de l'app · p95 de récupération > ~2 s · besoin de filtres métadonnées /
+recherche hybride. **Aucun n'était atteint** au moment de la migration (2026-07-11) — l'utilisateur
+a choisi d'avancer la migration malgré tout, pour la valeur structurelle du vector DB partagé
+(cache non perdu au redémarrage, partagé entre `ui.py`/`poller.py`) plutôt que d'attendre un
+déclencheur de volume. Assumé consciemment : c'est en avance sur le besoin strict, mais le repli
+gracieux (`DATABASE_URL` absente) garantit qu'aucune régression n'est possible pour quiconque n'a
+pas encore configuré Supabase.
 
-Exemples réels : la FAQ produit de 200 lignes d'une PME → Sheets suffit indéfiniment ; importer
-les 50 000 articles d'un helpdesk Zendesk → vector DB obligatoire.
+Exemples réels (toujours valables comme repère) : la FAQ produit de 200 lignes d'une PME → Sheets
+aurait suffi indéfiniment ; importer les 50 000 articles d'un helpdesk Zendesk → vector DB obligatoire.
 
-### 11.2 Quel vector DB plus tard — décision : Supabase (pgvector)
+### 11.2 Quel vector DB — décision : Supabase (pgvector), ✅ implémenté
 
 | Option | Coût | Points forts | Limites | Nœud n8n natif ? |
 |---|---|---|---|---|
-| **Supabase (pgvector)** ⭐ **décision actée** | Free tier (500 Mo, sans carte) | UN service gratuit couvre TOUT : vector store + Postgres (`PostgresSaver` + table Leads + auth) | Projet gratuit en pause après 7 j d'inactivité (réveil en 1 clic) | ✅ (les templates « Agentic RAG » n8n l'utilisent) |
-| Qdrant Cloud free | 1 Go gratuit à vie, sans carte | Dédié vecteur, jamais en pause | Ne résout QUE le vecteur | ✅ |
-| Chroma (embarqué) | 0 € (pip install) | Zéro serveur, migration la plus simple | Mono-instance | ❌ |
+| **Supabase (pgvector)** ⭐ **décision actée et implémentée** | Free tier (500 Mo, sans carte) | UN service gratuit couvre TOUT : vector store + Postgres (`PostgresSaver`) | Projet gratuit en pause après 7 j d'inactivité (réveil en 1 clic) | ✅ (les templates « Agentic RAG » n8n l'utilisent) |
+| Qdrant Cloud free | 1 Go gratuit à vie, sans carte | Dédié vecteur, jamais en pause | Ne résout QUE le vecteur (il aurait fallu un Postgres séparé pour le checkpointer) | ✅ |
+| Chroma (embarqué) | 0 € (pip install) | Zéro serveur, migration la plus simple | Mono-instance — ne règle pas le partage entre `ui.py`/`poller.py`, l'un des problèmes que cette migration visait à résoudre | ❌ |
 | Pinecone free | Gratuit mais propriétaire | — | Lock-in, limites floues | ✅ |
 
-**Décision (2026-07-10) : Supabase (pgvector)** sera la cible de migration — un seul free tier
-remplace à la fois le vector DB, le `MemorySaver` (→ `PostgresSaver`) et à terme l'onglet Leads,
-et c'est ce que les workflows « Agentic RAG » n8n (l'inspiration d'origine du projet) utilisent
-nativement. Qdrant reste le plan B si la pause de 7 jours gêne.
+**Décision (2026-07-10, mise en œuvre le 2026-07-11) : Supabase (pgvector).** Un seul free tier
+sert à la fois de vector store ([vector_store.py](vector_store.py)) et de checkpointer LangGraph
+(`PostgresSaver` dans `app.py`, remplaçant `SqliteSaver`) — et c'est ce que les workflows
+« Agentic RAG » n8n (l'inspiration d'origine du projet) utilisent nativement. L'onglet Leads reste
+sur Google Sheets pour l'instant (cf. item 15, « vrai CRM » — un choix distinct, pas résolu par un
+déplacement vers une table Postgres brute). Qdrant restait le plan B si la pause de 7 jours gênait ;
+non retenu car il n'aurait résolu que la moitié du problème (le vecteur, pas le checkpointer).
 
 ### 11.3 Quelles données dans le vector DB, d'où viennent-elles, est-ce automatique ?
 
@@ -356,7 +365,26 @@ reste affichée dans Streamlit et le commercial doit la copier-coller. Priorité
 
 **P2 — Échelle / produit**
 
-14. **Migration Supabase/pgvector** selon les déclencheurs du §11.1.
+14. ✅ **Fait (par anticipation) — Migration Supabase/pgvector**, avancée avant que les
+    déclencheurs du §11.1 ne soient atteints, à la demande explicite de l'utilisateur (voir §11.1
+    pour le raisonnement complet). [vector_store.py](vector_store.py) remplace le cache
+    d'embeddings en mémoire de `sheets.py` par une table Postgres pgvector (`faq_embeddings`),
+    partagée entre `ui.py` et `poller.py` ; `app.py` utilise `PostgresSaver` au lieu de
+    `SqliteSaver` pour le checkpointer quand `DATABASE_URL` est configurée. Repli gracieux complet
+    si absente (comportement identique à avant cette migration). **Vérifié en direct contre le
+    vrai projet Supabase de l'utilisateur** : `vector_store.search()` renvoie exactement les mêmes
+    résultats que l'ancien chemin en mémoire pour la même requête ; un checkpoint écrit par un
+    process (`PostgresSaver`) est relu correctement depuis un process totalement séparé (le
+    problème que cette migration visait à résoudre) ; suite complète `python app.py` (5 cas) sans
+    régression. Deux vrais bugs trouvés et corrigés pendant la vérification :
+    (1) l'hôte de connexion directe de Supabase (`db.<ref>.supabase.co`) est IPv6 uniquement et ne
+    résolvait pas sur ce réseau — corrigé en utilisant le **Session pooler** de Supabase
+    (`postgres.<ref>@aws-0-<région>.pooler.supabase.com:5432`, compatible IPv4, toujours gratuit) ;
+    (2) l'adaptateur psycopg de `pgvector` ne convertit automatiquement que `numpy.ndarray` ou sa
+    propre classe `Vector`, pas une liste Python brute (ce que renvoie l'API d'embeddings Gemini) —
+    une liste brute produisait un tableau Postgres `double precision[]` au lieu d'un `vector`, et
+    l'opérateur `<=>` n'a pas de surcharge pour `vector <=> double precision[]` ; corrigé en
+    enveloppant les vecteurs dans `pgvector.Vector(...)` avant de les lier aux requêtes.
 15. **Vrai CRM** (HubSpot free tier / Pipedrive) à la place de l'onglet Leads — Sheets-as-CRM
     tient pour ~1–3 commerciaux, pas au-delà (pas de pipeline, pas de relances natives, pas de
     droits d'accès).
@@ -374,8 +402,20 @@ reste affichée dans Streamlit et le commercial doit la copier-coller. Priorité
     types `pdf`/`docx`/`xlsx`) dans le formulaire manuel. Vérifié : script de test avec un PDF + un
     `.docx` + un `.xlsx` synthétiques → les trois textes extraits et concaténés correctement, une
     extension non supportée (`.png`) silencieusement ignorée ; suite `python app.py` sans
-    régression. **Multi-boîtes / multi-tenant** et **tableau de bord** (volume par catégorie, temps
-    de réponse, conversion) restent à faire.
+    régression.
+17. ✅ **Fait — Tableau de bord** (volume par catégorie, temps de réponse, conversion) : nouveau
+    module [analytics_store.py](analytics_store.py) — un registre SQLite léger qui capture
+    TOUTES les classifications (contrairement à l'onglet Sheets `Leads`, qui ne reçoit que les
+    DEMANDE_DEMO/DEVIS validés, et à `audit_log.py`, qui ne trace que les validations). Trois points
+    d'enregistrement : `poller.py` (source `poller`, dès que le graphe atteint la pause),
+    `ui.py._sync_result()` (source `manuel`/`gmail_import`, à chaque resynchronisation d'état —
+    idempotent, donc rejouable après une clarification résolue), et le clic « Valider » (ferme la
+    mesure de temps de réponse). Nouvel onglet « Tableau de bord » dans `ui.py` (via `st.tabs`, pas
+    de refonte multipage — l'app reste un script unique) : KPI (e-mails classés, taux de
+    validation, temps de réponse médian), volume par catégorie (`st.bar_chart`), tendance
+    quotidienne (`st.line_chart`), entonnoir classé→rédigé→validé, détail des temps de réponse en
+    expander ; filtre de période (7/30/90 jours) via `st.segmented_control`. **Multi-boîtes /
+    multi-tenant** reste à faire (hors scope d'un prototype solo).
 
 ### 11.5 Garantie 0 € + correspondance n8n
 

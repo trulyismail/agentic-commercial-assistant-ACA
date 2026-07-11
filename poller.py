@@ -15,6 +15,7 @@ import time
 import traceback
 from dotenv import load_dotenv
 
+import analytics_store
 import app as aca_graph
 import gmail_reader
 import queue_store
@@ -51,7 +52,16 @@ def process_one(service, summary: dict) -> None:
 
     attachment_text = extract_text_from_attachments(email["attachments"])
     config = {"configurable": {"thread_id": thread_id}}
-    aca_graph.app.invoke(_initial_state(email, attachment_text), config)
+    final_state = aca_graph.app.invoke(_initial_state(email, attachment_text), config)
+
+    # Tableau de bord (P2 §11.4 item 16) : le graphe a déjà tourné jusqu'à la pause dans ce
+    # process, donc classification et éventuelle proposition sont connues dès maintenant — pas
+    # besoin d'attendre qu'un humain ouvre l'analyse dans l'UI pour la comptabiliser.
+    analytics_store.record_classification(
+        thread_id, final_state.get("classification", "INCONNU"), email["sender"], source="poller",
+    )
+    if final_state.get("draft_response"):
+        analytics_store.record_draft_ready(thread_id)
 
     queue_store.mark_ready(email["id"])
     print(f"   → mis en file d'attente : « {email['subject']} » ({email['sender']})")

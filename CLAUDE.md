@@ -7,12 +7,13 @@ CRM; it drafts and waits.
 
 ## Architecture (ACAM v2 — supervisor + agent team)
 
-Multi-agent LangGraph graph in [app.py](app.py), compiled with a `SqliteSaver` checkpointer
-(`checkpoints.sqlite`, local file — survives app restarts, unlike the earlier `MemorySaver`),
-`interrupt_before=["action"]`, and a `RetryPolicy` (`RETRY_POLICY`, custom `_retry_on` extending
-LangGraph's default to also retry HTTP 429) on every node that calls an external API — absorbs
-transient Groq/Sheets/Gemini/Tavily/Gmail errors instead of crashing `app.invoke()` (see
-`ACAM_roadmap.md`):
+Multi-agent LangGraph graph in [app.py](app.py), compiled with a checkpointer —
+`PostgresSaver` (Supabase, shared across `ui.py`/`poller.py` processes) if `DATABASE_URL` is
+configured, else the original `SqliteSaver` (`checkpoints.sqlite`, local file — survives app
+restarts, unlike the earlier `MemorySaver`) — `interrupt_before=["action"]`, and a `RetryPolicy`
+(`RETRY_POLICY`, custom `_retry_on` extending LangGraph's default to also retry HTTP 429) on every
+node that calls an external API — absorbs transient Groq/Sheets/Gemini/Tavily/Gmail errors instead
+of crashing `app.invoke()` (see `ACAM_roadmap.md`):
 
 ```
 START → classifier (8B) → memory_lookup → extractor (70B) → clarification (❓dynamic interrupt)
@@ -101,13 +102,15 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   `gmail_thread_id` (real Gmail thread, read by `ui.py` after validation for `relance.py` — no node
   touches it, it just rides along in the state), and reducer lists `completed_agents`/`reasoning_log`), the classifier/memory/extractor/clarification
   nodes, the `supervisor_node` + four worker agents (`enrichissement`/`connaissance`/`veille`/`stratege`),
-  `action_node`, the `SqliteSaver`/`interrupt_before` compile, and a `__main__` block with 4 mock emails
-  (incl. `AUTRE`) that run through the interrupt without a CRM write (`python app.py`).
+  `action_node`, the `SqliteSaver`/`interrupt_before` compile, and a `__main__` block with 5 mock emails
+  (incl. `AUTRE` and `SUPPORT`) that run through the interrupt without a CRM write (`python app.py`).
 - [poller.py](poller.py) — standalone background intake: run separately (`python poller.py`, own
   process/terminal — not started by Streamlit), polls `gmail_reader.list_unread_emails()` every
   `POLL_INTERVAL_SECONDS` (default 60), and for each email not already in `queue_store` runs it
   through `aca_graph.app.invoke()` up to the same validation pause as the manual flow (never past
-  it — a human still has to click "Valider" in the UI), then records it via `queue_store.enqueue()`.
+  it — a human still has to click "Valider" in the UI), then records it via `queue_store.enqueue()`
+  and logs the classification event via `analytics_store.record_classification()` (dashboard data —
+  captured as soon as the graph pauses, independent of whether a human ever opens it in the UI).
 - [queue_store.py](queue_store.py) — tiny local SQLite registry (`queue.sqlite`, not the Google
   Sheet) tracking which Gmail messages `poller.py` has already queued (emails stay `UNREAD` until
   validated, so without this they'd be reprocessed every poll cycle) and which are still pending
@@ -131,6 +134,16 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   `log_validation(thread_id, validated_by, classification, sender)` called from `ui.py`'s "Valider"
   handler; `validated_by` comes from the sidebar's "Validé par" free-text field (no real
   multi-user auth — see `ACA_UI_PASSWORD` below). `list_recent()` for a future audit screen.
+- [analytics_store.py](analytics_store.py) — local SQLite event log (`analytics.sqlite`, P2 §11.4
+  item 17) powering the "Tableau de bord" tab in `ui.py`. Unlike the Sheets `Leads` tab (only
+  validated `DEMANDE_DEMO`/`DEVIS`) or `audit_log.py` (only validation events), this captures
+  **every** classification — including `SPAM`/`AUTRE`/`SUPPORT`, which never get validated.
+  `record_classification(thread_id, classification, sender, source)` (idempotent `INSERT OR
+  IGNORE`, called from `poller.py` and `ui.py._sync_result()`), `record_draft_ready(thread_id)`
+  (separate call, since a clarification pause can log the classification before Stratège has
+  written a draft), `record_validation(thread_id)` (closes the response-time measurement, called
+  from the "Valider" handler). Read side: `volume_by_category()`, `daily_volume()`,
+  `response_times()`, `funnel_counts()` — all `days`-windowed.
 - [retention.py](retention.py) — GDPR/PII retention sweep (`RETENTION_DAYS`, default 365): purges
   `Leads` rows, their corresponding `checkpoints.sqlite` threads (`checkpointer.delete_thread`,
   removes the raw email body from graph state), and old validated `queue.sqlite` entries older
@@ -160,19 +173,25 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   Top of the sidebar has a "Validé par" free-text field (session-scoped, used for `audit_log`) and
   the **"File d'attente"** panel (`queue_store.list_pending()`) — analyses queued by `poller.py`; clicking "Ouvrir" on an entry
   calls `load_queued_thread()` to load its already-paused state (no re-run — the graph already ran in
-  the poller process) via the shared `_sync_result()` helper. Below that: Gmail import (fetch unread →
-  pick one → load into form, the manual one-at-a-time path) or manual form entry (sender/subject/body +
-  PDF upload) → generates a `thread_id` and runs the graph via an `advance_graph()` helper that streams
-  each node live in an `st.status` block, then reads `get_state(config)`. If a clarification `interrupt` is pending, it renders the agent's
-  question + a reply box and resumes with `Command(resume=...)` (looping until the validation pause);
-  otherwise it shows a colored category badge / returning-customer + duplicate banners / a "Fiche
-  prospect" card (metrics + urgency + company profile) / a "Raisonnement de l'équipe" expander
-  (`reasoning_log`) / the proposition → "Valider" resumes with `app.invoke(None, config)` →
-  `action_node`, then `queue_store.mark_validated()` (no-op if the thread wasn't queue-sourced) and
-  `audit_log.log_validation()`. The sidebar also has a **knowledge-base uploader** (calls `ingest.ingest_document`)
-  and a **"FAQ en attente" review panel** (`sheets.get_pending_knowledge_rows`) with Valider/Rejeter
-  buttons per row (`approve_knowledge_row`/`reject_knowledge_row`) for content staged by `veille`.
-  `SPAM`/`AUTRE` show an info/error box and no validation button.
+  the poller process) via the shared `_sync_result()` helper (which also logs the classification event
+  to `analytics_store.py` — idempotent, so opening an already-poller-logged thread is a no-op). Below
+  that: Gmail import (fetch unread → pick one → load into form, the manual one-at-a-time path) or
+  manual form entry (sender/subject/body + multi-file PDF/Word/Excel upload via `attachment_reader`)
+  → generates a `thread_id` and runs the graph via an `advance_graph()` helper that streams
+  each node live in an `st.status` block, then reads `get_state(config)`. Main area is two
+  `st.tabs`: **"Nouvel e-mail"** (the flow above) and **"Tableau de bord"** (KPIs + charts from
+  `analytics_store.py`, period filter via `st.segmented_control`). If a clarification `interrupt` is
+  pending, it renders the agent's question + a reply box and resumes with `Command(resume=...)`
+  (looping until the validation pause); otherwise it shows a colored category badge / returning-customer
+  + duplicate banners / a "Fiche prospect" card (metrics + urgency + company profile) / a "Raisonnement
+  de l'équipe" expander (`reasoning_log`) / the proposition → "Valider" resumes with
+  `app.invoke(None, config)` → `action_node`, then `queue_store.mark_validated()` (no-op if the thread
+  wasn't queue-sourced), `audit_log.log_validation()`, and `analytics_store.record_validation()`.
+  `SUPPORT` renders like `AUTRE` (info box + routing-detail expander, no CRM card/validation button —
+  both are routed by `routing_node` instead). The sidebar also has a **knowledge-base uploader** (calls
+  `ingest.ingest_document`) and a **"FAQ en attente" review panel** (`sheets.get_pending_knowledge_rows`)
+  with Valider/Rejeter buttons per row (`approve_knowledge_row`/`reject_knowledge_row`) for content
+  staged by `veille`. `SPAM` shows a plain error box, no validation button.
 - [gmail_reader.py](gmail_reader.py) — Gmail API integration (OAuth "installed app" flow):
   `get_gmail_service()` (auths, caches token in `credentials/gmail_token.json`), `list_unread_emails()`,
   `get_email()` (body + **all** PDF/Word/Excel attachments — `_extract_attachments()` walks every
@@ -187,7 +206,7 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   see Setup notes below.
 - [sheets.py](sheets.py) — Google Sheets integration via `gspread` + service account:
   `get_sheet()` (opens the "Leads" tab), `search_knowledge_base_semantic(query)` (Gemini embeddings +
-  cosine similarity, top-N; the `connaissance_node` entry point), `search_knowledge_base(query)` (older
+  vector search, top-N; the `connaissance_node` entry point), `search_knowledge_base(query)` (older
   keyword/token-overlap search, the fallback when Gemini is unavailable), `write_knowledge_rows(pairs,
   mode, statut)` (ingestion write path — append/replace on the Knowledge_Base tab; `statut` defaults to
   `"validé"` for human-provided ingestion, `"à valider"` for `veille`'s web content; invalidates the
@@ -201,9 +220,22 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   `"FAQ"`, schema `Question | Réponse | Statut` — the `Statut` column was added this session; rows
   without it, i.e. pre-existing content, are treated as `"validé"` for backward compatibility).
   `_get_knowledge_records()` (shared by both search functions) filters out `"à valider"`/`"rejeté"`
-  rows, so staged `veille` content is invisible to the RAG until approved. FAQ embeddings are cached in
-  an in-memory dict (`_faq_embedding_cache`), recomputed only when the FAQ tab's visible content
-  changes — so a normal run costs one Gemini call for the query, not one per FAQ row.
+  rows, so staged `veille` content is invisible to the RAG until approved. FAQ authoring stays here
+  unchanged (`ingest.py`, `veille` staging, sidebar approve/reject); vector storage/search itself
+  delegates to [vector_store.py](vector_store.py) when `DATABASE_URL` (Supabase) is configured — else
+  falls back to the original in-memory dict (`_faq_embedding_cache`), recomputed only when the FAQ
+  tab's visible content changes, so a normal run costs one Gemini call for the query, not one per row.
+- [vector_store.py](vector_store.py) — pgvector-backed semantic search on Supabase Postgres (P2 §11.1
+  vector-DB migration, brought forward ahead of the volume triggers at the user's request — see
+  ACAM_roadmap.md §11.1/§11.2 for the original trigger-based plan). `is_enabled()` gates everything on
+  `DATABASE_URL`; `sync_embeddings(pairs, embed_documents)` fully replaces the `faq_embeddings` table
+  (`question | reponse | embedding VECTOR(3072) | updated_at`, no ANN index yet — a sequential scan
+  with pgvector's `<=>` operator is exact and sub-millisecond at FAQ-sized volumes; add
+  `hnsw`/`ivfflat` later if the FAQ grows into the thousands) whenever `sheets.py` detects the FAQ's
+  visible content changed; `search(query_vector, top_n, max_distance)` returns the nearest rows by
+  cosine distance (note: pgvector gives a *distance*, not a similarity — the old `score > 0.5`
+  threshold is `distance < 0.5` here). Absent `DATABASE_URL` = fully inert, `sheets.py` uses its
+  original in-memory path unchanged.
 - [pdf_reader.py](pdf_reader.py) — `extract_text_from_pdf()` using PyMuPDF (`fitz`); accepts bytes or a
   path; truncates output to `MAX_CHARS` (15,000) to bound LLM token usage. Used as-is by
   `ingest.py`/the Knowledge_Base uploader (single PDF, unchanged). Internally also exposes
@@ -232,9 +264,11 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
 
 ## Stack
 
-LangGraph (supervisor graph, `SqliteSaver`, static + dynamic `interrupt`) · `langchain_groq`
-(Groq-hosted Llama models, free tier, chat only — Groq has no embeddings endpoint) · `google-genai`
-(Gemini embeddings, free tier, semantic RAG only) · `tavily-python` (web enrichment, free tier) ·
+LangGraph (supervisor graph, `SqliteSaver`/`PostgresSaver`, static + dynamic `interrupt`) ·
+`langchain_groq` (Groq-hosted Llama models, free tier, chat only — Groq has no embeddings endpoint) ·
+`google-genai` (Gemini embeddings, free tier, semantic RAG only) · `psycopg`/`psycopg-pool` +
+`pgvector` + `langgraph-checkpoint-postgres` (Supabase Postgres — vector store + checkpointer,
+optional, see `DATABASE_URL` below) · `tavily-python` (web enrichment, free tier) ·
 Streamlit (Fluent theme via [.streamlit/config.toml](.streamlit/config.toml)) · `gspread` + `google-auth`
 (Google Sheets as CRM + knowledge base) · `google-api-python-client` + `google-auth-oauthlib` (Gmail) ·
 PyMuPDF (PDF) · `python-docx` (Word) · `openpyxl` (Excel) · `python-dotenv`. Pinned in
@@ -249,16 +283,20 @@ if absent), and optionally `GMAIL_CREDENTIALS_FILE` / `GMAIL_TOKEN_FILE` (defaul
 [poller.py](poller.py) (default `60`), `SLACK_WEBHOOK_URL` / `NOTIFY_EMAIL` for
 [notify.py](notify.py) (both optional; no-ops if absent — see Gmail setup notes for the incoming-
 webhook steps, no new account needed for `NOTIFY_EMAIL` since it reuses the existing Gmail auth),
-`ACA_UI_PASSWORD` (optional password gate for [ui.py](ui.py); absent = no gate), `ACA_AUDIT_DB`
+`ACA_UI_PASSWORD` (optional password gate for [ui.py](ui.py); absent = no gate), `ACA_ANALYTICS_DB`
+(default `analytics.sqlite`, dashboard event log), `ACA_AUDIT_DB`
 (default `audit.sqlite`), `RETENTION_DAYS` for [retention.py](retention.py) (default `365`),
 `ACA_FOLLOWUP_DB` (default `followup.sqlite`) / `RELANCE_DAYS` (default `4`) for
 [relance.py](relance.py), optionally `LANGCHAIN_TRACING_V2=true` + `LANGCHAIN_API_KEY` +
 `LANGCHAIN_PROJECT` for LangSmith tracing (free tier, 5k traces/mo — no code change needed,
 `langchain`/`langgraph` auto-instrument from these env vars alone), optionally `CALENDLY_URL`
 (real booking link appended to `DEMANDE_DEMO` proposals by `stratege_node`; absent = vague promise
-as before), and optionally `SUPPORT_EMAIL` / `SUPPORT_SLACK_WEBHOOK_URL` / `HR_EMAIL` /
+as before), optionally `SUPPORT_EMAIL` / `SUPPORT_SLACK_WEBHOOK_URL` / `HR_EMAIL` /
 `HR_SLACK_WEBHOOK_URL` for `routing_node` (each independently optional; absent = graceful no-op,
-same pattern as everything else — see `ACAM_roadmap.md` §11.4 item 5).
+same pattern as everything else — see `ACAM_roadmap.md` §11.4 item 5), and optionally
+`DATABASE_URL` (Supabase Postgres connection string — enables `PostgresSaver` for the checkpointer
+and `vector_store.py`'s pgvector-backed RAG; absent = `SqliteSaver` + in-memory embedding cache,
+exactly as before this migration — see `ACAM_roadmap.md` §11.1/§11.2).
 
 `credentials/` (gitignored) holds `service_account.json` (Sheets) and `gmail_credentials.json` (Gmail
 OAuth client secret, "installed app" type). `gmail_token.json` is created there on first Gmail auth.
@@ -296,16 +334,30 @@ afterward.
   not yet exercised against the live API.
 - The clarification trigger is "empty `besoin_principal`"; the 70B extractor usually fills it, so
   clarification fires only on genuinely vague emails (by design).
-- `search_knowledge_base_semantic`'s cosine-similarity cutoff (`score > 0.5`, [sheets.py:207](sheets.py#L207))
-  is too permissive against the current 2-row FAQ: even unrelated queries (e.g. "recette de tarte aux
-  pommes") score above it and "match", so `faq_context` is effectively never empty and the new `veille`
-  guardrail rarely fires in practice with this seed data. Not yet fixed — raising the threshold or
-  growing the FAQ (which should naturally spread out similarity scores) would need to be verified
-  against real data before relying on `veille` triggering as designed.
+- `search_knowledge_base_semantic`'s similarity cutoff (in-memory path: `score > 0.5`; pgvector path:
+  `max_distance=0.5` in `vector_store.search()`) is too permissive against the current 2-row FAQ: even
+  unrelated queries (e.g. "recette de tarte aux pommes") score above it and "match", so `faq_context`
+  is effectively never empty and the `veille` guardrail rarely fires in practice with this seed data.
+  Not yet fixed — raising the threshold or growing the FAQ (which should naturally spread out
+  similarity scores) would need to be verified against real data before relying on `veille` triggering
+  as designed.
 - ✅ **Fixed**: `veille` used to write unverified web content straight into the FAQ tab. It now stages
   it (`statut="à valider"`), invisible to the RAG until approved from the Streamlit sidebar. Gmail
   drafting after "Valider" (`create_draft_reply`) was added the same session — see `ACAM_roadmap.md`
   §11.4 items 1 and 6, both now done.
+- ✅ **Fixed**: `DATABASE_URL` (Supabase) is now set and live-verified. Note: the direct connection
+  host (`db.<ref>.supabase.co`) is IPv6-only and failed to resolve on this network — fixed by using
+  Supabase's **Session pooler** connection string instead (`postgres.<ref>@aws-0-<region>.pooler.
+  supabase.com:5432`, IPv4-compatible, still free). Also fixed during verification: `pgvector`'s
+  psycopg adapter only auto-converts `numpy.ndarray`/its own `Vector` class, not plain Python lists
+  (what Gemini's embedding API returns) — passing a raw list produced a Postgres `double precision[]`
+  array instead of `vector`, and the `<=>` operator has no overload for `vector <=> double
+  precision[]`. Fixed by wrapping vectors in `pgvector.Vector(...)` before binding as query
+  parameters in both `sync_embeddings()` and `search()`. Verified live: `vector_store.search()`
+  returns byte-identical results to the old in-memory path for the same query; a checkpoint written
+  by one process (`PostgresSaver`) was read back correctly from a completely separate process
+  (the actual problem this migration solves, vs. the old per-process SQLite/in-memory cache); full
+  `python app.py` mock suite (5 cases) ran clean against the Supabase-backed checkpointer + RAG.
 
 ## Status vs. the 8-week roadmap
 
@@ -339,13 +391,22 @@ project, plus a 50-email labeled eval set (`eval_dataset.json` + `eval_classifie
 **96% classifier accuracy** (48/50), with the 2 errors both on deliberately ambiguous cases), and a
 real Calendly link appended deterministically to `DEMANDE_DEMO` drafts (item 12, verified: link
 present on the `DEMANDE_DEMO` mock case, absent on `DEVIS`). **All 7 §11.4 P1 items are now done,
-and so are all 6 §11.4 P0 items.** Also done: the multi-attachment part of P2 item 16 —
+and so are all 6 §11.4 P0 items.** Also done from P2: item 16 (multi-attachment) —
 `gmail_reader.py` now collects every PDF/Word/Excel attachment instead of just the first PDF, and
 the new [attachment_reader.py](attachment_reader.py) extracts/concatenates all of them (capped once
 at `MAX_CHARS`, not per file); verified with a synthetic PDF+docx+xlsx test (all three extracted,
-an unsupported extension silently skipped) and a full `python app.py` regression run. Remaining:
-exercise `notify.py`/`routing_node`/the enrichment agent/`veille`/`relance.py` against real
-Slack+`TAVILY_API_KEY`+support/HR-address+Gmail-thread-with-a-reply credentials, tune the RAG
-similarity threshold, the rest of §11.4 P2 (real CRM, multi-tenant, dashboard — item 14 stays
-gated behind the migration triggers in §11.1, none of which have fired yet), and the eventual n8n
-port (design already n8n-ready).
+an unsupported extension silently skipped) and a full `python app.py` regression run — and item 17
+(dashboard) — new [analytics_store.py](analytics_store.py) event log + a "Tableau de bord" tab in
+`ui.py` (KPIs, volume by category, daily trend, conversion funnel, response-time detail). Remaining:
+verify the dashboard against a real multi-day run (only synthetic/manual data exercised so far).
+Also done from P2, ahead of schedule at the user's explicit request rather than waiting for the
+§11.1 volume triggers: item 14 (Supabase/pgvector) — [vector_store.py](vector_store.py) +
+`PostgresSaver` in `app.py`, gated entirely behind `DATABASE_URL` — **live-verified end-to-end**:
+`vector_store.search()` matches the old in-memory RAG path exactly, a checkpoint written by one
+process is correctly read back from a separate process, and the full `python app.py` mock suite
+passes against the Supabase-backed checkpointer + RAG (see Known gaps for the two real bugs found
+and fixed during verification: the IPv6-only direct-connection host, and pgvector's psycopg adapter
+not handling plain Python lists). Remaining: exercise `notify.py`/`routing_node`/the enrichment
+agent/`veille`/`relance.py` against real Slack+`TAVILY_API_KEY`+support/HR-address+Gmail-thread-
+with-a-reply credentials, tune the RAG similarity threshold, the rest of §11.4 P2 (real CRM,
+multi-tenant), and the eventual n8n port (design already n8n-ready).

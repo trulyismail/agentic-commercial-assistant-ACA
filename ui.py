@@ -2,6 +2,7 @@ import os
 import uuid
 import streamlit as st
 from langgraph.types import Command
+import analytics_store
 import app as aca_graph
 import audit_log
 import followup_store
@@ -106,6 +107,18 @@ def _sync_result(thread_id: str) -> None:
     st.session_state.result = state.values
     # `state.interrupts` non vide = clarification dynamique en attente ; sinon pause avant action.
     st.session_state.pending_clarification = state.interrupts[0].value if state.interrupts else None
+
+    # Tableau de bord (P2 §11.4 item 16) : enregistre la classification dès qu'elle est connue,
+    # idempotent (INSERT OR IGNORE) donc rejouable à chaque resynchronisation (y compris après une
+    # clarification résolue, où le premier appel a lieu avant que la proposition n'existe).
+    values = state.values or {}
+    if values.get("classification"):
+        source = "gmail_import" if st.session_state.get("gmail_message_id") else "manuel"
+        analytics_store.record_classification(
+            thread_id, values["classification"], values.get("email_raw", {}).get("sender", ""), source,
+        )
+        if values.get("draft_response"):
+            analytics_store.record_draft_ready(thread_id)
 
 
 def load_queued_thread(thread_id: str) -> None:
@@ -220,182 +233,251 @@ with st.sidebar:
         "Gemini embeddings (RAG sémantique)"
     )
 
-# Interface principale pour simuler/entrer la réception d'un e-mail
-with st.container(border=True):
-    st.subheader("Nouvel e-mail entrant", anchor=False)
+tab_email, tab_dashboard = st.tabs(["Nouvel e-mail", "Tableau de bord"])
 
-    col1, col2 = st.columns(2)
-    with col1:
-        sender = st.text_input("Expéditeur", key="email_sender")
-        subject = st.text_input("Objet", key="email_subject")
-        body = st.text_area("Corps du message", height=150, key="email_body")
+with tab_email:
+    # Interface principale pour simuler/entrer la réception d'un e-mail
+    with st.container(border=True):
+        st.subheader("Nouvel e-mail entrant", anchor=False)
 
-    with col2:
-        st.markdown("**Pièces jointes (optionnel)**")
-        uploaded_files = st.file_uploader(
-            "Importer un ou plusieurs documents (cahier des charges, devis, tableur...)",
-            type=["pdf", "docx", "xlsx"],
-            accept_multiple_files=True,
-            label_visibility="collapsed",
-        )
-        if st.session_state.gmail_attachment_text:
-            st.caption(":material/attach_file: Pièce(s) jointe(s) récupérée(s) automatiquement depuis Gmail.")
+        col1, col2 = st.columns(2)
+        with col1:
+            sender = st.text_input("Expéditeur", key="email_sender")
+            subject = st.text_input("Objet", key="email_subject")
+            body = st.text_area("Corps du message", height=150, key="email_body")
 
-    launch = st.button("Lancer l'analyse IA", type="primary", icon=":material/bolt:")
-
-# Bouton déclencheur de l'agent
-if launch:
-    # Extraction texte des éventuelles pièces jointes (upload manuel prioritaire sur l'import Gmail)
-    attachment_text = ""
-    if uploaded_files:
-        with st.spinner("Extraction du texte des pièces jointes..."):
-            attachment_text = extract_text_from_attachments(
-                [(f.name, f.getvalue()) for f in uploaded_files]
+        with col2:
+            st.markdown("**Pièces jointes (optionnel)**")
+            uploaded_files = st.file_uploader(
+                "Importer un ou plusieurs documents (cahier des charges, devis, tableur...)",
+                type=["pdf", "docx", "xlsx"],
+                accept_multiple_files=True,
+                label_visibility="collapsed",
             )
-    elif st.session_state.gmail_attachment_text:
-        attachment_text = st.session_state.gmail_attachment_text
+            if st.session_state.gmail_attachment_text:
+                st.caption(":material/attach_file: Pièce(s) jointe(s) récupérée(s) automatiquement depuis Gmail.")
 
-    # Construction de l'entrée pour le graphe
-    graphe_input = {
-        "email_raw": {
-            "sender": sender,
-            "subject": subject,
-            "body": body,
-        },
-        "attachment_text": attachment_text,
-        # ID Gmail (ou None) : consommé par action_node pour marquer l'e-mail traité après validation
-        "gmail_message_id": st.session_state.gmail_message_id,
-        # Vrai threadId Gmail (ou None) : consommé après validation par followup_store.track()
-        "gmail_thread_id": st.session_state.gmail_thread_id,
-    }
+        launch = st.button("Lancer l'analyse IA", type="primary", icon=":material/bolt:")
 
-    # Chaque analyse = un fil (thread) distinct pour le checkpointer (mémoire court terme).
-    # Le graphe peut s'interrompre en route (clarification) puis avant 'action' (validation).
-    st.session_state.thread_id = str(uuid.uuid4())
-    st.session_state.sender = sender
-    advance_graph(graphe_input)
+    # Bouton déclencheur de l'agent
+    if launch:
+        # Extraction texte des éventuelles pièces jointes (upload manuel prioritaire sur l'import Gmail)
+        attachment_text = ""
+        if uploaded_files:
+            with st.spinner("Extraction du texte des pièces jointes..."):
+                attachment_text = extract_text_from_attachments(
+                    [(f.name, f.getvalue()) for f in uploaded_files]
+                )
+        elif st.session_state.gmail_attachment_text:
+            attachment_text = st.session_state.gmail_attachment_text
 
-# Si on a un résultat d'analyse, on l'affiche et on demande validation (Human-in-the-loop)
-if "result" in st.session_state:
-    res = st.session_state.result
+        # Construction de l'entrée pour le graphe
+        graphe_input = {
+            "email_raw": {
+                "sender": sender,
+                "subject": subject,
+                "body": body,
+            },
+            "attachment_text": attachment_text,
+            # ID Gmail (ou None) : consommé par action_node pour marquer l'e-mail traité après validation
+            "gmail_message_id": st.session_state.gmail_message_id,
+            # Vrai threadId Gmail (ou None) : consommé après validation par followup_store.track()
+            "gmail_thread_id": st.session_state.gmail_thread_id,
+        }
 
-    st.subheader("Résultat de l'IA", anchor=False)
+        # Chaque analyse = un fil (thread) distinct pour le checkpointer (mémoire court terme).
+        # Le graphe peut s'interrompre en route (clarification) puis avant 'action' (validation).
+        st.session_state.thread_id = str(uuid.uuid4())
+        st.session_state.sender = sender
+        advance_graph(graphe_input)
 
-    # --- Clarification (interrupt dynamique) : l'agent pose une question AVANT de poursuivre ---
-    pending = st.session_state.get("pending_clarification")
-    if pending:
-        st.warning(pending.get("question", "Une précision est nécessaire."), icon=":material/help:")
-        clar_answer = st.text_input("Votre réponse à l'agent", key="clarif_answer")
-        if st.button("Répondre à l'agent", type="primary", icon=":material/reply:"):
-            if clar_answer.strip():
-                advance_graph(Command(resume=clar_answer.strip()))
-                st.rerun()
-            else:
-                st.error("Merci de saisir une réponse avant de continuer.")
-        st.stop()  # on n'affiche pas la fiche / la validation tant que la question n'a pas de réponse
+    # Si on a un résultat d'analyse, on l'affiche et on demande validation (Human-in-the-loop)
+    if "result" in st.session_state:
+        res = st.session_state.result
 
-    classif = res.get("classification", "INCONNU")
+        st.subheader("Résultat de l'IA", anchor=False)
 
-    if classif == "SPAM":
-        st.error("E-mail classé comme spam. Aucune action requise.", icon=":material/block:")
+        # --- Clarification (interrupt dynamique) : l'agent pose une question AVANT de poursuivre ---
+        pending = st.session_state.get("pending_clarification")
+        if pending:
+            st.warning(pending.get("question", "Une précision est nécessaire."), icon=":material/help:")
+            clar_answer = st.text_input("Votre réponse à l'agent", key="clarif_answer")
+            if st.button("Répondre à l'agent", type="primary", icon=":material/reply:"):
+                if clar_answer.strip():
+                    advance_graph(Command(resume=clar_answer.strip()))
+                    st.rerun()
+                else:
+                    st.error("Merci de saisir une réponse avant de continuer.")
+            st.stop()  # on n'affiche pas la fiche / la validation tant que la question n'a pas de réponse
 
-    elif classif == "SUPPORT":
-        st.warning(
-            "E-mail classé SUPPORT : ce n'est pas un lead commercial, donc pas de proposition ni "
-            "de fiche CRM. L'e-mail a été routé vers l'équipe support (alerte et/ou brouillon de "
-            "transfert Gmail, selon la configuration).",
-            icon=":material/support_agent:",
-        )
-        if res.get("reasoning_log"):
-            with st.expander("Détail du routage", icon=":material/network_node:"):
-                for line in res["reasoning_log"]:
-                    st.markdown(f"- {line}")
+        classif = res.get("classification", "INCONNU")
 
-    elif classif == "AUTRE":
-        st.info(
-            "E-mail hors périmètre commercial (candidature, partenariat, question générale) — "
-            "routé vers les RH (alerte et/ou brouillon de transfert Gmail, selon la "
-            "configuration). Aucune fiche CRM n'est créée automatiquement.",
-            icon=":material/help:",
-        )
-        if res.get("reasoning_log"):
-            with st.expander("Détail du routage", icon=":material/network_node:"):
-                for line in res["reasoning_log"]:
-                    st.markdown(f"- {line}")
+        if classif == "SPAM":
+            st.error("E-mail classé comme spam. Aucune action requise.", icon=":material/block:")
 
-    else:
-        color, icon = CATEGORY_STYLE.get(classif, ("gray", ":material/label:"))
-        st.badge(classif.replace("_", " ").capitalize(), icon=icon, color=color)
-
-        # --- Mémoire long terme : bandeaux client récurrent / doublon ---
-        if res.get("sender_history"):
-            st.info(res["sender_history"], icon=":material/history:")
-        if res.get("is_duplicate"):
+        elif classif == "SUPPORT":
             st.warning(
-                "Cet expéditeur existe déjà dans le CRM. Vérifiez avant d'ajouter une nouvelle "
-                "ligne (risque de doublon).",
-                icon=":material/warning:",
+                "E-mail classé SUPPORT : ce n'est pas un lead commercial, donc pas de proposition ni "
+                "de fiche CRM. L'e-mail a été routé vers l'équipe support (alerte et/ou brouillon de "
+                "transfert Gmail, selon la configuration).",
+                icon=":material/support_agent:",
+            )
+            if res.get("reasoning_log"):
+                with st.expander("Détail du routage", icon=":material/network_node:"):
+                    for line in res["reasoning_log"]:
+                        st.markdown(f"- {line}")
+
+        elif classif == "AUTRE":
+            st.info(
+                "E-mail hors périmètre commercial (candidature, partenariat, question générale) — "
+                "routé vers les RH (alerte et/ou brouillon de transfert Gmail, selon la "
+                "configuration). Aucune fiche CRM n'est créée automatiquement.",
+                icon=":material/help:",
+            )
+            if res.get("reasoning_log"):
+                with st.expander("Détail du routage", icon=":material/network_node:"):
+                    for line in res["reasoning_log"]:
+                        st.markdown(f"- {line}")
+
+        else:
+            color, icon = CATEGORY_STYLE.get(classif, ("gray", ":material/label:"))
+            st.badge(classif.replace("_", " ").capitalize(), icon=icon, color=color)
+
+            # --- Mémoire long terme : bandeaux client récurrent / doublon ---
+            if res.get("sender_history"):
+                st.info(res["sender_history"], icon=":material/history:")
+            if res.get("is_duplicate"):
+                st.warning(
+                    "Cet expéditeur existe déjà dans le CRM. Vérifiez avant d'ajouter une nouvelle "
+                    "ligne (risque de doublon).",
+                    icon=":material/warning:",
+                )
+
+            info = res.get("extracted_info", {})
+
+            with st.container(border=True):
+                st.markdown("##### Fiche prospect")
+                col_a, col_b, col_c = st.columns(3)
+                col_a.metric("Entreprise", info.get("entreprise") or "—")
+                col_b.metric("Contact", info.get("contact") or "—")
+                urgence = (info.get("urgence") or "").lower()
+                urgence_color = {"haute": "red", "moyenne": "orange", "basse": "green"}.get(urgence, "gray")
+                with col_c:
+                    st.caption("Urgence")
+                    st.badge(urgence.capitalize() if urgence else "—", color=urgence_color)
+                st.caption("Besoin principal")
+                st.write(info.get("besoin_principal") or "—")
+                if res.get("company_profile"):
+                    st.caption("Profil entreprise (agent Enrichissement)")
+                    st.write(res["company_profile"])
+
+            # Trace de raisonnement de l'équipe d'agents (superviseur + workers)
+            if res.get("reasoning_log"):
+                with st.expander("Raisonnement de l'équipe d'agents", icon=":material/network_node:"):
+                    for line in res["reasoning_log"]:
+                        st.markdown(f"- {line}")
+
+            with st.container(border=True):
+                st.markdown("##### Proposition rédigée")
+                st.write(res.get("draft_response") or "Aucune proposition générée.")
+
+            # --- PHASE 3 : VALIDATION HUMAINE (reprise du graphe interrompu) ---
+            st.subheader("Validation humaine", anchor=False)
+            st.caption("Si la recommandation de l'IA est correcte, validez pour envoyer dans le CRM.")
+
+            if st.button("Valider et ajouter au CRM", type="primary", icon=":material/check_circle:"):
+                with st.spinner("Reprise du graphe et écriture dans Google Sheets..."):
+                    try:
+                        # Le graphe était en pause avant 'action'. On le reprend (invoke None) :
+                        # action_node écrit dans Leads + marque l'e-mail Gmail comme traité.
+                        graph_config = {"configurable": {"thread_id": st.session_state.thread_id}}
+                        final = aca_graph.app.invoke(None, config=graph_config)
+                        action_status = final.get("action_status", "Lead ajouté au CRM.")
+                        st.success(action_status, icon=":material/check_circle:")
+                        # Retire l'entrée de la file d'attente si elle en venait (no-op sinon).
+                        queue_store.mark_validated(st.session_state.thread_id)
+                        # Traçabilité minimale : qui a validé, quoi, quand (audit_log.py).
+                        audit_log.log_validation(
+                            st.session_state.thread_id, st.session_state.get("validator_name", ""),
+                            res.get("classification", ""), res.get("email_raw", {}).get("sender", ""),
+                        )
+                        # Tableau de bord : ferme la mesure de temps de réponse pour ce thread.
+                        analytics_store.record_validation(st.session_state.thread_id)
+                        # Suivi des relances (no-op si pas de fil Gmail — saisie manuelle par exemple).
+                        followup_store.track(
+                            st.session_state.thread_id, res.get("gmail_thread_id"),
+                            res.get("email_raw", {}).get("sender", ""),
+                            res.get("email_raw", {}).get("subject", ""),
+                        )
+                        # On efface le résultat pour passer au suivant
+                        st.session_state.gmail_attachment_text = ""
+                        st.session_state.gmail_message_id = None
+                        st.session_state.gmail_thread_id = None
+                        st.session_state.pending_clarification = None
+                        del st.session_state.result
+                    except Exception as e:
+                        st.error(f"Erreur technique lors de la validation : {e}", icon=":material/error:")
+
+with tab_dashboard:
+    st.caption(
+        "Calculé à partir de `analytics_store.py` — TOUTES les analyses (y compris SPAM/AUTRE/"
+        "SUPPORT, jamais validées), indépendamment de l'onglet Sheets Leads qui ne reçoit que les "
+        "leads commerciaux validés."
+    )
+    days = st.segmented_control(
+        "Période", options=[7, 30, 90], default=30, required=True,
+        format_func=lambda d: f"{d} jours", key="dashboard_days",
+    )
+
+    volume = analytics_store.volume_by_category(days)
+    daily = analytics_store.daily_volume(days)
+    funnel = analytics_store.funnel_counts(days)
+    resp_times = analytics_store.response_times(days)
+
+    total = sum(v["count"] for v in volume)
+    conversion_pct = round(100 * funnel["validés"] / total, 1) if total else 0
+    median_minutes = None
+    if resp_times:
+        sorted_minutes = sorted(r["minutes"] for r in resp_times)
+        median_minutes = sorted_minutes[len(sorted_minutes) // 2]
+
+    if total == 0:
+        st.info(
+            "Aucune analyse enregistrée sur cette période — le tableau de bord se remplit au fur "
+            "et à mesure des e-mails classés (onglet « Nouvel e-mail » ou poller.py).",
+            icon=":material/info:",
+        )
+    else:
+        with st.container(horizontal=True):
+            st.metric("E-mails classés", total, border=True)
+            st.metric("Taux de validation", f"{conversion_pct}%", border=True)
+            st.metric(
+                "Temps de réponse médian",
+                f"{median_minutes:.0f} min" if median_minutes is not None else "—",
+                border=True,
             )
 
-        info = res.get("extracted_info", {})
+        col1, col2 = st.columns(2)
+        with col1:
+            with st.container(border=True):
+                st.markdown("**Volume par catégorie**")
+                st.bar_chart(volume, x="classification", y="count", x_label="", y_label="")
+
+        with col2:
+            with st.container(border=True):
+                st.markdown("**Tendance quotidienne**")
+                if daily:
+                    st.line_chart(daily, x="jour", y="count", x_label="", y_label="")
+                else:
+                    st.caption("Pas assez de données pour une tendance.")
 
         with st.container(border=True):
-            st.markdown("##### Fiche prospect")
-            col_a, col_b, col_c = st.columns(3)
-            col_a.metric("Entreprise", info.get("entreprise") or "—")
-            col_b.metric("Contact", info.get("contact") or "—")
-            urgence = (info.get("urgence") or "").lower()
-            urgence_color = {"haute": "red", "moyenne": "orange", "basse": "green"}.get(urgence, "gray")
-            with col_c:
-                st.caption("Urgence")
-                st.badge(urgence.capitalize() if urgence else "—", color=urgence_color)
-            st.caption("Besoin principal")
-            st.write(info.get("besoin_principal") or "—")
-            if res.get("company_profile"):
-                st.caption("Profil entreprise (agent Enrichissement)")
-                st.write(res["company_profile"])
+            st.markdown("**Entonnoir de conversion**")
+            st.bar_chart(
+                [{"étape": k, "compte": v} for k, v in funnel.items()],
+                x="étape", y="compte", x_label="", y_label="", horizontal=True, sort=False,
+            )
 
-        # Trace de raisonnement de l'équipe d'agents (superviseur + workers)
-        if res.get("reasoning_log"):
-            with st.expander("Raisonnement de l'équipe d'agents", icon=":material/network_node:"):
-                for line in res["reasoning_log"]:
-                    st.markdown(f"- {line}")
-
-        with st.container(border=True):
-            st.markdown("##### Proposition rédigée")
-            st.write(res.get("draft_response") or "Aucune proposition générée.")
-
-        # --- PHASE 3 : VALIDATION HUMAINE (reprise du graphe interrompu) ---
-        st.subheader("Validation humaine", anchor=False)
-        st.caption("Si la recommandation de l'IA est correcte, validez pour envoyer dans le CRM.")
-
-        if st.button("Valider et ajouter au CRM", type="primary", icon=":material/check_circle:"):
-            with st.spinner("Reprise du graphe et écriture dans Google Sheets..."):
-                try:
-                    # Le graphe était en pause avant 'action'. On le reprend (invoke None) :
-                    # action_node écrit dans Leads + marque l'e-mail Gmail comme traité.
-                    graph_config = {"configurable": {"thread_id": st.session_state.thread_id}}
-                    final = aca_graph.app.invoke(None, config=graph_config)
-                    action_status = final.get("action_status", "Lead ajouté au CRM.")
-                    st.success(action_status, icon=":material/check_circle:")
-                    # Retire l'entrée de la file d'attente si elle en venait (no-op sinon).
-                    queue_store.mark_validated(st.session_state.thread_id)
-                    # Traçabilité minimale : qui a validé, quoi, quand (audit_log.py).
-                    audit_log.log_validation(
-                        st.session_state.thread_id, st.session_state.get("validator_name", ""),
-                        res.get("classification", ""), res.get("email_raw", {}).get("sender", ""),
-                    )
-                    # Suivi des relances (no-op si pas de fil Gmail — saisie manuelle par exemple).
-                    followup_store.track(
-                        st.session_state.thread_id, res.get("gmail_thread_id"),
-                        res.get("email_raw", {}).get("sender", ""),
-                        res.get("email_raw", {}).get("subject", ""),
-                    )
-                    # On efface le résultat pour passer au suivant
-                    st.session_state.gmail_attachment_text = ""
-                    st.session_state.gmail_message_id = None
-                    st.session_state.gmail_thread_id = None
-                    st.session_state.pending_clarification = None
-                    del st.session_state.result
-                except Exception as e:
-                    st.error(f"Erreur technique lors de la validation : {e}", icon=":material/error:")
+        if resp_times:
+            with st.expander("Détail des temps de réponse (leads validés)", icon=":material/schedule:"):
+                st.dataframe(resp_times, hide_index=True, width="stretch")
