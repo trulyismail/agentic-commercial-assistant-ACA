@@ -37,16 +37,22 @@ START
  → clarification_node   (interrupt)  ❓ Si besoin flou → pose UNE question à l'humain, puis reprend
  → supervisor_node      (Llama-8B)   Oriente dynamiquement l'équipe (garde-fous déterministes) ⇄ workers
         ├─ enrichissement_node       Profil entreprise (Tavily + cache Sheets long terme)
-        ├─ connaissance_node         RAG sémantique (embeddings Gemini) → contexte FAQ
+        ├─ connaissance_node         RAG hybride (dense Gemini + mots-clés, fusion RRF) → contexte FAQ
+        ├─ veille_node               Repli web (Tavily) si la FAQ est vide → enrichit la FAQ (staging)
         └─ stratege_node   (Llama-70B) Proposition + devis (profil + FAQ + historique)
+              → reflection_node (8B)  Auto-critique du brouillon ──rewrite (1x max)──▶ stratege
+ → routing_node         (SUPPORT/AUTRE → équipe compétente : alerte + brouillon de transfert Gmail)
+ → notification_node    (Slack/e-mail : « une analyse attend votre validation »)
  ── interrupt_before ──              ⏸️  PAUSE : validation humaine (Streamlit « Valider »)
- → action_node          (write)      Écrit dans 'Leads' + marque l'e-mail Gmail comme traité
+ → action_node          (write)      Écrit dans 'Leads' + HubSpot + marque l'e-mail Gmail traité + brouillon de réponse
  → END
 
 Ingestion (hors graphe) :  doc/PDF/Markdown ──(Groq → Q/R)──▶ onglet Knowledge_Base (Sheets)
 ```
 
-Compilation : `app = workflow.compile(checkpointer=MemorySaver(), interrupt_before=["action"])`.
+Compilation : `app = workflow.compile(checkpointer=..., interrupt_before=["action"])` — le
+checkpointer est `PostgresSaver` (Supabase) si `DATABASE_URL` est configurée, sinon `SqliteSaver`
+(fichier local) ; le `MemorySaver` volatile des débuts a été remplacé (§11.4 item 4, puis §11.2).
 Le superviseur boucle avec les workers via `add_conditional_edges`. Deux interruptions humaines :
 **clarification** en cours de route (`interrupt()` dynamique, repris par `Command(resume=...)`) et
 **validation** finale (`interrupt_before`).
@@ -55,7 +61,7 @@ Le superviseur boucle avec les workers via `add_conditional_edges`. Deux interru
 
 | Type | Outil | Rôle |
 |---|---|---|
-| **Court terme** (working memory) | `MemorySaver` (checkpointer LangGraph) | Conserve l'état du lead pendant la **pause de validation**. L'agent peut « dormir » puis reprendre exactement où il en était (`invoke(None, config)`), sans réinterroger le LLM. |
+| **Court terme** (working memory) | `PostgresSaver` (Supabase) ou `SqliteSaver` (checkpointer LangGraph — `MemorySaver` remplacé, cf. §11.4 item 4 et §11.2) | Conserve l'état du lead pendant la **pause de validation**, y compris à travers un redémarrage de l'app et entre processus (`ui.py`/`poller.py`). L'agent peut « dormir » puis reprendre exactement où il en était (`invoke(None, config)`), sans réinterroger le LLM. |
 | **Long terme — CRM** | Google Sheets, onglet **`Leads`** | Historique commercial. Lu **avant** traitement (`find_leads_by_sender`) → détecte les clients récurrents et les doublons ; écrit **après** validation. |
 | **Long terme — Connaissances** | Google Sheets, onglet **`FAQ`** (Knowledge_Base) | Tarifs, délais, règles. Interrogé par `search_knowledge_base_semantic` (embeddings Gemini + similarité cosinus, avec repli sur la recherche par mots-clés si `GOOGLE_API_KEY` est absente) ; alimenté par l'ingestion doc/PDF (`ingest.py`). |
 | **Long terme — Enrichissement** | Google Sheets, onglet **`Enrichissement_Cache`** | Profils d'entreprise déjà recherchés (par domaine). L'agent Enrichissement y lit **avant** tout appel Tavily et y écrit après → évite les recherches web répétées. |
@@ -76,12 +82,13 @@ Chaque analyse reçoit un `thread_id` (UUID) stocké dans `st.session_state`, qu
 | 5–6 | RAG « database-less » → **nœud dédié `rag_retrieval` + recherche par mots-clés** | ✅ Fait |
 | 7 | Intégration de la **vraie API Gmail** (ingestion des e-mails non lus + marquage) | ✅ Fait |
 | 7–8 | **Mémoire hybride** (`MemorySaver` + interrupt), **mémoire long terme** (client récurrent + anti-doublon), **fix taxonomie** (catégorie `AUTRE`) | ✅ Fait |
-| 8 | Tests de robustesse (validate-loop réel de bout en bout) + rapport final | 🔨 Restant |
+| 8 | Tests de robustesse (validate-loop réel de bout en bout) | ✅ Fait (cf. §8 — E2E headless `AppTest` vérifié sur le vrai Sheet) |
+| 8 | Rapport final (livrable académique) + backlog Scrum/user stories | 🔨 Restant (matière première : `PROJECT_JOURNAL.md`) |
 
 ## 6. Stack technique
 
-- **Orchestration :** Python / LangGraph (`StateGraph`, `MemorySaver`, `interrupt_before`, `app.stream`
-  pour la progression en direct côté UI).
+- **Orchestration :** Python / LangGraph (`StateGraph`, checkpointer `PostgresSaver`/`SqliteSaver`,
+  `interrupt_before`, `app.stream` pour la progression en direct côté UI).
 - **Intelligence (texte) :** Groq — Llama-3.1-8B (routage) & Llama-3.3-70B (extraction/rédaction).
   *Gratuit.* JSON structuré obtenu par prompting strict (équivalent « Structured Outputs »).
 - **Intelligence (embeddings/RAG) :** Google Gemini (`gemini-embedding-001`, `google-genai`). *Gratuit*
@@ -121,10 +128,10 @@ utilisées » sont désormais implémentées (marquées ✅) ; les autres resten
 | **`add_conditional_edges`** (routage dynamique) | Le classifieur pourrait router directement vers des chemins spécialisés (ex : un nœud d'escalade pour `SUPPORT` urgent) au lieu d'un `if` statique dans chaque nœud (`CATEGORIES_SANS_SUITE`) | ✅ **Fait (ACAM v2)** — le superviseur route dynamiquement vers `enrichissement`/`connaissance`/`veille`/`stratege`/`action` via `add_conditional_edges` |
 | **`interrupt()` dynamique** (au lieu de `interrupt_before` statique) | Permettrait à l'agent de demander une clarification humaine *au milieu* d'un nœud (ex : « urgence ambiguë, confirmez SVP ») plutôt qu'un seul point de pause fixe avant `action` | ✅ **Fait (ACAM v2)** — `clarification_node` pose une question via `interrupt()` quand `besoin_principal` est vide, reprise par `Command(resume=...)` |
 | **Store API** (`langgraph.store`, mémoire long terme native, cross-thread) | Remplacerait/compléterait la lecture manuelle de Google Sheets par une mémoire sémantique interrogeable (embeddings) partagée entre threads, gérée par le framework | Non utilisé — la mémoire long terme passe entièrement par des appels `gspread` custom dans `sheets.py` |
-| **Checkpointer persistant** (`SqliteSaver` / `PostgresSaver` au lieu de `MemorySaver`) | Les pauses de validation survivraient à un redémarrage de l'app (actuellement perdues en mémoire RAM) | Non utilisé — `MemorySaver()` est volatile |
+| **Checkpointer persistant** (`SqliteSaver` / `PostgresSaver` au lieu de `MemorySaver`) | Les pauses de validation survivraient à un redémarrage de l'app (actuellement perdues en mémoire RAM) | ✅ **Fait** — `SqliteSaver` (§11.4 item 4), puis `PostgresSaver` sur Supabase quand `DATABASE_URL` est configurée (§11.2), vérifié à travers un redémarrage simulé et entre deux processus distincts |
 | **Streaming** (`astream_events` / `stream_mode="messages"`) | L'UI pourrait afficher la progression nœud par nœud (« classification en cours... », « rédaction... ») au lieu d'un `st.spinner` bloquant unique | ✅ **Fait** — `ui.py` utilise `app.stream()` et affiche chaque nœud en direct dans un `st.status` |
 | **Exécution parallèle (fan-out/fan-in)** | `memory_lookup_node` et `rag_retrieval_node` sont indépendants (l'un lit `Leads`, l'autre `FAQ`) — ils pourraient s'exécuter en parallèle au lieu de séquentiellement | Non utilisé — chaîne strictement séquentielle |
-| **`RetryPolicy` par nœud** | Retry automatique en cas d'erreur API Groq/Sheets transitoire, sans faire échouer tout le graphe | Non utilisé — aucun `try/except` autour des appels LLM dans les nœuds |
+| **`RetryPolicy` par nœud** | Retry automatique en cas d'erreur API Groq/Sheets transitoire, sans faire échouer tout le graphe | ✅ **Fait** (§11.4 item 9) — `RETRY_POLICY` (3 tentatives, backoff, couvre aussi les 429) sur tous les nœuds appelant une API externe, vérifié avec un 429 simulé |
 | **Sous-graphes (`subgraphs`)** | Un sous-graphe `ingestion` dédié (PDF + e-mail) réutilisable indépendamment du pipeline de qualification, conforme à l'architecture cible du document de vision | Non utilisé — l'extraction PDF vit dans `ui.py`, hors du graphe |
 | **Time travel / `get_state_history()`** | Permettrait de rejouer ou d'auditer une décision passée de l'agent (utile pour justifier une classification en cas de litige) | Non utilisé — seul `get_state()` (état courant) est appelé, dans le `__main__` de démo |
 | **Agents à outils (`bind_tools` / ReAct)** | Le `draft_writer_node` pourrait appeler des outils (vérifier un agenda, calculer un tarif exact) plutôt que produire un texte figé en un seul appel LLM | Non utilisé — aucun tool-calling, uniquement des prompts système/humain fixes |
@@ -143,30 +150,32 @@ Classées par effort estimé (croissant) :
 - **Score de confiance de classification** — faire retourner un score (0-1) par `classifier_node`
   et router vers une relecture humaine systématique en dessous d'un seuil, au lieu d'un
   tout-ou-rien SPAM/AUTRE/valide.
-- **`RetryPolicy` + gestion d'erreur réseau** — aujourd'hui une erreur Groq ou Sheets fait
-  planter tout `app.invoke()` sans retry ni message utilisateur clair côté Streamlit.
+- ✅ **`RetryPolicy` + gestion d'erreur réseau** — fait (§11.4 item 9) : `RETRY_POLICY` sur tous les
+  nœuds à appel externe, prédicat étendu aux 429, vérifié avec une erreur simulée.
 - **Nœud `Ingestion`** explicite en tête de graphe (PDF + e-mail) — actuellement l'extraction PDF
   se fait dans `ui.py` avant l'appel à `app.invoke()`, ce qui casse l'encapsulation du graphe et
   empêche de rejouer un test avec pièce jointe depuis le seul `app.py`.
-- **Traitement par lot des e-mails non lus** — `list_unread_emails` remonte déjà jusqu'à 10
-  e-mails ; l'UI ne permet d'en traiter qu'un à la fois manuellement, sans file d'attente ni
-  traitement automatique en série.
+- ✅ **Traitement par lot des e-mails non lus** — fait (§11.4 item 3) : `poller.py` traite
+  automatiquement chaque e-mail non lu en série jusqu'à la pause de validation, avec file
+  d'attente visible dans la sidebar (« File d'attente », `queue_store.py`).
 - ✅ **UI asynchrone / streaming** — fait : `ui.py` remplace le `st.spinner` bloquant par
   `app.stream()` + un `st.status` affichant chaque nœud en direct.
-- **Nœud « Reflect » (auto-critique)** — avant de proposer le brouillon à validation, un second
-  passage LLM qui relit sa propre réponse (ton, exactitude vis-à-vis de la FAQ, absence
-  d'engagement commercial non autorisé) et la corrige si besoin.
+- ✅ **Nœud « Reflect » (auto-critique)** — fait (2026-07-12) : `reflection_node` (Llama-8B) relit
+  le brouillon du Stratège face au contexte FAQ réellement utilisé ; « REWRITE : raison » renvoie au
+  Stratège (une seule réécriture max, garde-fou anti-boucle), « OK » continue vers la validation.
+  Vérifié en direct : une redondance réelle détectée, réécrite une fois, puis passage.
 - ✅ **RAG sémantique (embeddings)** — fait : `search_knowledge_base_semantic` (embeddings Gemini +
   similarité cosinus) remplace le recouvrement de mots-clés comme chemin principal, avec repli
   automatique sur `search_knowledge_base` si `GOOGLE_API_KEY` est absente ou l'appel échoue. Vérifié en
   direct : une reformulation ne partageant aucun mot-clé avec la FAQ ("Combien coûte votre abonnement
   mensuel pour une petite équipe ?" vs. "Quels sont vos tarifs professionnels ?") est correctement
   retrouvée par la recherche sémantique, là où la recherche par mots-clés ne renvoyait rien.
-- **Notification Slack/e-mail pour les leads urgents** — déclenchée en sortie de `action_node`
-  quand `extracted_info.urgence == "haute"`, pour réduire le délai de prise en charge humaine.
-- **Persistance `SqliteSaver`** — pour que les analyses en attente de validation survivent à un
-  redémarrage de l'app Streamlit (actuellement perdues si le process redémarre entre l'analyse et
-  le clic « Valider »).
+- ✅ **Notification Slack/e-mail pour les leads urgents** — fait sous une forme généralisée
+  (§11.4 item 2) : `notification_node` alerte pour **chaque** lead en attente de validation (pas
+  seulement `urgence == "haute"`), juste avant la pause. Le filtrage par urgence reste un
+  raffinement optionnel si le volume rend les alertes trop bruyantes.
+- ✅ **Persistance `SqliteSaver`** — fait (§11.4 item 4), puis dépassé : `PostgresSaver` (Supabase)
+  quand `DATABASE_URL` est configurée (§11.2), partagé entre `ui.py` et `poller.py`.
 
 ## 11. Production — usage réel en entreprise (contrainte : 0 €)
 
@@ -385,9 +394,15 @@ reste affichée dans Streamlit et le commercial doit la copier-coller. Priorité
     une liste brute produisait un tableau Postgres `double precision[]` au lieu d'un `vector`, et
     l'opérateur `<=>` n'a pas de surcharge pour `vector <=> double precision[]` ; corrigé en
     enveloppant les vecteurs dans `pgvector.Vector(...)` avant de les lier aux requêtes.
-15. **Vrai CRM** (HubSpot free tier / Pipedrive) à la place de l'onglet Leads — Sheets-as-CRM
-    tient pour ~1–3 commerciaux, pas au-delà (pas de pipeline, pas de relances natives, pas de
-    droits d'accès).
+15. ✅ **Fait — Vrai CRM (HubSpot)** : [hubspot.py](../aca/integrations/hubspot.py), appelé depuis
+    `action_node` **en parallèle** de Sheets (pas en remplacement — Sheets reste la mémoire lue par
+    `find_leads_by_sender` et le tableau de bord, décision actée pour ne pas porter la détection de
+    doublons et les vues du dashboard dans le même changement). Upsert du Contact par e-mail, création
+    du Deal (`HUBSPOT_PIPELINE`/`HUBSPOT_DEALSTAGE`), association v4, Note avec urgence/besoin/brouillon
+    — API REST directe, sans SDK. Repli gracieux complet si `HUBSPOT_ACCESS_TOKEN` absent. Vérifié en
+    direct contre le vrai portail (2026-07-12) : contact + deal + note créés puis supprimés ; un vrai
+    bug attrapé pendant la vérification (un `print` Unicode plantait après l'écriture réussie, ce qui
+    aurait fait rejouer tout `action_node` par le `RETRY_POLICY` → lead dupliqué — corrigé).
 16. ✅ **Fait — Pièces jointes multiples (PDF + Word + Excel)** : `gmail_reader._extract_attachments`
     parcourt maintenant récursivement TOUTES les parties MIME et collecte chaque PDF/Word(.docx)/
     Excel(.xlsx), au lieu de s'arrêter au premier PDF trouvé. Nouveau module
@@ -430,3 +445,103 @@ Supabase/Qdrant (free tiers sans carte bancaire), Calendly (plan gratuit).
 Correspondance n8n : les items P0-1/2/3 et P1-7 sont des nœuds n8n **natifs** (Gmail trigger,
 Slack, Wait) — le port n8n prévu résout donc naturellement l'intake, les notifications et les
 relances, ce qui renforce le choix de cette cible.
+
+### 11.6 Dette technique restante — le « cœur » à finir AVANT toute commercialisation
+
+Audit du 2026-07-12 (roadmap vs. code réel). Ces items sont le préalable au §12 : tant qu'ils ne
+sont pas traités, la phase commercialisation ne démarre pas. Classés par levier décroissant :
+
+1. ✅ **Fait (2026-07-12) — Suite de tests automatisée (pytest)** : `tests/` — 84 tests, ~2 s,
+   entièrement hors-ligne (le `conftest.py` vide toutes les clés d'API avant tout import `aca.*` et
+   redirige les SQLite vers un répertoire temporaire — aucun test ne touche Supabase/Sheets/Gmail/
+   Groq ni les vraies bases locales). Couvre : les nœuds du graphe en unitaire (LLM factices),
+   les fonctions pures du RAG hybride (RRF, mots-clés, cosinus), les 4 registres SQLite, les
+   contrats de dégradation gracieuse (notify/hubspot/enrichment/veille/pièces jointes), et 5 tests
+   d'intégration du graphe compilé (pause avant `action`, reprise après « Valider », boucle de
+   réflexion plafonnée, SPAM court-circuité, garde-fou veille). `python -m pytest tests/`.
+   *Pourquoi c'était le levier n°1 :* chaque nouvel ajout obligeait à revérifier manuellement tout
+   le reste ; ces vérifications sont maintenant figées et rejouables en 2 secondes.
+2. **Exercer les chemins « codés mais jamais joués en réel »** — le code est écrit et le repli
+   gracieux vérifié, mais jamais le chemin nominal avec de vraies références :
+   `TAVILY_API_KEY` (agents enrichissement + veille), un vrai webhook Slack / `SUPPORT_EMAIL` /
+   `HR_EMAIL` (notify + routing), `relance.py` sur un vrai fil Gmail avec une vraie réponse,
+   et le tableau de bord sur plusieurs jours réels de données. *Pourquoi :* la démo de soutenance
+   et tout usage réel passeront par ces chemins-là, pas par les replis.
+3. **Retry sur les écritures SQLite hors graphe** — ❌ `queue_store.py`/`audit_log.py` (`enqueue`,
+   `mark_ready`, `mark_validated`, `log_validation`) s'exécutent hors `app.invoke()` et ne sont donc
+   pas couverts par `RETRY_POLICY` ; un conflit de verrou entre `poller.py` et `ui.py` y lèverait
+   une exception. Risque faible au volume prototype, vraie correction = petite boucle de retry locale.
+4. **Améliorations de robustesse LLM encore ouvertes au §10** (rappel, non refaits ici) :
+   few-shot prompting (classifier/extractor, encore zéro-shot), `with_structured_output()`/Pydantic
+   pour l'extracteur (remplace `json.loads` + repli `{"raw": ...}`), score de confiance de
+   classification (relecture humaine sous un seuil), nœud `ingestion` explicite dans le graphe
+   (l'extraction des pièces jointes vit encore dans `ui.py`/`poller.py`/`gmail_reader.py`).
+5. **Cadence de relance multi-tours** — une seule relance par lead aujourd'hui (`relance.py`) ;
+   ~80 % des ventes demandent 5+ contacts. Extension : plusieurs relances espacées, arrêt dès que
+   le prospect répond.
+6. **Rapport de stage + backlog Scrum / user stories** — ❌ volontairement en attente (démarre quand
+   le projet est déclaré terminé). Matière première déjà accumulée dans `PROJECT_JOURNAL.md` ;
+   les user stories se dériveront des items P0/P1/P2 de ce document.
+
+## 12. P3 — Commercialisation / SaaS (à commencer UNIQUEMENT après le §11.6)
+
+Issu d'un **second document de conseils externe** (généré par IA, sans accès au code), audité
+item par item contre le code réel le 2026-07-12 avant d'être intégré ici. Verdict global : sur 9
+suggestions, **1 était déjà entièrement construite, 2 partiellement, 6 sont réellement nouvelles**.
+Les suggestions sont retranscrites fidèlement, avec leur statut vérifié et un ⚠️ « point de
+vigilance » quand elles entrent en conflit avec la contrainte 0 € du projet ou dupliquent de
+l'existant (même esprit que l'avertissement n8n Cloud du §11.5).
+
+1. ✅ **Déjà fait — Checkpoints Human-in-the-Loop (HITL)** (« Approve / Reject / Edit avant toute
+   action impactante ») : c'est le cœur du projet depuis le début — `interrupt_before=["action"]` +
+   `interrupt()` dynamique de clarification, bouton « Valider » Streamlit, rien n'est jamais
+   auto-envoyé. ⚠️ Ne pas reconstruire : la variante « webhook → frontend → retour n8n » décrite par
+   le document est la *forme* que prendra ce mécanisme existant lors du port n8n (item 6 ci-dessous),
+   pas une fonctionnalité nouvelle.
+2. 🟡 **Partiel — Journal d'audit consultable & transparence** (« retrouver pour chaque exécution
+   passée les sorties brutes, prompts et récupérations de chaque étape ») : les données existent déjà
+   — `audit_log.py` (qui/quoi/quand par validation), traces LangSmith (détail par nœud),
+   `reasoning_log` affiché dans l'UI. **Manque** : un onglet « Historique » dans l'UI qui consomme
+   `audit_log.list_recent()` (déjà codé, jamais branché) et permette de rechercher les exécutions
+   passées. ⚠️ Effort modeste : c'est surtout du câblage d'existant, pas une nouvelle infrastructure.
+3. ❌ **Multi-tenant (isolation par client)** : Supabase Auth + table `organizations` + colonne
+   `org_id` sur chaque donnée (Leads, FAQ, analytics, config) + **Row-Level Security** pour un
+   cloisonnement au niveau base. Vérifié : aucun `org_id` nulle part, un seul `.env`, un seul mot de
+   passe UI. C'est LA frontière prototype → produit vendable à plusieurs clients.
+4. ❌ **Suivi de consommation & facturation** : capturer les métadonnées d'usage LLM (tokens
+   entrée/sortie par exécution) dans `analytics_store.py` (vérifié : aucune trace de tokens
+   aujourd'hui), les agréger par `org_id`, et brancher Stripe Billing. ⚠️ Conflit 0 € : Stripe et les
+   modèles payants (Claude/GPT — les limites du free tier Groq ne tiendront pas un trafic commercial)
+   n'ont de sens qu'en phase commerciale ; en attendant, la *première marche* gratuite est de logger
+   les tokens Groq (déjà présents dans les réponses API) pour connaître le coût théorique par client.
+5. 🟡 **Partiel — Trace d'observabilité & graphe d'état visuel** (« graphe LangGraph affiché, nœud
+   actif surligné, dropdown "Thought Trace" par worker ») : le « Thought Trace » existe déjà
+   (expander « Raisonnement de l'équipe d'agents » + progression nœud par nœud en direct via
+   `app.stream()`/`st.status`). **Manque** : le rendu *visuel* du graphe avec surlignage du nœud
+   actif. ⚠️ Valeur = confiance client en démo ; à faire dans le futur dashboard (item 8) plutôt
+   qu'en Streamlit jetable.
+6. ❌ **Stratégie n8n « Option A » (décision d'architecture actée)** : garder LangGraph/Python
+   intact comme « cerveau », l'exposer en microservice via FastAPI ; n8n devient l'enveloppe
+   d'infrastructure (trigger Gmail natif remplaçant `poller.py`, notifications, file d'attente
+   visuelle, reprise après « Valider »). Vérifié : aucun FastAPI aujourd'hui. ⚠️ Cohérent avec la
+   conception « n8n-ready » déjà actée (§11.5) et son avertissement : n8n **self-hosted** (gratuit),
+   pas n8n Cloud (payant). L'alternative « tout réécrire en nœuds n8n » est explicitement rejetée
+   (perdrait `attachment_reader.py`, le RAG hybride, les garde-fous déterministes...).
+7. ❌ **Panneau de configuration dynamique** : un onglet « Réglages » où un manager (pas un
+   développeur) édite son lien Calendly, ses adresses de routage SUPPORT/RH, ses webhooks, et sa
+   base de connaissances via une grille de données — aujourd'hui tout est dans `.env` (vérifié) et
+   la FAQ ne s'édite que par ingestion/staging. Pré-requis pratique du multi-tenant (item 3) : la
+   config par client doit vivre en base (Supabase), plus dans un fichier local.
+8. ❌ **Dashboard client dédié** (le document suggère Next.js/Shadcn/Tailwind : login client,
+   timeline d'exécution, boutons HITL, réglages, facturation). ⚠️ Décision de phase commerciale,
+   pas un manque du prototype : Streamlit reste l'UI assumée du stage ; le choix Next.js vs.
+   Streamlit multi-pages durci se prendra au moment du port, pas avant.
+9. ❌ **Observabilité d'infrastructure (Grafana/Prometheus sur les métriques Supabase)**. ⚠️ Utile
+   uniquement sous vraie charge multi-clients ; LangSmith (gratuit, déjà branché) couvre le besoin
+   d'observabilité au volume prototype. À reconsidérer quand l'item 3 existe et que plusieurs
+   clients tournent.
+
+**Ordre de dépendance suggéré** (si cette phase démarre un jour) : 3 (multi-tenant) → 7 (config par
+client) → 4 (usage/billing) → 8 (dashboard) → 2/5 (audit + graphe visuel dans ce dashboard) →
+6 (port n8n) → 9 (Grafana). Les items 2 et 5 peuvent aussi être prototypés avant, en Streamlit, à
+faible coût.

@@ -19,9 +19,12 @@ of crashing `app.invoke()` (see `docs/ACAM_roadmap.md`):
 START → classifier (8B) → memory_lookup → extractor (70B) → clarification (❓dynamic interrupt)
       → SUPERVISOR (8B) ⇄ workers ──FINISH── routing ── notification ── interrupt ── action → END
                         ├─ enrichissement (Tavily + Sheets cache → company_profile)
-                        ├─ connaissance   (semantic RAG → faq_context)
+                        ├─ connaissance   (hybrid RAG, dense+sparse RRF fusion → faq_context)
                         ├─ veille         (Tavily fallback if FAQ empty → enriches FAQ tab)
                         └─ stratege       (70B, temp 0.3 → proposition/devis)
+                              ↓
+                          reflection (8B self-critique) ──rewrite (1x max)──→ back to stratege
+                              └──ok──────────────────────────────────────────→ routing
 ```
 
 - `classifier_node` — labels the email `DEMANDE_DEMO | DEVIS | SUPPORT | AUTRE | SPAM`. `AUTRE` =
@@ -38,31 +41,58 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   answer is merged into `extracted_info` on resume (`Command(resume=...)`). Otherwise passes through.
 - `supervisor_node` — **orchestrator** (Llama-8B): picks the next worker
   (`enrichissement | connaissance | stratege | FINISH`) from `completed_agents`, with deterministic
-  guardrails (SPAM/AUTRE/SUPPORT→FINISH; never repeat an agent; `stratege` last; FINISH after it;
+  guardrails (SPAM/AUTRE/SUPPORT→FINISH; never repeat an agent; `stratege` last;
   `veille` forced right after `connaissance` if `faq_context` is still empty — not offered to the LLM
   as a free choice, purely a deterministic guardrail). Appends to `reasoning_log`. Workers each return
-  to the supervisor (`add_conditional_edges`).
+  to the supervisor (`add_conditional_edges`), **except** `stratege`, which goes straight to
+  `reflection` instead (see below) — once the supervisor picks `stratege` it is never called again
+  for that analysis.
+- `_build_rag_query()` — **query de-contextualization**, shared by `connaissance_node`/`veille_node`:
+  builds the RAG query from `besoin_principal` (already extracted by the 70B, possibly refined by the
+  human via `clarification_node`) instead of the raw email — the raw subject/body carries greetings
+  and pleasantries that dilute the embedding. If the sender is a returning customer
+  (`sender_history` non-empty), the besoin may reference a prior exchange implicitly ("that option",
+  "like last time"); a Llama-8B call resolves it into a standalone, explicit query using
+  `sender_history` as context before it hits the embedding. Falls back to raw subject+body if no
+  `besoin_principal` was extracted.
 - `enrichissement_node` — **hybrid-memory agent**: `enrichment.research_company()` reads the
   `Enrichissement_Cache` tab first, else calls Tavily (free tier) and caches. Graceful fallback (`""`)
   if the domain is generic / `TAVILY_API_KEY` absent / error.
-- `connaissance_node` — **semantic RAG "database-less"**: `sheets.search_knowledge_base_semantic()`
-  embeds the FAQ/Knowledge_Base tab + query with Gemini (`gemini-embedding-001`, free) and ranks by
-  cosine similarity into `faq_context`. Falls back to keyword `search_knowledge_base()` if
-  `GOOGLE_API_KEY` missing / Gemini fails. (Groq has no embeddings endpoint — Gemini only for this
-  piece; Groq still does classification/extraction/supervision/drafting.)
+- `connaissance_node` — **hybrid RAG "database-less"**: `sheets.search_knowledge_base_semantic()`
+  fuses a DENSE search (Gemini embeddings, `gemini-embedding-001`, free — cosine similarity, catches
+  paraphrases) and a SPARSE search (keyword/token overlap — catches exact alphanumeric matches dense
+  embeddings miss, e.g. a product reference or "99.9%" SLA) via Reciprocal Rank Fusion, into
+  `faq_context`. A dual confidence threshold on the top dense score (calibrated empirically on the
+  74-row FAQ, see Known gaps) creates three zones: **≥0.72** trust the match outright; **0.62–0.71**
+  ("amber zone") still inject the match — better than a hard rejection on a genuine borderline case —
+  but prefix it with `LOW_CONFIDENCE_MARKER`, which `connaissance_node` strips before it reaches the
+  Stratège's prompt while logging a "confiance modérée" note in `reasoning_log` for the human to see;
+  **<0.62 with no sparse hits either** returns `""` (triggers `veille`). Falls back entirely to
+  keyword `search_knowledge_base()` if `GOOGLE_API_KEY` missing / Gemini fails. (Groq has no
+  embeddings endpoint — Gemini only for this piece; Groq still does
+  classification/extraction/supervision/drafting.)
 - `veille_node` — **web-research agent, FAQ fallback**: only invoked by the deterministic guardrail
-  above. `veille.search_faq_online()` queries Tavily (free tier) with `besoin_principal` (or the raw
-  email), reformats the answer into a clean Q/R pair (Groq 8B), and **stages it into the FAQ tab**
+  above. `veille.search_faq_online()` queries Tavily (free tier) with the same de-contextualized query
+  as `connaissance_node` (`_build_rag_query()`), reformats the answer into a clean Q/R pair (Groq 8B),
+  and **stages it into the FAQ tab**
   (`sheets.write_knowledge_rows(..., statut="à valider")`) — invisible to the RAG until a human
   approves it from the Streamlit sidebar (`sheets.get_pending_knowledge_rows` /
   `approve_knowledge_row` / `reject_knowledge_row`); the answer is still used for *this* proposal
   (reviewed by the human at the "Valider" gate either way). Same hybrid-memory pattern as
   `enrichissement_node`. Graceful `""` fallback if `TAVILY_API_KEY` absent / search fails / no answer.
 - `stratege_node` — **Llama-70B** proposal writer: personalized reply + indicative quote + next action,
-  using `company_profile` + `faq_context` + `sender_history` + `extracted_info`. Always the last
-  worker. For `DEMANDE_DEMO`, appends the real Calendly link (`CALENDLY_URL`) to the draft
-  **deterministically in code** (not LLM-generated, to avoid a mangled URL) — absent = graceful
-  no-op, draft unchanged (vague promise, as before).
+  using `company_profile` + `faq_context` + `sender_history` + `extracted_info` (+ `reflection_feedback`
+  when `reflection_node` sent it back for a rewrite). Always the last worker. For `DEMANDE_DEMO`,
+  appends the real Calendly link (`CALENDLY_URL`) to the draft **deterministically in code** (not
+  LLM-generated, to avoid a mangled URL) — absent = graceful no-op, draft unchanged (vague promise,
+  as before).
+- `reflection_node` — **self-critique loop** (Llama-8B, a check not a generation): reads `draft_response`
+  back against the `faq_context` actually used and looks for an unsupported claim (price/deadline/
+  feature not in the FAQ) or an inappropriate tone. `REWRITE: <reason>` sends the draft back to
+  `stratege_node` with the reason in `reflection_feedback`; `OK` continues to `routing`. Capped at
+  **one** rewrite (guarded by counting `stratege` occurrences in `completed_agents`) so a stubborn
+  disagreement between the two LLM calls can't loop forever — past that, the draft passes through as-is
+  and the human validation gate (`interrupt_before=["action"]`) remains the final backstop either way.
 - `routing_node` — routes `SUPPORT`/`AUTRE` to the right team instead of dropping them after
   classification (P0 §11.4 item 5; no-op for `DEMANDE_DEMO`/`DEVIS`/`SPAM`). Declarative
   `ROUTING_DESTINATIONS` dict (category → label/email/webhook) so adding a future routed category is
@@ -78,7 +108,8 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   customer-facing action, so auto-sending doesn't violate the "drafts and waits" rule); no-ops if
   neither is configured.
 - `action_node` — runs **only after human validation**: the UI resumes with `app.invoke(None, config)`
-  on "Valider" → `sheets.append_lead()` + (if Gmail-sourced) `mark_as_processed` +
+  on "Valider" → `sheets.append_lead()` + `hubspot.create_lead()` (real CRM, runs **alongside** Sheets
+  during the transition period — see `hubspot.py` below) + (if Gmail-sourced) `mark_as_processed` +
   `gmail_reader.create_draft_reply` (creates a Gmail draft in the original thread with the proposition,
   so the human only has to reread and click Send — never auto-sent).
 - **Two interrupts:** dynamic `interrupt()` for mid-graph clarification (resumed with
@@ -99,10 +130,12 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
 ## Files
 
 - [app.py](aca/core/app.py) — LangGraph definition, `AgentState` (TypedDict; adds `company_profile`, `next_agent`,
+  `reflection_feedback` (critique text from `reflection_node`, consumed by `stratege_node` on rewrite),
   `gmail_thread_id` (real Gmail thread, read by `ui.py` after validation for `relance.py` — no node
   touches it, it just rides along in the state), and reducer lists `completed_agents`/`reasoning_log`), the classifier/memory/extractor/clarification
   nodes, the `supervisor_node` + four worker agents (`enrichissement`/`connaissance`/`veille`/`stratege`),
-  `action_node`, the `SqliteSaver`/`interrupt_before` compile, and a `__main__` block with 5 mock emails
+  `reflection_node` (self-critique after `stratege`), `action_node`, the `SqliteSaver`/`interrupt_before`
+  compile, and a `__main__` block with 5 mock emails
   (incl. `AUTRE` and `SUPPORT`) that run through the interrupt without a CRM write (`python -m aca.core.app`).
 - [poller.py](aca/core/poller.py) — standalone background intake: run separately (`python -m aca.core.poller`, own
   process/terminal — not started by Streamlit), polls `gmail_reader.list_unread_emails()` every
@@ -236,6 +269,23 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   cosine distance (note: pgvector gives a *distance*, not a similarity — the old `score > 0.5`
   threshold is `distance < 0.5` here). Absent `DATABASE_URL` = fully inert, `sheets.py` uses its
   original in-memory path unchanged.
+- [hubspot.py](aca/integrations/hubspot.py) — real CRM (P2), mirrors `sheets.append_lead()`: called from
+  `action_node` **alongside** Sheets (not replacing it — Sheets stays the memory `find_leads_by_sender()`/
+  the dashboard read from). `is_enabled()` gates everything on `HUBSPOT_ACCESS_TOKEN` (private-app token).
+  `create_lead(email_classification, extracted_info, sender, draft)` upserts a Contact by e-mail (search →
+  patch or create), creates a Deal (`HUBSPOT_PIPELINE`/`HUBSPOT_DEALSTAGE`, default `"default"`/
+  `"appointmentscheduled"` — every fresh HubSpot portal ships these), associates it to the contact via the
+  v4 default-association endpoint, and attaches a Note (Deals have no free-text property by default) with
+  urgence/besoin/draft — all via `requests` against the CRM v3/v4 REST API directly (no SDK dependency).
+  Same graceful-degradation contract as `notify.py`/`enrichment.py`: never raises, returns `None` on any
+  failure or absent token. Live-verified end-to-end against the real portal (contact/deal/note/associations
+  all created correctly, then deleted as test cleanup) — and that verification caught a real bug: printing
+  `→`/`⚠️` crashed with `UnicodeEncodeError` under this Windows shell's cp1252 console *after* the HubSpot
+  write had already succeeded, and because `action_node` is `RETRY_POLICY`-wrapped, an uncaught exception
+  there would have retried the whole node — duplicating the lead in both Sheets and HubSpot. Fixed by
+  guaranteeing `return deal_id` never depends on a print succeeding (prints are now try/excepted with an
+  ASCII fallback). `python -m aca.integrations.hubspot` runs a one-off live test (creates + reports a real
+  test deal — clean up manually afterward, this module has no dry-run mode).
 - [pdf_reader.py](aca/ingestion/pdf_reader.py) — `extract_text_from_pdf()` using PyMuPDF (`fitz`); accepts bytes or a
   path; truncates output to `MAX_CHARS` (15,000) to bound LLM token usage. Used as-is by
   `ingest.py`/the Knowledge_Base uploader (single PDF, unchanged). Internally also exposes
@@ -261,6 +311,12 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   `classifier_node` and reports overall/per-category accuracy + misclassifications. Last measured:
   96% (48/50). Run via `python -m aca.eval.eval_classifier`; re-run once real emails are available to track
   accuracy under real conditions instead of the synthetic set.
+- [tests/](tests/) — automated pytest suite (84 tests, offline, ~2s — see Known gaps for full
+  coverage list): [conftest.py](tests/conftest.py) (env isolation + `FakeLLM`/`ExplodingLLM`),
+  [test_graph_nodes.py](tests/test_graph_nodes.py), [test_sheets_helpers.py](tests/test_sheets_helpers.py),
+  [test_storage.py](tests/test_storage.py), [test_degradation.py](tests/test_degradation.py),
+  [test_graph_integration.py](tests/test_graph_integration.py). Run via `python -m pytest tests/`
+  (pytest pinned in requirements.txt).
 
 ## Stack
 
@@ -296,7 +352,11 @@ as before), optionally `SUPPORT_EMAIL` / `SUPPORT_SLACK_WEBHOOK_URL` / `HR_EMAIL
 same pattern as everything else — see `docs/ACAM_roadmap.md` §11.4 item 5), and optionally
 `DATABASE_URL` (Supabase Postgres connection string — enables `PostgresSaver` for the checkpointer
 and `vector_store.py`'s pgvector-backed RAG; absent = `SqliteSaver` + in-memory embedding cache,
-exactly as before this migration — see `docs/ACAM_roadmap.md` §11.1/§11.2).
+exactly as before this migration — see `docs/ACAM_roadmap.md` §11.1/§11.2), and optionally
+`HUBSPOT_ACCESS_TOKEN` (private-app token for [hubspot.py](aca/integrations/hubspot.py); absent =
+`action_node` writes to Sheets only, graceful no-op, same pattern as everything else) with optional
+`HUBSPOT_PIPELINE` / `HUBSPOT_DEALSTAGE` overrides (default `"default"` / `"appointmentscheduled"`,
+present in every fresh HubSpot portal).
 
 `credentials/` (gitignored) holds `service_account.json` (Sheets) and `gmail_credentials.json` (Gmail
 OAuth client secret, "installed app" type). `gmail_token.json` is created there on first Gmail auth.
@@ -311,8 +371,20 @@ afterward.
 
 ## Known gaps
 
-- No automated test suite; verification is `app.py`'s `__main__` mock run + headless Streamlit `AppTest`
-  scripts (run ad hoc during development). The CLI run stops at the interrupt (no CRM write).
+- ✅ **Fixed (2026-07-12)**: automated test suite now exists — `tests/` (84 tests, pytest, run via
+  `python -m pytest tests/`, ~2s, fully offline). `tests/conftest.py` blanks every external-service
+  env var *before* any `aca.*` import (`load_dotenv` never overrides pre-set vars, so the real
+  `.env` stays inert) and redirects all SQLite paths to a temp dir — no test ever touches Supabase,
+  Sheets, Gmail, Groq, or the real `data/*.sqlite`. Coverage: graph nodes unit-tested with fake
+  LLMs (classifier fallback, supervisor guardrails, reflection + anti-loop cap, `_build_rag_query`
+  branches, Calendly append, routing/notification no-ops, `_retry_on`), sheets pure helpers
+  (`_rrf_fuse`, `_keyword_candidates`, `_tokenize`, `_row_qr`, `_cosine_similarity`), all four
+  storage modules on tmp DBs, graceful-degradation contracts (notify/hubspot/enrichment/veille/
+  attachment_reader incl. synthetic PDF+docx+xlsx and global truncation), and 5 full-graph
+  integration tests through the compiled `app` (pause before `action`, resume-after-validation CRM
+  write, reflection rewrite capped at one, SPAM skips workers/notification, veille guardrail with
+  the de-contextualized query). The `__main__` mock run + ad-hoc `AppTest` scripts remain as
+  complementary live checks.
 - `poller.py` and `ui.py` are separate processes that can open `data/checkpoints.sqlite`/`data/queue.sqlite`
   concurrently. `RETRY_POLICY` (✅ done, item 9) now retries transient errors inside every graph
   node — including checkpointer reads/writes during `app.invoke()` — but the standalone SQLite
@@ -334,13 +406,19 @@ afterward.
   not yet exercised against the live API.
 - The clarification trigger is "empty `besoin_principal`"; the 70B extractor usually fills it, so
   clarification fires only on genuinely vague emails (by design).
-- `search_knowledge_base_semantic`'s similarity cutoff (in-memory path: `score > 0.5`; pgvector path:
-  `max_distance=0.5` in `vector_store.search()`) is too permissive against the current 2-row FAQ: even
-  unrelated queries (e.g. "recette de tarte aux pommes") score above it and "match", so `faq_context`
-  is effectively never empty and the `veille` guardrail rarely fires in practice with this seed data.
-  Not yet fixed — raising the threshold or growing the FAQ (which should naturally spread out
-  similarity scores) would need to be verified against real data before relying on `veille` triggering
-  as designed.
+- ✅ **Fixed**: `search_knowledge_base_semantic`'s similarity cutoff was too permissive against the
+  original 2-row FAQ seed (unrelated queries like "recette de tarte aux pommes" scored above the old
+  `0.5` threshold and "matched", so `faq_context` was effectively never empty and `veille` almost never
+  fired). Fixed by (1) growing the FAQ to 74 realistic Q/R pairs across 10 business categories
+  (pricing, features, security/GDPR, support/SLA, integrations, onboarding, demo/trial, accounts,
+  contracts, platform) — a 2-row FAQ can't reveal a real score distribution — and (2) empirically
+  measuring real Gemini embedding similarity on this larger set: paraphrased-but-relevant queries
+  scored 0.73–0.80, genuinely irrelevant queries scored 0.56–0.61, a clean gap. New threshold: `0.65`
+  similarity (in-memory path, `sheets.py`) / `0.35` distance (pgvector path, `vector_store.search()`,
+  `distance = 1 - similarity`). Live-verified via `search_knowledge_base_semantic()`: relevant
+  paraphrases still return good matches, irrelevant queries now correctly return `""` (which triggers
+  `veille` as designed). `scripts/setup_faq.py` updated to seed the full 74-pair set instead of the
+  old 2 rows. See `docs/PROJECT_JOURNAL.md` (2026-07-11 entry) for the full calibration numbers.
 - ✅ **Fixed**: `veille` used to write unverified web content straight into the FAQ tab. It now stages
   it (`statut="à valider"`), invisible to the RAG until approved from the Streamlit sidebar. Gmail
   drafting after "Valider" (`create_draft_reply`) was added the same session — see `docs/ACAM_roadmap.md`
@@ -358,6 +436,40 @@ afterward.
   by one process (`PostgresSaver`) was read back correctly from a completely separate process
   (the actual problem this migration solves, vs. the old per-process SQLite/in-memory cache); full
   `python -m aca.core.app` mock suite (5 cases) ran clean against the Supabase-backed checkpointer + RAG.
+- ✅ **Fixed (2026-07-11)**: despite the above, real runs (`app.py`/`poller.py`/`ui.py`) were
+  **silently never using pgvector for the RAG** since the migration — only the checkpointer
+  (`PostgresSaver`) was genuinely Postgres-backed in production. Root cause: `sheets.py` did
+  `from . import vector_store` *before* calling its own `load_dotenv()`; `vector_store.py` read
+  `DATABASE_URL` into a module-level constant at import time, so it froze to `""` for the rest of
+  the process the moment `sheets.py` (hence `vector_store.py`) was imported anywhere before any
+  `load_dotenv()` call had run — which is every real entry point (`aca/core/app.py` also calls
+  `load_dotenv()` only *after* its own `from aca.integrations import sheets`). `vector_store.is_enabled()`
+  silently returned `False`, so `search_knowledge_base_semantic()` fell through to the in-memory
+  per-process embedding cache — functionally correct (real Gemini embeddings, real cosine similarity)
+  but not shared across processes, exactly the problem the migration was meant to solve. No exception
+  was ever raised, so nothing looked broken. Confirmed with a direct query: `faq_embeddings` in
+  Supabase held only 2 stale rows (leftover from the original isolated verification script above,
+  which happened to call `load_dotenv()` before importing `sheets`) while Sheets already had 74.
+  Fixed two ways: (1) reordered `sheets.py` to call `load_dotenv()` before importing `vector_store`;
+  (2) made `vector_store.py` read `os.getenv("DATABASE_URL")` dynamically in `is_enabled()`/
+  `_get_pool()` instead of freezing it at import time, so the bug class can't recur regardless of
+  caller import order. Re-verified live: `vector_store.is_enabled()` now `True` on a fresh
+  `aca.core.app` import, `faq_embeddings` now holds all 74 real rows, full mock suite + classifier
+  eval re-run clean with no `⚠️ Échec pgvector` fallback warnings. See `docs/PROJECT_JOURNAL.md`
+  (2026-07-11 entry) for the full investigation.
+- ✅ **Fixed (2026-07-12)**: `hubspot.py`'s live write-path test (contact + deal + note + associations
+  against the real portal) crashed with `UnicodeEncodeError` on `print(f"→ ...")` under this Windows
+  shell's cp1252 console — **after** the HubSpot write had already succeeded. Because the crash
+  happened before `return deal_id`, it propagated out of `create_lead()` as an uncaught exception; had
+  this happened inside `action_node` (which is `RETRY_POLICY`-wrapped, `max_attempts=3`), LangGraph
+  would have retried the whole node, re-running `sheets.append_lead()` **and** `hubspot.create_lead()`
+  — duplicating the lead in both systems. Two duplicate test deals were in fact created this way
+  during verification (confirmed via `deals/search`, then deleted via `DELETE
+  /crm/v3/objects/deals/{id}`, recoverable from HubSpot's recycle bin for 90 days). Fixed by
+  restructuring `create_lead()` so `return deal_id` never depends on a print succeeding — the
+  success/failure print statements are now individually try/excepted with an ASCII-only fallback.
+  Re-verified live: a fresh test lead was created cleanly (exit code 0, no exception) under the same
+  shell that crashed before the fix, then deleted as cleanup.
 
 ## Status vs. the 8-week roadmap
 
@@ -406,7 +518,30 @@ Also done from P2, ahead of schedule at the user's explicit request rather than 
 process is correctly read back from a separate process, and the full `python -m aca.core.app` mock suite
 passes against the Supabase-backed checkpointer + RAG (see Known gaps for the two real bugs found
 and fixed during verification: the IPv6-only direct-connection host, and pgvector's psycopg adapter
-not handling plain Python lists). Remaining: exercise `notify.py`/`routing_node`/the enrichment
-agent/`veille`/`relance.py` against real Slack+`TAVILY_API_KEY`+support/HR-address+Gmail-thread-
-with-a-reply credentials, tune the RAG similarity threshold, the rest of §11.4 P2 (real CRM,
-multi-tenant), and the eventual n8n port (design already n8n-ready).
+not handling plain Python lists). Also done: the RAG went from a single similarity cutoff to a hybrid
+dense+sparse RRF fusion with a dual "amber zone" confidence threshold (0.72/0.62, superseding the
+earlier single 0.65 cutoff — see `connaissance_node` above and Known gaps). Remaining:
+exercise `notify.py`/`routing_node`/the enrichment agent/`veille`/`relance.py` against real
+Slack+`TAVILY_API_KEY`+support/HR-address+Gmail-thread-with-a-reply credentials, multi-tenant, and the
+eventual n8n port (design already n8n-ready). Also done from P2, ahead of schedule at the user's
+explicit request: item — real CRM (§11.1 mentions HubSpot as the eventual target) —
+[hubspot.py](aca/integrations/hubspot.py), wired into `action_node` **alongside** Sheets (Sheets stays
+the memory read by `find_leads_by_sender`/the dashboard; decided over fully replacing it, to avoid
+porting duplicate-detection and the dashboard's lead-based views in the same change — see Known gaps
+for a bug the live verification caught and fixed). Also done, from an external AI-generated
+architecture review the user asked to be checked against the real codebase: a `reflection_node`
+self-critique loop after `stratege` (Llama-8B re-reads the draft against the FAQ context it actually
+used, capped at one rewrite to avoid an infinite loop — live-verified: caught a real redundant claim
+on a test email, rewrote once, then stopped), and query de-contextualization (`_build_rag_query()`,
+shared by `connaissance_node`/`veille_node`) — the RAG query now comes from the already-extracted
+`besoin_principal` instead of the raw email, with an LLM rewrite step for returning customers whose
+question implicitly references a prior exchange (live-verified: "et pour cette option-là ?" against
+a synthetic prior-order history correctly resolved into a standalone query). The review's other
+suggestions (row-hash Sheets↔Supabase sync, an Apps Script webhook, category metadata pre-filtering,
+a few-shot "approved interactions" table) were evaluated and intentionally not built: the row-hash/
+sync idea is already covered by the existing content-signature cache invalidation, and the rest are
+net-new features rather than refinements, out of scope unless separately requested. The forward-
+looking backlog now lives in `docs/ACAM_roadmap.md` §11.6 (remaining core technical debt — test
+suite, live-credential exercises, out-of-graph SQLite retries, §10 leftovers) and §12 (P3
+commercialization/SaaS items from a second external AI review, each audited against the code with a
+verified done/partial/todo status — to be started only after §11.6).

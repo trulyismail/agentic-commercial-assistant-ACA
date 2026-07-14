@@ -4,10 +4,17 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
-from . import vector_store
 
-# Charger les variables d'environnement
+# Charger les variables d'environnement AVANT d'importer vector_store : ce module lit
+# `DATABASE_URL` au niveau module (`vector_store.DATABASE_URL = os.getenv("DATABASE_URL", "")`),
+# une seule fois, à l'import — l'importer avant load_dotenv() gèle silencieusement cette valeur à
+# "" pour tout le process, désactivant pgvector sans erreur ni avertissement (repli automatique
+# sur le cache en mémoire, qui reste fonctionnel mais n'est plus partagé entre process — le bug
+# que la migration pgvector devait justement résoudre). Bug trouvé et corrigé le 2026-07-11 : voir
+# docs/PROJECT_JOURNAL.md.
 load_dotenv()
+
+from . import vector_store
 
 # Configuration pour accéder à l'API Google Sheets et Drive
 SCOPES = [
@@ -108,37 +115,64 @@ def _get_knowledge_records() -> list:
     return [r for r in records if str(r.get("Statut", "")).strip().lower() not in ("à valider", "rejeté")]
 
 
-def search_knowledge_base(query: str, top_n: int = 3) -> str:
+def _keyword_candidates(query: str, records: list, limit: int = 10) -> list:
     """
-    RAG "database-less" : recherche par mots-clés dans l'onglet Knowledge_Base (FAQ).
-    Score chaque ligne par recouvrement de tokens avec la requête (question + corps de l'e-mail)
-    et renvoie les `top_n` meilleures paires Q/R formatées pour l'injection dans le prompt.
-    Renvoie "" si rien ne correspond. Sert aussi de repli quand le RAG sémantique (Gemini)
-    est indisponible.
+    Score chaque ligne de la Knowledge_Base par recouvrement de tokens avec `query` (question ET
+    réponse, pour capter les tarifs/délais évoqués côté réponse). Renvoie les `limit` meilleures
+    (score, question, réponse), triées par score décroissant — factorisé hors de
+    `search_knowledge_base` pour être réutilisé comme voie "éparse" (sparse) de la fusion RRF dans
+    `search_knowledge_base_semantic`.
     """
-    records = _get_knowledge_records()
-    if not records:
-        return ""
-
     query_tokens = _tokenize(query)
     if not query_tokens:
-        return ""
+        return []
 
     scored = []
     for row in records:
         q, r = _row_qr(row)
         if not q or not r:
             continue
-        # On score sur la question ET la réponse pour capter les tarifs/délais évoqués côté réponse.
         overlap = len(query_tokens & _tokenize(f"{q} {r}"))
         if overlap > 0:
             scored.append((overlap, q, r))
 
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[:limit]
+
+
+def _rrf_fuse(*ranked_lists, top_n: int, k: int = 60) -> list:
+    """
+    Reciprocal Rank Fusion : combine plusieurs listes de (question, réponse) déjà triées par
+    pertinence en un seul classement, à partir du RANG de chaque paire dans chaque liste (pas de
+    son score brut) — nécessaire car la similarité cosinus (échelle ~0-1) et le recouvrement de
+    tokens (échelle = nombre de mots) ne sont pas comparables directement. `k=60` est la
+    constante standard de la formule RRF (Cormack et al., 2009) : assez grande pour lisser l'effet
+    d'un rang 1 isolé, assez petite pour que le rang continue de compter.
+    """
+    scores: dict = {}
+    for ranked in ranked_lists:
+        for rank, pair in enumerate(ranked, start=1):
+            scores[pair] = scores.get(pair, 0.0) + 1.0 / (k + rank)
+    fused = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    return [pair for pair, _ in fused[:top_n]]
+
+
+def search_knowledge_base(query: str, top_n: int = 3) -> str:
+    """
+    RAG "database-less" : recherche par mots-clés dans l'onglet Knowledge_Base (FAQ), formatée
+    pour l'injection dans le prompt. Renvoie "" si rien ne correspond. Sert de repli quand le RAG
+    sémantique (Gemini) est indisponible, et de voie "sparse" fusionnée avec la voie sémantique
+    dans `search_knowledge_base_semantic` (recherche hybride).
+    """
+    records = _get_knowledge_records()
+    if not records:
+        return ""
+
+    scored = _keyword_candidates(query, records, limit=top_n)
     if not scored:
         return ""
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return "\n".join(f"- Q: {q}\n  R: {r}" for _, q, r in scored[:top_n])
+    return "\n".join(f"- Q: {q}\n  R: {r}" for _, q, r in scored)
 
 
 def _get_genai_client():
@@ -184,13 +218,30 @@ def _embed_query(client, query: str) -> list:
     return result.embeddings[0].values
 
 
+# Seuils de confiance sur le score de similarité DENSE (sémantique) le plus haut du lot — calibrés
+# empiriquement le 2026-07-11 sur les embeddings Gemini réels d'une FAQ de 74 paires : questions
+# reformulées mais pertinentes 0.73-0.80, questions hors-sujet 0.56-0.61 (voir docs/PROJECT_JOURNAL.md).
+# Ajout du 2026-07-12 : plutôt qu'une coupure unique à 0.65, une "zone ambre" entre les deux bornes —
+# le contexte est quand même transmis (mieux qu'un rejet sec sur un cas limite réel), mais marqué
+# comme peu fiable pour que le Stratège nuance et que l'humain le voie dans le raisonnement affiché.
+_DENSE_HIGH_CONFIDENCE = 0.72
+_DENSE_LOW_CONFIDENCE = 0.62
+
+# Sentinelle préfixée au résultat quand la meilleure correspondance dense est en zone ambre.
+# `connaissance_node` (aca/core/app.py) la détecte, la retire avant d'injecter le contexte dans le
+# prompt du Stratège, et l'utilise pour logger un avertissement visible côté humain.
+LOW_CONFIDENCE_MARKER = "[FAQ_CONFIANCE_FAIBLE]"
+
+
 def search_knowledge_base_semantic(query: str, top_n: int = 3) -> str:
     """
-    RAG sémantique : embeddings Gemini (gratuit — Groq n'expose pas d'API d'embeddings)
-    + recherche vectorielle sur l'onglet Knowledge_Base (FAQ). Contrairement à
-    `search_knowledge_base` (recouvrement de mots-clés), capte les reformulations
-    ("tarif" ~ "prix"). Se rabat automatiquement sur la recherche par mots-clés si
-    GOOGLE_API_KEY est absente ou si l'appel Gemini échoue (quota, réseau, etc.).
+    RAG hybride : fusionne une recherche DENSE (embeddings Gemini + similarité cosinus/pgvector —
+    capte les reformulations, "tarif" ~ "prix") et une recherche SPARSE (recouvrement de mots-clés,
+    `_keyword_candidates`) via Reciprocal Rank Fusion (`_rrf_fuse`). La voie sémantique seule rate
+    les correspondances exactes sur du texte alphanumérique (référence produit, "99.9%" de SLA...)
+    que la voie mots-clés retrouve directement ; la fusion prend le meilleur des deux plutôt que
+    d'utiliser la seconde uniquement en repli d'échec. Se rabat entièrement sur
+    `search_knowledge_base` si GOOGLE_API_KEY est absente ou si l'appel Gemini échoue.
 
     Stockage vectoriel : `vector_store.py` (pgvector/Supabase) si `DATABASE_URL` est configurée —
     partagé entre tous les process (`ui.py`/`poller.py`), sinon repli sur le cache en mémoire par
@@ -210,6 +261,10 @@ def search_knowledge_base_semantic(query: str, top_n: int = 3) -> str:
         return ""
 
     signature = tuple(pairs)
+    pool_n = max(top_n * 3, 10)  # bassin plus large que top_n pour laisser la fusion RRF arbitrer
+
+    dense_ranked: list = []
+    dense_top_score = 0.0
 
     if vector_store.is_enabled():
         try:
@@ -217,34 +272,52 @@ def search_knowledge_base_semantic(query: str, top_n: int = 3) -> str:
                 vector_store.sync_embeddings(pairs, lambda p: _embed_documents(client, p))
                 _faq_embedding_cache["signature"] = signature
             q_vector = _embed_query(client, query)
-            top = vector_store.search(q_vector, top_n=top_n, max_distance=0.5)
-            return "\n".join(f"- Q: {q}\n  R: {r}" for q, r in top)
+            raw = vector_store.search(q_vector, top_n=pool_n)
+            dense_ranked = [(q, r) for q, r, _ in raw]
+            dense_top_score = 1 - raw[0][2] if raw else 0.0
         except Exception as e:
             print(f"⚠️ Échec pgvector (FAQ), repli sur la recherche par mots-clés : {e}")
             return search_knowledge_base(query, top_n)
+    else:
+        if _faq_embedding_cache["signature"] != signature:
+            try:
+                _faq_embedding_cache["vectors"] = _embed_documents(client, pairs)
+                _faq_embedding_cache["signature"] = signature
+                _faq_embedding_cache["pairs"] = pairs
+            except Exception as e:
+                print(f"⚠️ Échec des embeddings Gemini (FAQ), repli sur la recherche par mots-clés : {e}")
+                return search_knowledge_base(query, top_n)
 
-    if _faq_embedding_cache["signature"] != signature:
         try:
-            _faq_embedding_cache["vectors"] = _embed_documents(client, pairs)
-            _faq_embedding_cache["signature"] = signature
-            _faq_embedding_cache["pairs"] = pairs
+            q_vector = _embed_query(client, query)
         except Exception as e:
-            print(f"⚠️ Échec des embeddings Gemini (FAQ), repli sur la recherche par mots-clés : {e}")
+            print(f"⚠️ Échec de l'embedding de la requête, repli sur la recherche par mots-clés : {e}")
             return search_knowledge_base(query, top_n)
 
-    try:
-        q_vector = _embed_query(client, query)
-    except Exception as e:
-        print(f"⚠️ Échec de l'embedding de la requête, repli sur la recherche par mots-clés : {e}")
-        return search_knowledge_base(query, top_n)
+        scored = sorted(
+            (
+                (_cosine_similarity(q_vector, vec), q, r)
+                for (q, r), vec in zip(_faq_embedding_cache["pairs"], _faq_embedding_cache["vectors"])
+            ),
+            key=lambda x: x[0], reverse=True,
+        )
+        dense_ranked = [(q, r) for _, q, r in scored[:pool_n]]
+        dense_top_score = scored[0][0] if scored else 0.0
 
-    scored = [
-        (_cosine_similarity(q_vector, vec), q, r)
-        for (q, r), vec in zip(_faq_embedding_cache["pairs"], _faq_embedding_cache["vectors"])
-    ]
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top = [(score, q, r) for score, q, r in scored[:top_n] if score > 0.5]
-    return "\n".join(f"- Q: {q}\n  R: {r}" for _, q, r in top)
+    sparse_ranked = [(q, r) for _, q, r in _keyword_candidates(query, records, limit=pool_n)]
+
+    # Sous le seuil bas, sans même une correspondance mot-clé pour compenser : vraiment hors sujet.
+    # On renvoie "" (déclenche l'agent Veille) plutôt que de forcer un contexte non pertinent.
+    if dense_top_score < _DENSE_LOW_CONFIDENCE and not sparse_ranked:
+        return ""
+
+    fused = _rrf_fuse(dense_ranked, sparse_ranked, top_n=top_n)
+    if not fused:
+        return ""
+
+    body = "\n".join(f"- Q: {q}\n  R: {r}" for q, r in fused)
+    low_confidence = _DENSE_LOW_CONFIDENCE <= dense_top_score < _DENSE_HIGH_CONFIDENCE
+    return f"{LOW_CONFIDENCE_MARKER}\n{body}" if low_confidence else body
 
 
 def write_knowledge_rows(pairs: list, mode: str = "append", statut: str = "validé") -> int:

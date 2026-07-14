@@ -15,7 +15,12 @@ is inert, `sheets.py` keeps its existing in-memory cosine-similarity path unchan
 """
 import os
 
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+# Lu dynamiquement (pas figé dans une constante au niveau module) : geler `DATABASE_URL` ici au
+# moment de l'import désactiverait silencieusement pgvector pour tout le process si ce module est
+# importé avant qu'un `load_dotenv()` quelconque n'ait tourné ailleurs dans le programme — bug
+# réel trouvé le 2026-07-11 (voir docs/PROJECT_JOURNAL.md) : `sheets.py` importait ce module avant
+# son propre `load_dotenv()`, ce qui gelait `DATABASE_URL` à "" et faisait retomber tout le RAG sur
+# le cache en mémoire par process sans aucune erreur ni avertissement.
 
 # gemini-embedding-001's native output size (no output_dimensionality override in sheets.py) —
 # confirmed empirically, not from Gemini's docs table, since the model's default can change.
@@ -25,7 +30,7 @@ _pool = None
 
 
 def is_enabled() -> bool:
-    return bool(DATABASE_URL)
+    return bool(os.getenv("DATABASE_URL", ""))
 
 
 def _get_pool():
@@ -35,7 +40,7 @@ def _get_pool():
         from psycopg_pool import ConnectionPool
 
         _pool = ConnectionPool(
-            conninfo=DATABASE_URL, max_size=5, kwargs={"autocommit": True},
+            conninfo=os.getenv("DATABASE_URL", ""), max_size=5, kwargs={"autocommit": True},
         )
         with _pool.connection() as conn:
             from pgvector.psycopg import register_vector
@@ -74,12 +79,14 @@ def sync_embeddings(pairs: list[tuple[str, str]], embed_documents) -> None:
                 )
 
 
-def search(query_vector, top_n: int = 3, max_distance: float = 0.5) -> list[tuple[str, str]]:
+def search(query_vector, top_n: int = 3) -> list[tuple[str, str, float]]:
     """
-    Renvoie les `top_n` paires (question, réponse) les plus proches de `query_vector` par distance
-    cosinus pgvector (opérateur `<=>`), filtrées à `max_distance`. pgvector renvoie une DISTANCE
-    (0 = identique), pas une similarité — l'ancien seuil `similarité > 0.5` équivaut ici à
-    `distance < 0.5` (cosine_distance = 1 - cosine_similarity).
+    Renvoie les `top_n` paires (question, réponse, distance) les plus proches de `query_vector`
+    par distance cosinus pgvector (opérateur `<=>`), non filtrées — le seuil de confiance et la
+    fusion avec la recherche par mots-clés (RRF) sont décidés par l'appelant (`sheets.py`), pas
+    ici, pour garder une seule source de vérité sur les constantes de seuil (ancien défaut
+    `max_distance=0.35`, dupliqué avec le `0.65` de similarité côté `sheets.py`, retiré).
+    pgvector renvoie une DISTANCE (0 = identique), pas une similarité : `distance = 1 - similarité`.
 
     Sans index (`ivfflat`/`hnsw`) volontairement : à l'échelle actuelle de la FAQ (quelques
     dizaines/centaines de lignes), un scan séquentiel avec l'opérateur `<=>` est exact et déjà
@@ -99,4 +106,4 @@ def search(query_vector, top_n: int = 3, max_distance: float = 0.5) -> list[tupl
             "ORDER BY distance ASC LIMIT %s",
             (Vector(query_vector), top_n),
         ).fetchall()
-    return [(question, reponse) for question, reponse, distance in rows if distance < max_distance]
+    return [(question, reponse, distance) for question, reponse, distance in rows]

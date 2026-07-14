@@ -9,7 +9,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import interrupt, RetryPolicy, default_retry_on
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
-from aca.integrations import sheets, notify
+from aca.integrations import sheets, notify, hubspot
 from aca.agents import enrichment, veille
 
 # Charger toutes les clés API du fichier .env
@@ -45,6 +45,7 @@ class AgentState(TypedDict):
     faq_context: str           # Contexte RAG issu de la Knowledge_Base (Google Sheets)
     company_profile: str       # Profil entreprise (agent Enrichissement, Tavily + cache)
     draft_response: str        # Proposition rédigée pour le commercial (agent Stratège)
+    reflection_feedback: str   # Critique du nœud Reflect si réécriture demandée ("" si aucune / déjà traitée)
     # ── Mémoire long terme (lecture du CRM avant traitement) ──
     sender_history: str        # Résumé de l'historique de l'expéditeur (client récurrent)
     is_duplicate: bool         # True si l'expéditeur existe déjà dans l'onglet Leads
@@ -180,6 +181,46 @@ def memory_lookup_node(state: AgentState) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Décontextualisation de requête — reformule l'e-mail brut en requête RAG autonome
+# ─────────────────────────────────────────────────────────────────────────────
+def _build_rag_query(state: AgentState) -> str:
+    """
+    Construit la requête envoyée au RAG (Connaissance/Veille) plutôt que d'y jeter l'e-mail brut tel
+    quel : priorité à `besoin_principal`, déjà extrait par le 70B (et éventuellement précisé par
+    l'humain via `clarification_node`) — un résumé propre, sans les formules de politesse qui diluent
+    le vecteur sémantique. Si le prospect est un client récurrent (`sender_history` non vide), le
+    besoin peut contenir une référence implicite à un échange précédent ("cette option-là", "comme
+    la dernière fois") : on demande alors à Llama-8B de la reformuler en requête autonome et explicite
+    avant l'embedding. Repli sur l'e-mail brut (sujet + corps) si aucun besoin n'a été extrait.
+    """
+    email = state["email_raw"]
+    raw_fallback = f"{email.get('subject', '')} {email.get('body', '')}"
+    besoin = (state.get("extracted_info") or {}).get("besoin_principal")
+    if not besoin or str(besoin).strip().lower() in ("", "null", "none", "n/a"):
+        return raw_fallback
+
+    besoin = str(besoin).strip()
+    history = state.get("sender_history", "")
+    if not history:
+        return besoin  # déjà une requête autonome, rien à décontextualiser
+
+    messages = [
+        SystemMessage(content=(
+            "Reformule la DEMANDE ci-dessous en UNE requête de recherche autonome et explicite, en "
+            "résolvant toute référence implicite grâce au CONTEXTE CLIENT. Réponds UNIQUEMENT par la "
+            "requête reformulée, sans explication.\n"
+            f"--- CONTEXTE CLIENT ---\n{history}\n"
+        )),
+        HumanMessage(content=f"--- DEMANDE ---\n{besoin}"),
+    ]
+    try:
+        rewritten = fast_llm().invoke(messages).content.strip()
+        return rewritten or besoin
+    except Exception:
+        return besoin
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Agent Connaissance (worker) — RAG "database-less", sémantique (Knowledge_Base)
 # ─────────────────────────────────────────────────────────────────────────────
 def connaissance_node(state: AgentState) -> dict:
@@ -189,11 +230,23 @@ def connaissance_node(state: AgentState) -> dict:
     Appelé par le superviseur (jamais pour SPAM/AUTRE). Mémoire long terme = Knowledge_Base.
     """
     print("\n📚 [Agent Connaissance] Recherche sémantique dans la Knowledge_Base...")
-    email = state["email_raw"]
-    query = f"{email.get('subject', '')} {email.get('body', '')}"
+    query = _build_rag_query(state)
     context = sheets.search_knowledge_base_semantic(query)
+
+    # Zone ambre (aca/integrations/sheets.py) : correspondance FAQ trouvée mais peu fiable — on la
+    # garde (mieux qu'un rejet sec sur un cas limite réel) mais on prévient l'humain dans le
+    # raisonnement affiché, et on retire la sentinelle avant qu'elle n'atteigne le prompt du Stratège.
+    low_confidence = context.startswith(sheets.LOW_CONFIDENCE_MARKER)
+    if low_confidence:
+        context = context[len(sheets.LOW_CONFIDENCE_MARKER):].lstrip("\n")
+
     print(f"   → {'Contexte trouvé.' if context else 'Aucune correspondance.'}")
-    reason = "Connaissance : contexte FAQ injecté." if context else "Connaissance : aucune correspondance FAQ."
+    if low_confidence:
+        reason = "Connaissance : contexte FAQ injecté (confiance modérée — à vérifier)."
+    elif context:
+        reason = "Connaissance : contexte FAQ injecté."
+    else:
+        reason = "Connaissance : aucune correspondance FAQ."
     return {"faq_context": context, "completed_agents": ["connaissance"], "reasoning_log": [reason]}
 
 
@@ -208,9 +261,7 @@ def veille_node(state: AgentState) -> dict:
     réponse pour ce tour-ci. Dégradation gracieuse (clé absente / recherche infructueuse → "").
     """
     print("\n🌐 [Agent Veille] FAQ sans correspondance → recherche en ligne...")
-    email = state["email_raw"]
-    besoin = (state.get("extracted_info") or {}).get("besoin_principal") or ""
-    query = besoin or f"{email.get('subject', '')} {email.get('body', '')}"
+    query = _build_rag_query(state)
     answer = veille.search_faq_online(query)
     print(f"   → {'FAQ enrichie, réponse injectée.' if answer else 'Aucune réponse en ligne.'}")
     reason = ("Veille : FAQ enrichie via recherche web." if answer
@@ -306,6 +357,7 @@ def stratege_node(state: AgentState) -> dict:
     faq_text = state.get("faq_context", "")
     history = state.get("sender_history", "")
     profile = state.get("company_profile", "")
+    feedback = state.get("reflection_feedback", "")
 
     messages = [
         SystemMessage(content=(
@@ -319,6 +371,7 @@ def stratege_node(state: AgentState) -> dict:
             f"--- PROFIL ENTREPRISE ---\n{profile if profile else 'Inconnu.'}\n"
             f"--- BASE DE CONNAISSANCES (FAQ) ---\n{faq_text if faq_text else 'Aucune FAQ pertinente trouvée.'}\n"
             f"--- HISTORIQUE CLIENT ---\n{history if history else 'Nouveau contact.'}\n"
+            + (f"--- CORRECTION DEMANDÉE PAR LE RELECTEUR (nœud Reflect) ---\n{feedback}\n" if feedback else "")
         )),
         HumanMessage(content=(
             f"Type de demande : {state['classification']}\n"
@@ -343,6 +396,52 @@ def stratege_node(state: AgentState) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Nœud Reflect (auto-critique) — relit la proposition avant qu'elle n'atteigne l'humain
+# ─────────────────────────────────────────────────────────────────────────────
+def reflection_node(state: AgentState) -> dict:
+    """
+    Auto-critique du brouillon (Llama-8B, simple vérification — pas de génération) : relit
+    `draft_response` face au `faq_context` réellement utilisé et signale une affirmation non étayée
+    par la FAQ (hallucination de prix/délai/fonctionnalité) ou un ton inapproprié. Si un problème est
+    trouvé, renvoie le brouillon au Stratège avec la critique pour réécriture. Une seule itération de
+    réécriture autorisée (borné par le nombre de passages de `stratege` dans `completed_agents`) —
+    au-delà, le brouillon passe tel quel, l'humain restant de toute façon le dernier filet de sécurité
+    à la pause de validation (`interrupt_before=["action"]`).
+    """
+    print("\n🔍 [Reflect] Auto-critique du brouillon...")
+    draft = state.get("draft_response", "")
+    faq_text = state.get("faq_context", "")
+
+    if state.get("completed_agents", []).count("stratege") >= 2:
+        print("   → Déjà réécrit une fois → garde-fou anti-boucle, brouillon conservé tel quel.")
+        return {"next_agent": "ok", "reflection_feedback": "",
+                "reasoning_log": ["Reflect : 2e passage, brouillon conservé tel quel (garde-fou anti-boucle)."]}
+
+    messages = [
+        SystemMessage(content=(
+            "Tu es un relecteur qualité. Compare la PROPOSITION à la BASE DE CONNAISSANCES (FAQ) "
+            "fournie. Réponds UNIQUEMENT par :\n"
+            "- OK  si la proposition ne contient aucune affirmation (prix, délai, fonctionnalité) "
+            "absente ou contredite par la FAQ, et si le ton est professionnel.\n"
+            "- REWRITE: <raison en une phrase>  sinon (hallucination ou ton inapproprié).\n"
+            f"--- BASE DE CONNAISSANCES (FAQ) ---\n{faq_text if faq_text else 'Aucune.'}\n"
+        )),
+        HumanMessage(content=f"--- PROPOSITION ---\n{draft}"),
+    ]
+    verdict = fast_llm().invoke(messages).content.strip()
+
+    if verdict.upper().startswith("REWRITE"):
+        reason = verdict.split(":", 1)[1].strip() if ":" in verdict else "raison non précisée"
+        print(f"   → Réécriture demandée : {reason}")
+        return {"next_agent": "rewrite", "reflection_feedback": reason,
+                "reasoning_log": [f"Reflect : réécriture demandée ({reason})."]}
+
+    print("   → OK, proposition validée.")
+    return {"next_agent": "ok", "reflection_feedback": "",
+            "reasoning_log": ["Reflect : proposition validée, aucune correction nécessaire."]}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 7. Nœud 6 — Action (écriture CRM). S'exécute UNIQUEMENT après validation humaine,
 #    car le graphe est interrompu (interrupt_before) juste avant ce nœud.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -360,8 +459,16 @@ def action_node(state: AgentState) -> dict:
         sender=email.get("sender", ""),
         draft=state.get("draft_response", ""),
     )
+    hubspot_deal_id = hubspot.create_lead(
+        email_classification=state["classification"],
+        extracted_info=state.get("extracted_info", {}),
+        sender=email.get("sender", ""),
+        draft=state.get("draft_response", ""),
+    )
 
     status = "Lead ajouté au CRM."
+    if hubspot_deal_id:
+        status += " Deal HubSpot créé."
     msg_id = state.get("gmail_message_id")
     if msg_id:
         service = None
@@ -419,8 +526,10 @@ def _supervisor_choose(state: AgentState, options: list) -> str:
 def supervisor_node(state: AgentState) -> dict:
     """
     Superviseur : oriente vers le prochain agent spécialisé, avec des garde-fous déterministes
-    (SPAM/AUTRE → FINISH ; jamais 2× le même agent ; `stratege` en dernier ; FINISH une fois la
-    proposition rédigée). Émet une trace de raisonnement dans `reasoning_log`.
+    (SPAM/AUTRE/SUPPORT → FINISH ; jamais 2× le même agent ; `stratege` en dernier). Une fois
+    `stratege` choisi, le graphe quitte la boucle du superviseur (`stratege` → `reflection`, cf.
+    plus bas) — il n'est donc plus jamais rappelé pour cette analyse. Émet une trace de raisonnement
+    dans `reasoning_log`.
     """
     print("\n🧭 [Superviseur] Décision du prochain agent...")
     classification = state["classification"]
@@ -430,11 +539,6 @@ def supervisor_node(state: AgentState) -> dict:
         print(f"   → FINISH ({classification})")
         return {"next_agent": "FINISH",
                 "reasoning_log": [f"Superviseur : e-mail {classification} (hors périmètre) → FINISH."]}
-
-    if "stratege" in completed:
-        print("   → FINISH (proposition prête)")
-        return {"next_agent": "FINISH",
-                "reasoning_log": ["Superviseur : proposition rédigée → FINISH (attente validation)."]}
 
     # Garde-fou déterministe : FAQ vide après la Connaissance → une tentative de Veille (web)
     # avant de laisser le Stratège rédiger sans aucun contexte FAQ.
@@ -560,10 +664,11 @@ def routing_node(state: AgentState) -> dict:
 #   START → [classifier] → [memory_lookup] → [extractor] → [SUPERVISEUR] ⇄ workers
 #              (8B)          (CRM read)         (70B)         (8B, routage)
 #                                                              ├─ enrichissement (Tavily + cache)
-#                                                              ├─ connaissance   (RAG sémantique)
+#                                                              ├─ connaissance   (RAG sémantique, requête décontextualisée)
 #                                                              ├─ veille         (Tavily si FAQ vide → enrichit la FAQ)
-#                                                              └─ stratege        (proposition)
-#          [SUPERVISEUR] --FINISH--> [routing] → [notification] --interrupt-- [action] → END
+#                                                              └─ stratege ──→ [reflection] ─┬─rewrite─→ (retour à stratege, 1x max)
+#                                                                               (auto-critique 8B)  └─ok──→ [routing]
+#          [SUPERVISEUR] --FINISH (SPAM/AUTRE/SUPPORT)--> [routing] → [notification] --interrupt-- [action] → END
 #                                     (SUPPORT/AUTRE   (Slack/e-mail,   (validation humaine) (write CRM + Gmail)
 #                                      → équipe,        no-op pour
 #                                      no-op sinon)     SUPPORT/AUTRE/SPAM)
@@ -582,6 +687,7 @@ workflow.add_node("enrichissement", enrichissement_node, retry_policy=RETRY_POLI
 workflow.add_node("connaissance", connaissance_node, retry_policy=RETRY_POLICY)
 workflow.add_node("veille", veille_node, retry_policy=RETRY_POLICY)
 workflow.add_node("stratege", stratege_node, retry_policy=RETRY_POLICY)
+workflow.add_node("reflection", reflection_node, retry_policy=RETRY_POLICY)
 workflow.add_node("routing", routing_node, retry_policy=RETRY_POLICY)
 workflow.add_node("notification", notification_node, retry_policy=RETRY_POLICY)
 workflow.add_node("action", action_node, retry_policy=RETRY_POLICY)
@@ -607,7 +713,17 @@ workflow.add_conditional_edges(
 workflow.add_edge("enrichissement", "supervisor")
 workflow.add_edge("connaissance", "supervisor")
 workflow.add_edge("veille", "supervisor")
-workflow.add_edge("stratege", "supervisor")
+
+# Nœud « Reflect » (auto-critique) : le Stratège ne revient plus directement au superviseur — sa
+# proposition est d'abord relue. `reflection_node` renvoie soit "rewrite" (retour au Stratège avec
+# la critique dans `reflection_feedback`, une seule fois — cf. garde-fou anti-boucle dans le nœud),
+# soit "ok" (poursuite normale vers le routage, sans repasser par le superviseur).
+workflow.add_edge("stratege", "reflection")
+workflow.add_conditional_edges(
+    "reflection",
+    lambda s: s["next_agent"],
+    {"rewrite": "stratege", "ok": "routing"},
+)
 workflow.add_edge("routing", "notification")
 workflow.add_edge("notification", "action")
 workflow.add_edge("action", END)
