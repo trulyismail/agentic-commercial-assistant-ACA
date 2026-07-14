@@ -461,12 +461,17 @@ sont pas traités, la phase commercialisation ne démarre pas. Classés par levi
    réflexion plafonnée, SPAM court-circuité, garde-fou veille). `python -m pytest tests/`.
    *Pourquoi c'était le levier n°1 :* chaque nouvel ajout obligeait à revérifier manuellement tout
    le reste ; ces vérifications sont maintenant figées et rejouables en 2 secondes.
-2. **Exercer les chemins « codés mais jamais joués en réel »** — le code est écrit et le repli
-   gracieux vérifié, mais jamais le chemin nominal avec de vraies références :
-   `TAVILY_API_KEY` (agents enrichissement + veille), un vrai webhook Slack / `SUPPORT_EMAIL` /
-   `HR_EMAIL` (notify + routing), `relance.py` sur un vrai fil Gmail avec une vraie réponse,
-   et le tableau de bord sur plusieurs jours réels de données. *Pourquoi :* la démo de soutenance
-   et tout usage réel passeront par ces chemins-là, pas par les replis.
+2. 🟡 **Largement fait (2026-07-12) — Exercer les chemins « codés mais jamais joués en réel »** :
+   ✅ `TAVILY_API_KEY` configurée et vérifiée en direct — enrichissement (profil réel obtenu pour
+   doctolib.fr via Tavily, mis en cache dans `Enrichissement_Cache`, relu depuis le cache au 2e
+   appel sans appel Tavily) et veille (réponse web réelle → paire Q/R formatée par Groq → ligne
+   FAQ en staging « à valider », invisible du RAG, supprimée après vérification — aller-retour
+   propre). ✅ Webhook Slack réel configuré (`#nouveau-canal`, workspace « acam ») et vérifié —
+   `notify.py` a livré un vrai message, et `routing_node` a livré une vraie alerte SUPPORT
+   (`SUPPORT_SLACK_WEBHOOK_URL`, même canal pour l'instant — à séparer plus tard). **Reste** :
+   de vraies adresses `SUPPORT_EMAIL`/`HR_EMAIL` (elles conditionnent aussi la branche brouillon
+   de transfert Gmail du routage), `relance.py` sur un vrai fil Gmail avec une vraie réponse, et
+   le tableau de bord sur plusieurs jours réels de données.
 3. **Retry sur les écritures SQLite hors graphe** — ❌ `queue_store.py`/`audit_log.py` (`enqueue`,
    `mark_ready`, `mark_validated`, `log_validation`) s'exécutent hors `app.invoke()` et ne sont donc
    pas couverts par `RETRY_POLICY` ; un conflit de verrou entre `poller.py` et `ui.py` y lèverait

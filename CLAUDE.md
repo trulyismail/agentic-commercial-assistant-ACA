@@ -393,17 +393,19 @@ afterward.
   would still raise. Low risk at prototype volume (one poll cycle, occasional UI clicks), but a
   real fix would wrap those calls in their own small retry loop before real concurrent load.
   `PROCESSED_LABEL_NAME`/`gmail.modify` mean the poller never deletes anything.
-- ✅ **Fixed**: P0 item 2 (Slack/e-mail notification) is now coded (`notify.py` + `notification_node`,
-  graceful no-op without `SLACK_WEBHOOK_URL`/`NOTIFY_EMAIL`) — not yet exercised against a real
-  webhook/inbox (no destination configured in `.env` yet, only the graceful-fallback path verified).
-- ✅ **Fixed**: P0 item 5 (routing `SUPPORT`/`AUTRE`) is now coded (`routing_node` + declarative
-  `ROUTING_DESTINATIONS`, alert via generalized `notify.send()` + Gmail forward draft via
-  `gmail_reader.create_forward_draft()`) — same as item 2, only the graceful-fallback path is
-  verified so far; `SUPPORT_EMAIL`/`HR_EMAIL`/webhooks are left commented-out in `.env` pending real
-  addresses.
-- `TAVILY_API_KEY` is not set in the current `.env`, so the enrichment agent always hits its graceful
-  fallback (`company_profile = ""`); the Tavily + `Enrichissement_Cache` path is coded and unit-safe but
-  not yet exercised against the live API.
+- ✅ **Fixed (2026-07-12, live-verified)**: P0 item 2 (Slack/e-mail notification) — `SLACK_WEBHOOK_URL`
+  is now set in `.env` (incoming webhook to `#nouveau-canal`, "acam" workspace) and
+  `python -m aca.integrations.notify` delivered a real message to the channel.
+- ✅ **Fixed (2026-07-12, live-verified)**: P0 item 5 (routing `SUPPORT`/`AUTRE`) — the Slack-alert
+  path was exercised live: `SUPPORT_SLACK_WEBHOOK_URL` is set (currently the **same** webhook/channel
+  as the generic one — split into dedicated support/HR channels later) and a `routing_node` call with
+  a SUPPORT state delivered a real alert. Still pending: real `SUPPORT_EMAIL`/`HR_EMAIL` addresses
+  (commented out in `.env`), which also gate the Gmail forward-draft branch.
+- ✅ **Fixed (2026-07-12, live-verified)**: `TAVILY_API_KEY` is now set in `.env`. Enrichment agent
+  exercised live end-to-end: first call for a real corporate domain (doctolib.fr) hit Tavily and
+  cached the profile in `Enrichissement_Cache`; second call was served from the cache without a
+  Tavily call. `veille` exercised live too: Tavily answer → Groq Q/R formatting → staged FAQ row
+  (`à valider`, invisible to the RAG) → test row deleted after verification (clean round-trip).
 - The clarification trigger is "empty `besoin_principal`"; the 70B extractor usually fills it, so
   clarification fires only on genuinely vague emails (by design).
 - ✅ **Fixed**: `search_knowledge_base_semantic`'s similarity cutoff was too permissive against the
@@ -520,10 +522,12 @@ passes against the Supabase-backed checkpointer + RAG (see Known gaps for the tw
 and fixed during verification: the IPv6-only direct-connection host, and pgvector's psycopg adapter
 not handling plain Python lists). Also done: the RAG went from a single similarity cutoff to a hybrid
 dense+sparse RRF fusion with a dual "amber zone" confidence threshold (0.72/0.62, superseding the
-earlier single 0.65 cutoff — see `connaissance_node` above and Known gaps). Remaining:
-exercise `notify.py`/`routing_node`/the enrichment agent/`veille`/`relance.py` against real
-Slack+`TAVILY_API_KEY`+support/HR-address+Gmail-thread-with-a-reply credentials, multi-tenant, and the
-eventual n8n port (design already n8n-ready). Also done from P2, ahead of schedule at the user's
+earlier single 0.65 cutoff — see `connaissance_node` above and Known gaps). `notify.py`,
+`routing_node` (Slack branch), the enrichment agent, and `veille` are now **live-verified** against
+real Tavily + Slack credentials (2026-07-12 — see Known gaps). Remaining: real
+`SUPPORT_EMAIL`/`HR_EMAIL` addresses (gate the Gmail forward-draft branch of `routing_node`),
+`relance.py` against a real Gmail thread with a reply, the dashboard on real multi-day data,
+multi-tenant, and the eventual n8n port (design already n8n-ready). Also done from P2, ahead of schedule at the user's
 explicit request: item — real CRM (§11.1 mentions HubSpot as the eventual target) —
 [hubspot.py](aca/integrations/hubspot.py), wired into `action_node` **alongside** Sheets (Sheets stays
 the memory read by `find_leads_by_sender`/the dashboard; decided over fully replacing it, to avoid

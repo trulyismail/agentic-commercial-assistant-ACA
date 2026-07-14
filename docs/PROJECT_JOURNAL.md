@@ -497,3 +497,42 @@ Le point n°1 de la dette technique (§11.6) est soldé. Tout changement futur �
 du §11.6, et a fortiori la phase commercialisation P3 — pourra être vérifié en 2 secondes au lieu
 d'une session de tests manuels. `pytest` a été ajouté aux dépendances du projet (section dev de
 `requirements.txt`).
+
+---
+
+## 2026-07-12 (suite 4) — Les vraies clés arrivent : Tavily et Slack passent du « repli gracieux » au réel
+
+### Le problème de départ
+
+Depuis leur création, plusieurs briques du projet n'avaient jamais tourné que sur leur « repli
+gracieux » : le code vérifiait bien que *sans* clé d'API tout se dégradait proprement (pas de
+plantage, résultat vide), mais le chemin nominal — celui qu'une vraie démo ou un vrai usage
+emprunterait — n'avait jamais été exécuté, faute de clés. C'était le point n°2 de la dette
+technique (§11.6). L'utilisateur a créé les deux références manquantes : une clé Tavily (recherche
+web, gratuite) et un webhook Slack entrant (workspace « acam », canal #nouveau-canal).
+
+### Ce qui a été vérifié en direct (et ce que ça a donné)
+
+1. **Agent Enrichissement (Tavily + cache)** : premier appel sur un vrai domaine d'entreprise
+   (doctolib.fr) → Tavily a renvoyé un vrai profil (secteur, taille, activité), immédiatement mis
+   en cache dans l'onglet `Enrichissement_Cache` du Google Sheets. Deuxième appel sur le même
+   domaine → réponse servie **depuis le cache**, sans appel web (c'est le principe de la « mémoire
+   hybride » : on ne paie la recherche qu'une fois par entreprise).
+2. **Notification Slack** : `python -m aca.integrations.notify` a livré un vrai message dans
+   #nouveau-canal — la chaîne « une analyse attend votre validation » est opérationnelle de bout
+   en bout.
+3. **Routage SUPPORT** : un e-mail SUPPORT simulé passé à `routing_node` a déclenché une vraie
+   alerte Slack via `SUPPORT_SLACK_WEBHOOK_URL` (pour l'instant le même canal que les leads — à
+   séparer en canaux dédiés support/RH quand ils existeront).
+4. **Agent Veille (le circuit complet)** : une question absente de la FAQ (« bonnes pratiques RGPD
+   pour un CRM de PME ») → vraie recherche Tavily → reformulation en paire question/réponse par
+   Groq → écriture dans l'onglet FAQ avec le statut « à valider » (invisible du RAG tant qu'un
+   humain n'approuve pas — le mécanisme anti-pollution vérifié en conditions réelles). La ligne de
+   test a ensuite été supprimée après vérification, pour ne rien laisser traîner.
+
+### Ce qui reste du point n°2
+
+Trois choses, qui demandent du réel plutôt que du code : de vraies adresses e-mail support/RH
+(elles débloquent aussi le brouillon de transfert Gmail du routage), un test de `relance.py` sur un
+vrai fil Gmail où un prospect a réellement répondu, et laisser le tableau de bord accumuler
+quelques jours de données réelles.
