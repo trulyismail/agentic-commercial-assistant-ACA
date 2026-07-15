@@ -588,3 +588,54 @@ Les 3 premiers points de la dette technique (§11.6) sont maintenant soldés : l
 plupart des vérifications en conditions réelles (Tavily, Slack), et ce retry local. Il reste dans
 cette section : quelques renforcements de robustesse de l'IA (peu urgents), la cadence de relance
 multi-tours, et le rapport de stage lui-même (volontairement pour la fin).
+
+---
+
+## 2026-07-12 (suite 6) — L'extracteur ne « parse » plus du texte à la main : sortie structurée garantie
+
+### Le problème de départ
+
+Le nœud `extractor_node` (celui qui lit un e-mail et en tire l'entreprise, le contact, l'urgence et
+le besoin) demandait jusqu'ici à l'IA de répondre avec du texte au format JSON, puis essayait de le
+relire avec `json.loads()` — une fonction Python qui transforme du texte en objet, mais qui plante
+si le texte n'est pas EXACTEMENT du JSON valide (une virgule en trop, un mot ajouté par l'IA avant
+le JSON, etc.). En cas d'échec, le code se rabattait sur `{"raw": le texte brut}` — un filet de
+sécurité qui évitait le plantage, mais qui perdait complètement la structure attendue (plus
+d'entreprise, plus de contact, etc., juste du texte informe). Ce risque était réel : plus l'IA est
+poussée à produire un format précis par la seule force du texte, plus elle peut s'en écarter.
+
+### La solution : demander à l'IA elle-même de garantir le format
+
+La bibliothèque utilisée (LangChain) propose une fonctionnalité appelée `with_structured_output()` :
+au lieu de demander du texte et croiser les doigts, on donne au modèle un schéma exact (ici, un
+« modèle Pydantic » — une classe Python qui décrit précisément quels champs existent, quels sont
+optionnels, et quelles valeurs sont autorisées) et l'IA renvoie une réponse qui respecte forcément
+ce schéma. Techniquement, Groq fait ça via de l'« appel d'outil » (tool-calling) : le modèle ne
+génère pas du texte libre, il remplit les arguments d'un outil dont la forme est fixée à l'avance.
+
+Le nouveau schéma, `ExtractedInfo`, définit quatre champs : `entreprise`, `contact`, `urgence`
+(qui ne peut valoir QUE "haute", "moyenne", "basse" ou rien — plus de faute de frappe possible sur
+ce champ) et `besoin_principal`. Le vieux `json.loads()` et le filet de sécurité `{"raw": ...}` ont
+disparu — plus besoin, puisque le format est maintenant garanti par construction plutôt que vérifié
+après coup.
+
+### Un vrai plan B a quand même été gardé
+
+Même avec cette garantie, un cas reste possible : une vraie panne réseau qui survit aux 3 tentatives
+automatiques déjà en place (`RETRY_POLICY`), ou un cas limite où le modèle refuse de produire une
+sortie conforme. Plutôt que de laisser ce cas planter tout le programme, `extractor_node` intercepte
+l'erreur et renvoie un objet `ExtractedInfo` vide (tous les champs à `None`) — exactement le même
+traitement qu'un e-mail vague : la suite du programme (`clarification_node`) posera une question à
+l'humain, comme elle le fait déjà quand le besoin n'est pas clair. Aucune régression du principe
+« ne jamais planter tout le pipeline pour une seule information manquante ».
+
+### Comment on sait que ça marche
+
+Trois nouveaux tests unitaires (extraction complète, champs manquants qui deviennent bien `None`,
+sortie invalide qui déclenche le repli gracieux) — pour les rendre possibles sans appeler la
+vraie IA, le faux LLM des tests (`FakeLLM`) a appris à simuler `with_structured_output()`. Et,
+pour être sûr que ça marche aussi en vrai : trois appels réels contre l'API Groq — un e-mail clair
+et complet (tous les champs bien remplis, l'urgence correctement classée « haute »), un e-mail
+vague (les champs absents redescendent bien à `None`, pas de plantage). Suite complète repassée :
+92 tests (89 + ces 3 nouveaux) en un peu plus de 2 secondes, plus un run complet des 5 e-mails de
+démonstration contre la vraie API sans aucune régression.

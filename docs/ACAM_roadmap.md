@@ -144,9 +144,13 @@ Classées par effort estimé (croissant) :
 - **Few-shot prompting** — les prompts de `classifier_node` / `extractor_node` sont zéro-shot ;
   ajouter 2-3 exemples annotés par catégorie réduirait les erreurs de classification en bordure
   (ex : SUPPORT vs DEVIS ambigus).
-- **`with_structured_output()` / Pydantic** au lieu de `json.loads()` manuel dans `extractor_node` —
-  élimine le fallback `{"raw": ...}` et garantit un schéma strict côté LangChain plutôt qu'un
-  parsing défensif côté application.
+- ✅ **Fait (2026-07-12) — `with_structured_output()` / Pydantic** au lieu de `json.loads()` manuel
+  dans `extractor_node` : nouveau modèle `ExtractedInfo` (Pydantic), extraction forcée par
+  tool-calling côté Groq — plus de JSON malformé à parser, plus de fallback `{"raw": ...}` fantôme
+  (rien en aval ne le lisait). Repli gracieux si l'extraction structurée échoue malgré tout (réseau,
+  sortie hors schéma) : `ExtractedInfo()` vide plutôt qu'un plantage de `app.invoke()` — traité
+  ensuite comme un e-mail vague par `clarification_node`. Vérifié : 3 nouveaux tests unitaires +
+  3 appels réels contre Groq (champs complets, champs manquants, repli sur schéma vide simulé).
 - **Score de confiance de classification** — faire retourner un score (0-1) par `classifier_node`
   et router vers une relecture humaine systématique en dessous d'un seuil, au lieu d'un
   tout-ou-rien SPAM/AUTRE/valide.
@@ -480,9 +484,9 @@ sont pas traités, la phase commercialisation ne démarre pas. Classés par levi
    `RETRY_POLICY`. Vérifié par 5 tests (`tests/test_storage.py`) : succès après un verrou
    transitoire, échec propre après épuisement des tentatives sur un verrou persistant, et aucune
    tentative supplémentaire sur une exception qui n'est pas un conflit de verrou.
-4. **Améliorations de robustesse LLM encore ouvertes au §10** (rappel, non refaits ici) :
-   few-shot prompting (classifier/extractor, encore zéro-shot), `with_structured_output()`/Pydantic
-   pour l'extracteur (remplace `json.loads` + repli `{"raw": ...}`), score de confiance de
+4. 🟡 **Partiel — Améliorations de robustesse LLM ouvertes au §10** :
+   ✅ `with_structured_output()`/Pydantic pour l'extracteur (fait 2026-07-12, voir §10). **Reste** :
+   few-shot prompting (classifier/extractor, encore zéro-shot), score de confiance de
    classification (relecture humaine sous un seuil), nœud `ingestion` explicite dans le graphe
    (l'extraction des pièces jointes vit encore dans `ui.py`/`poller.py`/`gmail_reader.py`).
 5. **Cadence de relance multi-tours** — une seule relance par lead aujourd'hui (`relance.py`) ;

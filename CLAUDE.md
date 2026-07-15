@@ -34,8 +34,12 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   `routing_node` below).
 - `memory_lookup_node` — **long-term memory read**: `sheets.find_leads_by_sender()` fills
   `sender_history` + `is_duplicate` from the "Leads" tab. No LLM.
-- `extractor_node` — extracts `{entreprise, contact, urgence, besoin_principal}` as JSON (falls back to
-  `{"raw": ...}`).
+- `extractor_node` — extracts `{entreprise, contact, urgence, besoin_principal}` via `with_structured_output(ExtractedInfo)`
+  (Pydantic model, tool-calling under the hood — no manual `json.loads()`, no malformed-JSON risk).
+  Graceful fallback to an all-`None` `ExtractedInfo()` if structured extraction fails outright
+  (network error surviving `RETRY_POLICY`'s 3 attempts, or the model producing something the schema
+  rejects) — never crashes `app.invoke()`, and `clarification_node` asks the human exactly as it
+  would for a genuinely vague email.
 - `clarification_node` — **interactive reasoning**: if `besoin_principal` is missing/ambiguous (and not
   SPAM/AUTRE/SUPPORT), calls LangGraph's dynamic `interrupt()` to ask the human one question; the
   answer is merged into `extracted_info` on resume (`Command(resume=...)`). Otherwise passes through.
@@ -319,7 +323,7 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   `classifier_node` and reports overall/per-category accuracy + misclassifications. Last measured:
   96% (48/50). Run via `python -m aca.eval.eval_classifier`; re-run once real emails are available to track
   accuracy under real conditions instead of the synthetic set.
-- [tests/](tests/) — automated pytest suite (89 tests, offline, ~2s — see Known gaps for full
+- [tests/](tests/) — automated pytest suite (92 tests, offline, ~2s — see Known gaps for full
   coverage list): [conftest.py](tests/conftest.py) (env isolation + `FakeLLM`/`ExplodingLLM`),
   [test_graph_nodes.py](tests/test_graph_nodes.py), [test_sheets_helpers.py](tests/test_sheets_helpers.py),
   [test_storage.py](tests/test_storage.py) (incl. `sqlite_retry.py` coverage),
@@ -380,7 +384,7 @@ afterward.
 
 ## Known gaps
 
-- ✅ **Fixed (2026-07-12)**: automated test suite now exists — `tests/` (89 tests, pytest, run via
+- ✅ **Fixed (2026-07-12)**: automated test suite now exists — `tests/` (92 tests, pytest, run via
   `python -m pytest tests/`, ~2s, fully offline). `tests/conftest.py` blanks every external-service
   env var *before* any `aca.*` import (`load_dotenv` never overrides pre-set vars, so the real
   `.env` stays inert) and redirects all SQLite paths to a temp dir — no test ever touches Supabase,

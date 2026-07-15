@@ -69,6 +69,23 @@ class FakeLLM:
         response.content = content
         return response
 
+    def with_structured_output(self, schema):
+        """Simule `ChatGroq.with_structured_output(schema)` : parse la réponse JSON du faux LLM en
+        une instance du schéma Pydantic donné, comme le ferait le tool-calling réel de Groq."""
+        return _StructuredFakeLLM(self, schema)
+
+
+class _StructuredFakeLLM:
+    def __init__(self, fake_llm, schema):
+        self._fake_llm = fake_llm
+        self._schema = schema
+
+    def invoke(self, messages):
+        import json
+
+        response = self._fake_llm.invoke(messages)
+        return self._schema(**json.loads(response.content))
+
 
 class ExplodingLLM(FakeLLM):
     """Faux LLM qui échoue s'il est appelé — pour vérifier qu'un chemin n'appelle PAS le LLM."""

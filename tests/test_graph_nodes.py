@@ -3,17 +3,21 @@ Tests unitaires des nœuds du graphe (aca/core/app.py) — chaque nœud est une 
 (state -> dict partiel), testable sans exécuter le graphe complet. Tous les LLM sont remplacés
 par des faux (cf. conftest.FakeLLM) : aucun appel réseau.
 """
+import json
+
 import pytest
 from conftest import ExplodingLLM, FakeLLM
 
 import aca.core.app as app_module
 from aca.core.app import (
     CATEGORIES_SANS_SUITE,
+    ExtractedInfo,
     _build_rag_query,
     _retry_on,
     clarification_node,
     classifier_node,
     connaissance_node,
+    extractor_node,
     memory_lookup_node,
     notification_node,
     reflection_node,
@@ -41,6 +45,36 @@ def test_classifier_valid_label(monkeypatch):
 def test_classifier_unknown_label_falls_back_to_autre(monkeypatch):
     monkeypatch.setattr(app_module, "fast_llm", lambda: FakeLLM("BANANE"))
     assert classifier_node(_state())["classification"] == "AUTRE"
+
+
+# ── extractor_node (sortie structurée Pydantic) ──────────────────────────────────────────────
+def test_extractor_returns_structured_fields(monkeypatch):
+    payload = json.dumps({
+        "entreprise": "Entreprise SA", "contact": "Jean Dupont",
+        "urgence": "haute", "besoin_principal": "10 licences Enterprise",
+    })
+    monkeypatch.setattr(app_module, "smart_llm", lambda: FakeLLM(payload))
+    out = extractor_node(_state())
+    assert out["extracted_info"] == {
+        "entreprise": "Entreprise SA", "contact": "Jean Dupont",
+        "urgence": "haute", "besoin_principal": "10 licences Enterprise",
+    }
+
+
+def test_extractor_missing_fields_become_none(monkeypatch):
+    monkeypatch.setattr(app_module, "smart_llm", lambda: FakeLLM(json.dumps({})))
+    out = extractor_node(_state())
+    assert out["extracted_info"] == {
+        "entreprise": None, "contact": None, "urgence": None, "besoin_principal": None,
+    }
+
+
+def test_extractor_graceful_fallback_on_structured_output_failure(monkeypatch):
+    # Sortie non conforme au schéma (urgence hors énum "haute|moyenne|basse") -> ValidationError
+    # côté Pydantic, absorbée : plus de plantage de app.invoke(), champs vides comme un e-mail vague.
+    monkeypatch.setattr(app_module, "smart_llm", lambda: FakeLLM(json.dumps({"urgence": "extreme"})))
+    out = extractor_node(_state())
+    assert out["extracted_info"] == ExtractedInfo().model_dump()
 
 
 # ── memory_lookup_node ───────────────────────────────────────────────────────────────────────

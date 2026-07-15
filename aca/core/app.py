@@ -2,8 +2,9 @@ import os
 import json
 import operator
 import sqlite3
-from typing import TypedDict, Optional, Annotated
+from typing import TypedDict, Optional, Annotated, Literal
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import interrupt, RetryPolicy, default_retry_on
@@ -272,13 +273,30 @@ def veille_node(state: AgentState) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. Nœud 4 — Extraction structurée (Llama 70B → précision JSON)
 # ─────────────────────────────────────────────────────────────────────────────
+class ExtractedInfo(BaseModel):
+    """
+    Schéma strict des informations extraites d'un e-mail commercial. Remplace l'ancien
+    `json.loads(response.content)` + repli `{"raw": ...}` : `with_structured_output()` force le
+    modèle à produire un objet conforme à ce schéma (tool-calling côté Groq), donc plus jamais de
+    JSON malformé à parser à la main — et plus de champ `raw` fantôme que rien en aval ne lisait.
+    """
+    entreprise: Optional[str] = Field(None, description="Nom de l'entreprise du prospect, si mentionné.")
+    contact: Optional[str] = Field(None, description="Nom de la personne de contact, si mentionné.")
+    urgence: Optional[Literal["haute", "moyenne", "basse"]] = Field(
+        None, description="Niveau d'urgence perçu de la demande."
+    )
+    besoin_principal: Optional[str] = Field(
+        None, description="Résumé concis (une phrase) du besoin principal exprimé par le prospect."
+    )
+
+
 def extractor_node(state: AgentState) -> dict:
-    """Extrait les informations clés au format JSON. Llama 70B = précision."""
+    """Extrait les informations clés au format structuré (Pydantic). Llama 70B = précision."""
     print("\n🧠 [Groq/Llama-70B] Extraction des informations clés...")
 
     email = state["email_raw"]
     attachment = state.get("attachment_text", "")
-    
+
     email_text = (
         f"Expéditeur : {email.get('sender', '')}\n"
         f"Objet : {email.get('subject', '')}\n"
@@ -289,20 +307,22 @@ def extractor_node(state: AgentState) -> dict:
 
     messages = [
         SystemMessage(content=(
-            "Tu es un assistant d'extraction de données. "
-            "Lis l'e-mail et extrais les informations dans ce format JSON exact :\n"
-            '{"entreprise": "...", "contact": "...", "urgence": "haute|moyenne|basse", "besoin_principal": "..."}\n'
-            "Si une information est absente, mets null. "
-            "Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."
+            "Tu es un assistant d'extraction de données. Lis l'e-mail et extrais les informations "
+            "demandées. Laisse un champ vide si l'information est absente du message."
         )),
         HumanMessage(content=email_text),
     ]
 
-    response = smart_llm().invoke(messages)
     try:
-        extracted = json.loads(response.content.strip())
-    except Exception:
-        extracted = {"raw": response.content.strip()}
+        result = smart_llm().with_structured_output(ExtractedInfo).invoke(messages)
+        extracted = result.model_dump()
+    except Exception as e:
+        # Dégradation gracieuse (même principe que le reste du projet) : si l'extraction structurée
+        # échoue malgré les 3 tentatives du RETRY_POLICY (panne API, sortie non conforme au schéma...),
+        # on ne fait pas planter tout `app.invoke()` — `clarification_node` posera la question à
+        # l'humain puisque `besoin_principal` sera vide, exactement comme sur un e-mail vague.
+        print(f"   → ⚠️ Extraction structurée échouée ({e}), repli sur des champs vides.")
+        extracted = ExtractedInfo().model_dump()
 
     print(f"   → Extrait : {extracted}")
     return {"extracted_info": extracted}
