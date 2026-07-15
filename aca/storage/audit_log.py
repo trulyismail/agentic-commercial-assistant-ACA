@@ -9,6 +9,7 @@ l'UI ; ce module ne fait que tracer qui a pris la décision, pour un usage solo/
 import os
 import sqlite3
 from datetime import datetime
+from .sqlite_retry import with_sqlite_retry
 
 DB_PATH = os.getenv("ACA_AUDIT_DB", "data/audit.sqlite")
 
@@ -23,6 +24,7 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+@with_sqlite_retry
 def log_validation(thread_id: str, validated_by: str, classification: str, sender: str) -> None:
     """Enregistre un événement de validation humaine (traçabilité minimale)."""
     with _connect() as conn:
@@ -35,6 +37,7 @@ def log_validation(thread_id: str, validated_by: str, classification: str, sende
         conn.commit()
 
 
+@with_sqlite_retry
 def list_recent(limit: int = 20) -> list:
     """Derniers événements de validation, les plus récents d'abord."""
     with _connect() as conn:

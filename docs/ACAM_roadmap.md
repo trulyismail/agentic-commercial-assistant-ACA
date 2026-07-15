@@ -472,10 +472,14 @@ sont pas traités, la phase commercialisation ne démarre pas. Classés par levi
    de vraies adresses `SUPPORT_EMAIL`/`HR_EMAIL` (elles conditionnent aussi la branche brouillon
    de transfert Gmail du routage), `relance.py` sur un vrai fil Gmail avec une vraie réponse, et
    le tableau de bord sur plusieurs jours réels de données.
-3. **Retry sur les écritures SQLite hors graphe** — ❌ `queue_store.py`/`audit_log.py` (`enqueue`,
-   `mark_ready`, `mark_validated`, `log_validation`) s'exécutent hors `app.invoke()` et ne sont donc
-   pas couverts par `RETRY_POLICY` ; un conflit de verrou entre `poller.py` et `ui.py` y lèverait
-   une exception. Risque faible au volume prototype, vraie correction = petite boucle de retry locale.
+3. ✅ **Fait (2026-07-12) — Retry sur les écritures SQLite hors graphe** :
+   [sqlite_retry.py](../aca/storage/sqlite_retry.py) — décorateur `with_sqlite_retry` (3 tentatives,
+   backoff linéaire, ne rejoue que `sqlite3.OperationalError`) appliqué à TOUTES les fonctions
+   publiques des 4 registres locaux (`queue_store.py`, `analytics_store.py`, `audit_log.py`,
+   `followup_store.py`), qui s'exécutent hors `app.invoke()` et n'étaient donc pas couverts par
+   `RETRY_POLICY`. Vérifié par 5 tests (`tests/test_storage.py`) : succès après un verrou
+   transitoire, échec propre après épuisement des tentatives sur un verrou persistant, et aucune
+   tentative supplémentaire sur une exception qui n'est pas un conflit de verrou.
 4. **Améliorations de robustesse LLM encore ouvertes au §10** (rappel, non refaits ici) :
    few-shot prompting (classifier/extractor, encore zéro-shot), `with_structured_output()`/Pydantic
    pour l'extracteur (remplace `json.loads` + repli `{"raw": ...}`), score de confiance de

@@ -152,7 +152,15 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   `mark_ready()` flips it to `en_attente` once the graph reaches the pause, `reset_stale()` recovers
   entries stuck in `en_cours` past a timeout (default 15 min). `list_pending()` feeds the UI's "File
   d'attente" sidebar panel; `mark_validated(thread_id)` is called after "Valider".
-  `list_validated_older_than()`/`purge_validated_older_than()` support `retention.py`.
+  `list_validated_older_than()`/`purge_validated_older_than()` support `retention.py`. Every public
+  function is wrapped with `sqlite_retry.with_sqlite_retry()` (below).
+- [sqlite_retry.py](aca/storage/sqlite_retry.py) — `with_sqlite_retry()` decorator (3 attempts, linear
+  backoff) applied to every public function of `queue_store.py`/`analytics_store.py`/`audit_log.py`/
+  `followup_store.py` — the standalone SQLite writes these four modules make **outside** the graph
+  (`app.RETRY_POLICY` only covers nodes during `app.invoke()`), so a lock conflict between `poller.py`
+  and `ui.py` opening the same file concurrently no longer raises immediately. Retries only
+  `sqlite3.OperationalError`; any other exception propagates on the first attempt (same "don't retry
+  a programming error" principle as `app._retry_on`).
 - [followup_store.py](aca/storage/followup_store.py) — local SQLite registry (`data/followup.sqlite`) of validated
   leads sourced from Gmail (`track()`, no-op if no `gmail_thread_id` — manual entries can't be
   followed up automatically), consumed by `relance.py`. `mark_followed_up()` after a follow-up
@@ -311,10 +319,11 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   `classifier_node` and reports overall/per-category accuracy + misclassifications. Last measured:
   96% (48/50). Run via `python -m aca.eval.eval_classifier`; re-run once real emails are available to track
   accuracy under real conditions instead of the synthetic set.
-- [tests/](tests/) — automated pytest suite (84 tests, offline, ~2s — see Known gaps for full
+- [tests/](tests/) — automated pytest suite (89 tests, offline, ~2s — see Known gaps for full
   coverage list): [conftest.py](tests/conftest.py) (env isolation + `FakeLLM`/`ExplodingLLM`),
   [test_graph_nodes.py](tests/test_graph_nodes.py), [test_sheets_helpers.py](tests/test_sheets_helpers.py),
-  [test_storage.py](tests/test_storage.py), [test_degradation.py](tests/test_degradation.py),
+  [test_storage.py](tests/test_storage.py) (incl. `sqlite_retry.py` coverage),
+  [test_degradation.py](tests/test_degradation.py),
   [test_graph_integration.py](tests/test_graph_integration.py). Run via `python -m pytest tests/`
   (pytest pinned in requirements.txt).
 
@@ -371,7 +380,7 @@ afterward.
 
 ## Known gaps
 
-- ✅ **Fixed (2026-07-12)**: automated test suite now exists — `tests/` (84 tests, pytest, run via
+- ✅ **Fixed (2026-07-12)**: automated test suite now exists — `tests/` (89 tests, pytest, run via
   `python -m pytest tests/`, ~2s, fully offline). `tests/conftest.py` blanks every external-service
   env var *before* any `aca.*` import (`load_dotenv` never overrides pre-set vars, so the real
   `.env` stays inert) and redirects all SQLite paths to a temp dir — no test ever touches Supabase,
@@ -386,12 +395,15 @@ afterward.
   the de-contextualized query). The `__main__` mock run + ad-hoc `AppTest` scripts remain as
   complementary live checks.
 - `poller.py` and `ui.py` are separate processes that can open `data/checkpoints.sqlite`/`data/queue.sqlite`
-  concurrently. `RETRY_POLICY` (✅ done, item 9) now retries transient errors inside every graph
-  node — including checkpointer reads/writes during `app.invoke()` — but the standalone SQLite
-  writes in `queue_store.py`/`audit_log.py` (`enqueue`, `mark_ready`, `mark_validated`,
-  `log_validation`) run outside the graph and are NOT wrapped by any retry; a lock conflict there
-  would still raise. Low risk at prototype volume (one poll cycle, occasional UI clicks), but a
-  real fix would wrap those calls in their own small retry loop before real concurrent load.
+  concurrently. `RETRY_POLICY` (✅ done, item 9) retries transient errors inside every graph node —
+  including checkpointer reads/writes during `app.invoke()`. ✅ **Fixed (2026-07-12)**: the standalone
+  SQLite writes outside the graph (`queue_store.py`, `analytics_store.py`, `audit_log.py`,
+  `followup_store.py`) are now wrapped too — [sqlite_retry.py](aca/storage/sqlite_retry.py)'s
+  `with_sqlite_retry` decorator (3 attempts, linear backoff, retries only `sqlite3.OperationalError`
+  — a lock conflict — never a programming error) is applied to every public function of all four
+  storage modules. Verified with tests that simulate a transient lock (succeeds on the 3rd try),
+  a persistent lock (raises after `MAX_ATTEMPTS`), and confirm non-lock exceptions propagate
+  immediately without retrying.
   `PROCESSED_LABEL_NAME`/`gmail.modify` mean the poller never deletes anything.
 - ✅ **Fixed (2026-07-12, live-verified)**: P0 item 2 (Slack/e-mail notification) — `SLACK_WEBHOOK_URL`
   is now set in `.env` (incoming webhook to `#nouveau-canal`, "acam" workspace) and

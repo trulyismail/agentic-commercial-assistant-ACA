@@ -9,6 +9,7 @@ manuelles sans e-mail source n'ont pas de fil à relancer automatiquement.
 import os
 import sqlite3
 from datetime import datetime
+from .sqlite_retry import with_sqlite_retry
 
 DB_PATH = os.getenv("ACA_FOLLOWUP_DB", "data/followup.sqlite")
 
@@ -23,11 +24,13 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+@with_sqlite_retry
 def init_db() -> None:
     """Crée la table si nécessaire (appelé au démarrage de relance.py)."""
     _connect().close()
 
 
+@with_sqlite_retry
 def track(thread_id: str, gmail_thread_id: str, sender: str, subject: str) -> None:
     """Enregistre un lead validé venant de Gmail pour suivi de relance. No-op si pas de fil Gmail."""
     if not gmail_thread_id:
@@ -41,6 +44,7 @@ def track(thread_id: str, gmail_thread_id: str, sender: str, subject: str) -> No
         conn.commit()
 
 
+@with_sqlite_retry
 def list_active() -> list:
     """Leads suivis n'ayant pas encore reçu de relance."""
     with _connect() as conn:
@@ -50,6 +54,7 @@ def list_active() -> list:
     return [{"thread_id": r[0], "gmail_thread_id": r[1], "sender": r[2], "subject": r[3]} for r in rows]
 
 
+@with_sqlite_retry
 def mark_followed_up(thread_id: str) -> None:
     """Marque un lead comme relancé (une seule relance par lead dans cette version — pas de cadence multi-round)."""
     with _connect() as conn:

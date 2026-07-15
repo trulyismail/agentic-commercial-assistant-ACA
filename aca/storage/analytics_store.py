@@ -10,6 +10,7 @@ bord affiche un volume par catégorie complet et un vrai temps de réponse (clas
 import os
 import sqlite3
 from datetime import datetime, timedelta
+from .sqlite_retry import with_sqlite_retry
 
 DB_PATH = os.getenv("ACA_ANALYTICS_DB", "data/analytics.sqlite")
 
@@ -24,6 +25,7 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+@with_sqlite_retry
 def record_classification(thread_id: str, classification: str, sender: str, source: str) -> None:
     """
     Enregistre l'événement de classification, une seule fois par thread (`INSERT OR IGNORE`).
@@ -40,6 +42,7 @@ def record_classification(thread_id: str, classification: str, sender: str, sour
         conn.commit()
 
 
+@with_sqlite_retry
 def record_draft_ready(thread_id: str) -> None:
     """
     Marque qu'une proposition a été rédigée pour ce thread. Appel séparé de `record_classification`
@@ -52,6 +55,7 @@ def record_draft_ready(thread_id: str) -> None:
         conn.commit()
 
 
+@with_sqlite_retry
 def record_validation(thread_id: str) -> None:
     """Renseigne `validated_at` pour un thread déjà classé (appelé au clic « Valider » dans l'UI)."""
     with _connect() as conn:
@@ -66,6 +70,7 @@ def _cutoff(days: int) -> str:
     return (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
 
 
+@with_sqlite_retry
 def volume_by_category(days: int = 30) -> list[dict]:
     """Nombre d'e-mails classés par catégorie sur les `days` derniers jours, décroissant."""
     with _connect() as conn:
@@ -77,6 +82,7 @@ def volume_by_category(days: int = 30) -> list[dict]:
     return [{"classification": r[0], "count": r[1]} for r in rows]
 
 
+@with_sqlite_retry
 def daily_volume(days: int = 30) -> list[dict]:
     """Volume quotidien total (toutes catégories confondues), pour un graphe de tendance."""
     with _connect() as conn:
@@ -88,6 +94,7 @@ def daily_volume(days: int = 30) -> list[dict]:
     return [{"jour": r[0], "count": r[1]} for r in rows]
 
 
+@with_sqlite_retry
 def response_times(days: int = 30) -> list[dict]:
     """
     Durée (en minutes) entre classification et validation, pour chaque lead validé sur la période —
@@ -114,6 +121,7 @@ def response_times(days: int = 30) -> list[dict]:
     return results
 
 
+@with_sqlite_retry
 def funnel_counts(days: int = 30) -> dict:
     """Compte classé → proposition rédigée → validé, sur les `days` derniers jours."""
     with _connect() as conn:

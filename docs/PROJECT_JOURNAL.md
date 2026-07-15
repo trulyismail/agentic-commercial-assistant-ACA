@@ -536,3 +536,55 @@ Trois choses, qui demandent du réel plutôt que du code : de vraies adresses e-
 (elles débloquent aussi le brouillon de transfert Gmail du routage), un test de `relance.py` sur un
 vrai fil Gmail où un prospect a réellement répondu, et laisser le tableau de bord accumuler
 quelques jours de données réelles.
+
+---
+
+## 2026-07-12 (suite 5) — Le point n°3 de la dette technique : les écritures locales resistent maintenant aux conflits d'accès concurrent
+
+### Le problème de départ
+
+Le programme tourne en réalité comme **deux processus séparés** qui peuvent s'exécuter en même
+temps : `poller.py` (qui surveille la boîte Gmail en arrière-plan) et `ui.py` (l'interface
+Streamlit qu'un commercial utilise). Chacun peut, au même instant, vouloir écrire dans les mêmes
+petits fichiers de base de données locaux (SQLite) — par exemple la « file d'attente » des e-mails
+en cours de traitement, ou le journal d'audit des validations. SQLite ne permet qu'une seule
+écriture à la fois sur un même fichier ; si les deux processus tombent pile au même moment, l'un
+des deux reçoit une erreur (« la base de données est verrouillée »).
+
+Ce risque était déjà connu et documenté (§11.6 de la feuille de route), mais laissé de côté : à
+faible volume (un cycle de sondage par minute, quelques clics dans l'interface), la probabilité que
+ça arrive réellement est faible. Le nœud principal du graphe (`app.py`) a déjà un mécanisme de
+réessai automatique (`RETRY_POLICY`) pour ce genre de panne passagère — mais il ne couvre QUE ce qui
+se passe pendant l'exécution du graphe ; ces quatre petits registres locaux (file d'attente,
+tableau de bord, audit, relances) s'exécutent en dehors du graphe et n'étaient donc pas protégés.
+
+### Ce qui a été fait
+
+Un petit module dédié, [sqlite_retry.py](../aca/storage/sqlite_retry.py) : un décorateur Python
+(une fonction qui « enveloppe » une autre fonction pour lui ajouter un comportement, sans toucher à
+son code) qui réessaie automatiquement jusqu'à 3 fois, avec un court délai croissant entre les
+essais, **uniquement** si l'erreur rencontrée est bien un conflit de verrou SQLite — toute autre
+erreur (un vrai bug de programmation, par exemple) est laissée passer immédiatement, sans être
+réessayée, parce que la rejouer à l'identique ne la corrigerait pas.
+
+Ce décorateur a ensuite été appliqué à **toutes** les fonctions publiques des quatre registres
+locaux concernés : la file d'attente du poller, le journal du tableau de bord, le journal d'audit,
+et le suivi des relances. Changement mécanique et à faible risque — aucune logique métier n'a été
+modifiée, seule une couche de protection a été ajoutée autour de chaque fonction existante.
+
+### Comment on sait que ça marche
+
+Cinq nouveaux tests (dans la suite automatisée construite plus tôt dans la journée) : un scénario où
+le verrou se libère après deux échecs (le code doit réussir au 3e essai), un scénario où le verrou
+ne se libère jamais (le code doit abandonner proprement après 3 tentatives, pas tourner en boucle
+indéfiniment), un scénario avec une erreur qui n'a rien à voir avec un verrou (le code ne doit faire
+AUCUNE tentative supplémentaire), et deux vérifications que le décorateur est bien branché sur les
+vraies fonctions du projet (pas seulement testé en isolation). Les 89 tests de la suite (84 + ces 5
+nouveaux) passent en un peu plus de 5 secondes.
+
+### Ce que ça change pour la suite
+
+Les 3 premiers points de la dette technique (§11.6) sont maintenant soldés : la suite de tests, la
+plupart des vérifications en conditions réelles (Tavily, Slack), et ce retry local. Il reste dans
+cette section : quelques renforcements de robustesse de l'IA (peu urgents), la cadence de relance
+multi-tours, et le rapport de stage lui-même (volontairement pour la fin).

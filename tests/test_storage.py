@@ -2,10 +2,15 @@
 Tests des registres SQLite locaux (aca/storage/) : file d'attente du poller, journal analytique,
 journal d'audit et suivi de relance. Chaque test redirige `DB_PATH` (figé à l'import du module)
 vers un fichier temporaire pytest — les vraies bases `data/*.sqlite` ne sont jamais touchées.
+Teste aussi le retry local sur conflit de verrou SQLite (§11.6 item 3, `sqlite_retry.py`).
 """
+import sqlite3
 from datetime import datetime, timedelta
 
-from aca.storage import analytics_store, audit_log, followup_store, queue_store
+import pytest
+
+from aca.storage import analytics_store, audit_log, followup_store, queue_store, sqlite_retry
+from aca.storage.sqlite_retry import with_sqlite_retry
 
 FMT = "%Y-%m-%d %H:%M:%S"
 
@@ -137,3 +142,58 @@ def test_track_and_mark_followed_up(monkeypatch, tmp_path):
     assert active == [{"thread_id": "t-1", "gmail_thread_id": "gmail-123", "sender": "a@b.fr", "subject": "Objet"}]
     followup_store.mark_followed_up("t-1")
     assert followup_store.list_active() == []  # une seule relance par lead dans cette version
+
+
+# ── sqlite_retry (§11.6 item 3 : retry local hors du graphe LangGraph) ───────────────────────
+def test_with_sqlite_retry_succeeds_after_transient_lock(monkeypatch):
+    monkeypatch.setattr(sqlite_retry, "BASE_DELAY_SECONDS", 0)  # tests instantanés, pas de vrai sleep
+    calls = {"n": 0}
+
+    @with_sqlite_retry
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return "ok"
+
+    assert flaky() == "ok"
+    assert calls["n"] == 3  # 2 échecs absorbés, succès à la 3e tentative
+
+
+def test_with_sqlite_retry_gives_up_after_max_attempts(monkeypatch):
+    monkeypatch.setattr(sqlite_retry, "BASE_DELAY_SECONDS", 0)
+    calls = {"n": 0}
+
+    @with_sqlite_retry
+    def always_locked():
+        calls["n"] += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    with pytest.raises(sqlite3.OperationalError):
+        always_locked()
+    assert calls["n"] == sqlite_retry.MAX_ATTEMPTS
+
+
+def test_with_sqlite_retry_does_not_retry_other_exceptions():
+    calls = {"n": 0}
+
+    @with_sqlite_retry
+    def programming_error():
+        calls["n"] += 1
+        raise ValueError("bug, pas un conflit de verrou")
+
+    with pytest.raises(ValueError):
+        programming_error()
+    assert calls["n"] == 1  # aucune tentative supplémentaire : rejouer ne corrigerait pas un bug
+
+
+def test_queue_store_functions_are_retry_wrapped():
+    # Vérifie le câblage réel (pas juste le décorateur en isolation) : chaque fonction publique de
+    # queue_store doit être décorée, pas seulement une partie d'entre elles.
+    for name in ("enqueue", "mark_ready", "reset_stale", "list_pending", "mark_validated"):
+        assert getattr(queue_store, name).__wrapped__ is not None
+
+
+def test_audit_log_functions_are_retry_wrapped():
+    for name in ("log_validation", "list_recent"):
+        assert getattr(audit_log, name).__wrapped__ is not None

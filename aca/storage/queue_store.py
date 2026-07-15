@@ -12,6 +12,7 @@ reste dans le checkpointer LangGraph (`checkpoints.sqlite`) ; ce fichier sert un
 import os
 import sqlite3
 from datetime import datetime, timedelta
+from .sqlite_retry import with_sqlite_retry
 
 DB_PATH = os.getenv("ACA_QUEUE_DB", "data/queue.sqlite")
 
@@ -26,11 +27,13 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+@with_sqlite_retry
 def init_db() -> None:
     """Crée la table si nécessaire (appelé au démarrage du poller)."""
     _connect().close()
 
 
+@with_sqlite_retry
 def is_known(message_id: str) -> bool:
     """True si ce message Gmail a déjà été mis en file (quel que soit son statut)."""
     with _connect() as conn:
@@ -38,6 +41,7 @@ def is_known(message_id: str) -> bool:
         return row is not None
 
 
+@with_sqlite_retry
 def enqueue(message_id: str, thread_id: str, sender: str, subject: str) -> None:
     """
     Marque un e-mail comme « en_cours » — appelé AVANT `app.invoke()`, pas après, pour qu'un crash
@@ -54,6 +58,7 @@ def enqueue(message_id: str, thread_id: str, sender: str, subject: str) -> None:
         conn.commit()
 
 
+@with_sqlite_retry
 def mark_ready(message_id: str) -> None:
     """Bascule une entrée de « en_cours » à « en_attente » : le graphe a atteint la pause sans erreur."""
     with _connect() as conn:
@@ -64,6 +69,7 @@ def mark_ready(message_id: str) -> None:
         conn.commit()
 
 
+@with_sqlite_retry
 def reset_stale(older_than_minutes: int = 15) -> int:
     """
     Supprime les entrées bloquées en « en_cours » depuis plus de `older_than_minutes` (poller
@@ -77,6 +83,7 @@ def reset_stale(older_than_minutes: int = 15) -> int:
         return cur.rowcount
 
 
+@with_sqlite_retry
 def list_pending() -> list:
     """Analyses en attente de validation humaine, les plus anciennes d'abord."""
     with _connect() as conn:
@@ -87,6 +94,7 @@ def list_pending() -> list:
     return [{"thread_id": r[0], "sender": r[1], "subject": r[2], "created_at": r[3]} for r in rows]
 
 
+@with_sqlite_retry
 def mark_validated(thread_id: str) -> None:
     """Retire une entrée de la file après validation humaine (« Valider » dans l'UI)."""
     with _connect() as conn:
@@ -94,6 +102,7 @@ def mark_validated(thread_id: str) -> None:
         conn.commit()
 
 
+@with_sqlite_retry
 def list_validated_older_than(days: int) -> list:
     """Thread IDs validés depuis plus de `days` jours (RGPD — cf. retention.py)."""
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
@@ -104,6 +113,7 @@ def list_validated_older_than(days: int) -> list:
     return [r[0] for r in rows]
 
 
+@with_sqlite_retry
 def purge_validated_older_than(days: int) -> int:
     """Supprime les entrées validées depuis plus de `days` jours (RGPD). Renvoie le nombre supprimé."""
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
