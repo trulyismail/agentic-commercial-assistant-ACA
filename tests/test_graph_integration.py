@@ -4,6 +4,7 @@ remplacés par des faux : vérifie le câblage réel des nœuds/arêtes — supe
 réflexion, pause de validation humaine (interrupt_before=["action"]), reprise après « Valider » —
 sans aucun appel réseau. Le checkpointer est le SqliteSaver temporaire du conftest.
 """
+import json
 import uuid
 
 from conftest import FakeLLM
@@ -14,7 +15,7 @@ from aca.core.app import app
 EXTRACTION_JSON = '{"entreprise": "Test SA", "contact": "Jean", "urgence": "haute", "besoin_principal": "10 licences"}'
 
 
-def _install_fast_llm(monkeypatch, classification="DEVIS", supervisor_replies=None, reflection_replies=None):
+def _install_fast_llm(monkeypatch, classification="DEVIS", confidence=0.9, supervisor_replies=None, reflection_replies=None):
     """
     fast_llm est partagé par plusieurs nœuds (classifier, superviseur, reflect, décontextualisation) :
     ce faux route la réponse selon le prompt système reçu, et consomme des files de réponses pour
@@ -27,7 +28,7 @@ def _install_fast_llm(monkeypatch, classification="DEVIS", supervisor_replies=No
     def reply(messages):
         system = messages[0].content
         if "Classe l'e-mail" in system:
-            return classification
+            return json.dumps({"categorie": classification, "confiance": confidence})
         if "SUPERVISEUR" in system:
             return supervisor_replies.pop(0) if supervisor_replies else "stratege"
         if "relecteur qualité" in system:

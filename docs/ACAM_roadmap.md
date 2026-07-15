@@ -151,9 +151,15 @@ Classées par effort estimé (croissant) :
   sortie hors schéma) : `ExtractedInfo()` vide plutôt qu'un plantage de `app.invoke()` — traité
   ensuite comme un e-mail vague par `clarification_node`. Vérifié : 3 nouveaux tests unitaires +
   3 appels réels contre Groq (champs complets, champs manquants, repli sur schéma vide simulé).
-- **Score de confiance de classification** — faire retourner un score (0-1) par `classifier_node`
-  et router vers une relecture humaine systématique en dessous d'un seuil, au lieu d'un
-  tout-ou-rien SPAM/AUTRE/valide.
+- ✅ **Fait (2026-07-12) — Score de confiance de classification** : `classifier_node` renvoie
+  maintenant un score (0-1, `ClassificationResult.confiance` via `with_structured_output()`) en plus
+  de la catégorie. Sous `CLASSIFICATION_CONFIDENCE_THRESHOLD` (0.6), `notification_node` alerte un
+  humain même pour SPAM/AUTRE/SUPPORT (qui court-circuitent normalement toute validation) — c'est le
+  "router vers une relecture humaine systématique en dessous d'un seuil" visé ici, implémenté en
+  réutilisant le canal Slack/e-mail déjà existant plutôt qu'en construisant un nouveau mécanisme de
+  pause. Effet de bord positif mesuré : précision du classifieur passée de 96 % à **100 %** (50/50)
+  sur `eval_dataset.json`, probablement parce que le tool-calling structuré contraint mieux le
+  modèle qu'un simple mot en texte libre.
 - ✅ **`RetryPolicy` + gestion d'erreur réseau** — fait (§11.4 item 9) : `RETRY_POLICY` sur tous les
   nœuds à appel externe, prédicat étendu aux 429, vérifié avec une erreur simulée.
 - **Nœud `Ingestion`** explicite en tête de graphe (PDF + e-mail) — actuellement l'extraction PDF
@@ -355,12 +361,15 @@ reste affichée dans Streamlit et le commercial doit la copier-coller. Priorité
     et 5 traces retrouvées dans le projet "ACA" (détail par nœud : `classifier`, `supervisor`,
     `notification`...) après un run mock. [eval_dataset.json](aca/eval/eval_dataset.json) (50 e-mails
     synthétiques, 10/catégorie, dont quelques cas volontairement ambigus) +
-    [eval_classifier.py](aca/eval/eval_classifier.py) mesurent la précision réelle du classifieur — **résultat
-    mesuré : 96 % (48/50)**, DEMANDE_DEMO/DEVIS/SPAM à 100 %, AUTRE et SUPPORT à 90 % chacun. Les 2
-    erreurs sont sur des cas ambigus délibérés (« compte suspendu par erreur » classé AUTRE au lieu
-    de SUPPORT ; un message très vague classé SPAM au lieu d'AUTRE) — cohérent avec le comportement
-    attendu, pas un signal d'alarme. À refaire périodiquement avec de vrais e-mails une fois
-    disponibles, pour suivre la précision en conditions réelles.
+    [eval_classifier.py](aca/eval/eval_classifier.py) mesurent la précision réelle du classifieur —
+    **résultat mesuré initialement : 96 % (48/50)**, DEMANDE_DEMO/DEVIS/SPAM à 100 %, AUTRE et
+    SUPPORT à 90 % chacun (les 2 erreurs sur des cas ambigus délibérés — « compte suspendu par
+    erreur » classé AUTRE au lieu de SUPPORT ; un message très vague classé SPAM au lieu d'AUTRE —
+    cohérent avec le comportement attendu, pas un signal d'alarme). **Remesuré le 2026-07-12 après
+    le passage à la sortie structurée (§10/§11.6 item 4) : 100 % (50/50)**, les deux cas ambigus
+    ci-dessus désormais classés correctement — probablement parce que le tool-calling structuré
+    contraint mieux le modèle qu'un simple mot en texte libre. À refaire périodiquement avec de
+    vrais e-mails une fois disponibles, pour suivre la précision en conditions réelles.
 12. ✅ **Fait — Créneaux réels pour DEMANDE_DEMO** : lien Calendly réel (`CALENDLY_URL`,
     Google Meet, gratuit) ajouté **déterministiquement** par le code à la fin du brouillon quand
     `classification == "DEMANDE_DEMO"` — jamais généré par le LLM, pour ne pas risquer une URL
@@ -485,10 +494,10 @@ sont pas traités, la phase commercialisation ne démarre pas. Classés par levi
    transitoire, échec propre après épuisement des tentatives sur un verrou persistant, et aucune
    tentative supplémentaire sur une exception qui n'est pas un conflit de verrou.
 4. 🟡 **Partiel — Améliorations de robustesse LLM ouvertes au §10** :
-   ✅ `with_structured_output()`/Pydantic pour l'extracteur (fait 2026-07-12, voir §10). **Reste** :
-   few-shot prompting (classifier/extractor, encore zéro-shot), score de confiance de
-   classification (relecture humaine sous un seuil), nœud `ingestion` explicite dans le graphe
-   (l'extraction des pièces jointes vit encore dans `ui.py`/`poller.py`/`gmail_reader.py`).
+   ✅ `with_structured_output()`/Pydantic pour l'extracteur ET le classifieur (fait 2026-07-12, voir
+   §10 — le classifieur a gagné un score de confiance au passage). **Reste** : few-shot prompting
+   (classifier/extractor, encore zéro-shot), nœud `ingestion` explicite dans le graphe (l'extraction
+   des pièces jointes vit encore dans `ui.py`/`poller.py`/`gmail_reader.py`).
 5. **Cadence de relance multi-tours** — une seule relance par lead aujourd'hui (`relance.py`) ;
    ~80 % des ventes demandent 5+ contacts. Extension : plusieurs relances espacées, arrêt dès que
    le prospect répond.

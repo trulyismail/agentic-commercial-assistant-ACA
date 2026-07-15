@@ -11,7 +11,6 @@ from conftest import ExplodingLLM, FakeLLM
 import aca.core.app as app_module
 from aca.core.app import (
     CATEGORIES_SANS_SUITE,
-    ExtractedInfo,
     _build_rag_query,
     _retry_on,
     clarification_node,
@@ -36,15 +35,33 @@ def _state(**overrides):
     return base
 
 
-# ── classifier_node ───────────────────────────────────────────────────────────────────────────
-def test_classifier_valid_label(monkeypatch):
-    monkeypatch.setattr(app_module, "fast_llm", lambda: FakeLLM("devis \n"))
-    assert classifier_node(_state())["classification"] == "DEVIS"
+# ── classifier_node (sortie structurée + score de confiance) ────────────────────────────────
+def test_classifier_valid_label_and_confidence(monkeypatch):
+    payload = json.dumps({"categorie": "DEVIS", "confiance": 0.92})
+    monkeypatch.setattr(app_module, "fast_llm", lambda: FakeLLM(payload))
+    out = classifier_node(_state())
+    assert out["classification"] == "DEVIS"
+    assert out["classification_confidence"] == 0.92
+    assert "confiance 92%" in out["reasoning_log"][0]
+    assert "faible" not in out["reasoning_log"][0]
 
 
-def test_classifier_unknown_label_falls_back_to_autre(monkeypatch):
-    monkeypatch.setattr(app_module, "fast_llm", lambda: FakeLLM("BANANE"))
-    assert classifier_node(_state())["classification"] == "AUTRE"
+def test_classifier_low_confidence_flagged_in_reasoning_log(monkeypatch):
+    payload = json.dumps({"categorie": "AUTRE", "confiance": 0.3})
+    monkeypatch.setattr(app_module, "fast_llm", lambda: FakeLLM(payload))
+    out = classifier_node(_state())
+    assert out["classification_confidence"] == 0.3
+    assert "faible" in out["reasoning_log"][0]
+
+
+def test_classifier_schema_failure_propagates_to_retry_policy(monkeypatch):
+    # Catégorie hors énum -> ValidationError Pydantic. Le nœud ne l'avale PAS lui-même : elle doit
+    # remonter jusqu'au RETRY_POLICY du graphe (pas de catch local qui empêcherait tout retry sur
+    # une vraie panne transitoire — cf. commentaire dans classifier_node).
+    payload = json.dumps({"categorie": "BANANE", "confiance": 0.8})
+    monkeypatch.setattr(app_module, "fast_llm", lambda: FakeLLM(payload))
+    with pytest.raises(Exception):
+        classifier_node(_state())
 
 
 # ── extractor_node (sortie structurée Pydantic) ──────────────────────────────────────────────
@@ -69,12 +86,12 @@ def test_extractor_missing_fields_become_none(monkeypatch):
     }
 
 
-def test_extractor_graceful_fallback_on_structured_output_failure(monkeypatch):
-    # Sortie non conforme au schéma (urgence hors énum "haute|moyenne|basse") -> ValidationError
-    # côté Pydantic, absorbée : plus de plantage de app.invoke(), champs vides comme un e-mail vague.
+def test_extractor_schema_failure_propagates_to_retry_policy(monkeypatch):
+    # Urgence hors énum "haute|moyenne|basse" -> ValidationError Pydantic. Comme classifier_node,
+    # le nœud ne l'avale pas : elle doit remonter au RETRY_POLICY du graphe.
     monkeypatch.setattr(app_module, "smart_llm", lambda: FakeLLM(json.dumps({"urgence": "extreme"})))
-    out = extractor_node(_state())
-    assert out["extracted_info"] == ExtractedInfo().model_dump()
+    with pytest.raises(Exception):
+        extractor_node(_state())
 
 
 # ── memory_lookup_node ───────────────────────────────────────────────────────────────────────
@@ -288,6 +305,23 @@ def test_notification_sent_for_lead(monkeypatch):
     monkeypatch.setattr(app_module.notify, "send", lambda message: True)
     out = notification_node(_state(classification="DEVIS"))
     assert out["reasoning_log"] == ["Notification envoyée."]
+
+
+def test_notification_fires_for_low_confidence_sans_suite(monkeypatch):
+    # Le cas le plus risqué : une classification SPAM/AUTRE/SUPPORT peu fiable court-circuiterait
+    # normalement toute validation humaine (auto-routée) -> l'alerte doit sortir de son silence.
+    captured = {}
+    monkeypatch.setattr(app_module.notify, "send", lambda message: captured.setdefault("msg", message) or True)
+    out = notification_node(_state(classification="SPAM", classification_confidence=0.2))
+    assert out["reasoning_log"] == ["Notification envoyée."]
+    assert "confiance faible" in captured["msg"].lower()
+    assert "SPAM" in captured["msg"]
+
+
+def test_notification_high_confidence_sans_suite_still_skipped(monkeypatch):
+    monkeypatch.setattr(app_module.notify, "send", lambda *a, **k: (_ for _ in ()).throw(AssertionError))
+    out = notification_node(_state(classification="AUTRE", classification_confidence=0.95))
+    assert out == {}
 
 
 # ── _retry_on (politique de retry) ───────────────────────────────────────────────────────────

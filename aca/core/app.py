@@ -47,6 +47,7 @@ class AgentState(TypedDict):
     company_profile: str       # Profil entreprise (agent Enrichissement, Tavily + cache)
     draft_response: str        # Proposition rédigée pour le commercial (agent Stratège)
     reflection_feedback: str   # Critique du nœud Reflect si réécriture demandée ("" si aucune / déjà traitée)
+    classification_confidence: float  # Confiance (0-1) du classifieur dans sa catégorie (cf. classifier_node)
     # ── Mémoire long terme (lecture du CRM avant traitement) ──
     sender_history: str        # Résumé de l'historique de l'expéditeur (client récurrent)
     is_duplicate: bool         # True si l'expéditeur existe déjà dans l'onglet Leads
@@ -59,14 +60,21 @@ class AgentState(TypedDict):
     reasoning_log: Annotated[list, operator.add]     # Trace de raisonnement des agents (concat)
 
 
-# Catégories valides. AUTRE = e-mail légitime mais hors périmètre commercial
-# (candidature, partenariat, question générale) — à ne pas confondre avec du vrai SPAM.
-CATEGORIES_VALIDES = {"DEMANDE_DEMO", "DEVIS", "SUPPORT", "SPAM", "AUTRE"}
+# AUTRE = e-mail légitime mais hors périmètre commercial (candidature, partenariat, question
+# générale) — à ne pas confondre avec du vrai SPAM.
 # Catégories qui court-circuitent la génération de brouillon / l'écriture CRM : ce ne sont pas des
 # leads commerciaux, donc jamais de Stratège ni de fiche CRM. SUPPORT y a rejoint SPAM/AUTRE (P0
 # §11.4 item 5) — une réponse commerciale (devis, réservation de démo) ne correspond pas à un
 # ticket technique ; SUPPORT/AUTRE sont à la place pris en charge par `routing_node` ci-dessous.
 CATEGORIES_SANS_SUITE = {"SPAM", "AUTRE", "SUPPORT"}
+
+# Score de confiance (0-1, cf. ClassificationResult) en dessous duquel `notification_node` alerte un
+# humain MÊME pour SPAM/AUTRE/SUPPORT — ces catégories court-circuitent normalement toute validation
+# humaine (routées automatiquement par `routing_node`), donc une classification peu fiable dans ce
+# groupe est le cas le plus risqué : un vrai lead pourrait être auto-routé comme SPAM sans que
+# personne ne le revoie jamais. Calibré à l'instinct (pas de mesure empirique comme le seuil RAG du
+# §"Known gaps" de CLAUDE.md) ; à ajuster si trop/pas assez d'alertes en usage réel.
+CLASSIFICATION_CONFIDENCE_THRESHOLD = 0.6
 
 # Lien de réservation réel (Calendly, gratuit) pour les demandes de démo (P1 §11.4 item 12).
 # Ajouté déterministiquement au brouillon par stratege_node (jamais généré par le LLM, pour éviter
@@ -117,8 +125,19 @@ RETRY_POLICY = RetryPolicy(retry_on=_retry_on, max_attempts=3, initial_interval=
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Nœud 1 — Classification (Llama 3.1 8B → vitesse maximale)
 # ─────────────────────────────────────────────────────────────────────────────
+class ClassificationResult(BaseModel):
+    """
+    Sortie structurée du classifieur (même technique que `ExtractedInfo`) : la catégorie ET la
+    confiance du modèle dans son propre jugement, plutôt qu'un simple mot en texte libre. Le type
+    `Literal` remplace l'ancienne vérification manuelle de la catégorie contre un ensemble de
+    valeurs valides — une catégorie hors énumération est désormais rejetée au niveau du schéma.
+    """
+    categorie: Literal["DEMANDE_DEMO", "DEVIS", "SUPPORT", "AUTRE", "SPAM"]
+    confiance: float = Field(ge=0.0, le=1.0, description="Confiance dans cette classification, de 0 (incertain) à 1 (certain).")
+
+
 def classifier_node(state: AgentState) -> dict:
-    """Classe l'e-mail dans l'une des 5 catégories. Llama 8B = rapide + gratuit."""
+    """Classe l'e-mail dans l'une des 5 catégories avec un score de confiance. Llama 8B = rapide + gratuit."""
     print("\n⚡ [Groq/Llama-8B] Classification de l'e-mail...")
 
     email = state["email_raw"]
@@ -130,27 +149,35 @@ def classifier_node(state: AgentState) -> dict:
 
     messages = [
         SystemMessage(content=(
-            "Tu es un assistant commercial expert. "
-            "Classe l'e-mail dans l'UNE des catégories suivantes et réponds UNIQUEMENT par ce mot :\n"
+            "Tu es un assistant commercial expert. Classe l'e-mail dans l'UNE des catégories "
+            "suivantes, et indique ta confiance dans cette classification (0 = incertain, "
+            "1 = certain) :\n"
             "- DEMANDE_DEMO   → le prospect veut une démo ou une présentation\n"
             "- DEVIS          → demande un devis ou un tarif\n"
             "- SUPPORT        → client existant avec un problème technique\n"
             "- AUTRE          → e-mail légitime mais hors périmètre commercial "
             "(candidature/CV, partenariat, question générale)\n"
-            "- SPAM           → message non sollicité, publicitaire ou frauduleux\n"
-            "Réponds UNIQUEMENT par l'un de ces cinq mots, sans ponctuation ni explication."
+            "- SPAM           → message non sollicité, publicitaire ou frauduleux"
         )),
         HumanMessage(content=email_text),
     ]
 
-    response = fast_llm().invoke(messages)
-    classification = response.content.strip().upper()
-    # Sécurité : s'assurer que la réponse est valide. Fallback = AUTRE (plus sûr que SPAM
-    # pour un message inconnu mais potentiellement légitime).
-    if classification not in CATEGORIES_VALIDES:
-        classification = "AUTRE"
-    print(f"   → Résultat : {classification}")
-    return {"classification": classification}
+    # Aucun try/except local ici, volontairement : `with_structured_output()` élimine le risque de
+    # JSON malformé (l'ancienne raison d'être du fallback), et une vraie panne API doit remonter
+    # jusqu'au `RETRY_POLICY` du graphe (3 tentatives, cf. plus haut) — un catch local ici
+    # avalerait l'erreur AVANT que RETRY_POLICY n'ait la moindre chance de réessayer, empêchant
+    # toute résilience sur une erreur transitoire (429, 5xx, réseau). Cohérent avec les autres
+    # nœuds du graphe (stratege_node, etc.), qui n'ont pas non plus de filet de sécurité local
+    # autour de leur appel LLM principal.
+    result = fast_llm().with_structured_output(ClassificationResult).invoke(messages)
+    classification, confidence = result.categorie, result.confiance
+
+    print(f"   → Résultat : {classification} (confiance {confidence:.0%})")
+    reason = f"Classification : {classification} (confiance {confidence:.0%})."
+    if confidence < CLASSIFICATION_CONFIDENCE_THRESHOLD:
+        reason += " ⚠️ Confiance faible — à vérifier."
+    return {"classification": classification, "classification_confidence": confidence,
+            "reasoning_log": [reason]}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -313,16 +340,12 @@ def extractor_node(state: AgentState) -> dict:
         HumanMessage(content=email_text),
     ]
 
-    try:
-        result = smart_llm().with_structured_output(ExtractedInfo).invoke(messages)
-        extracted = result.model_dump()
-    except Exception as e:
-        # Dégradation gracieuse (même principe que le reste du projet) : si l'extraction structurée
-        # échoue malgré les 3 tentatives du RETRY_POLICY (panne API, sortie non conforme au schéma...),
-        # on ne fait pas planter tout `app.invoke()` — `clarification_node` posera la question à
-        # l'humain puisque `besoin_principal` sera vide, exactement comme sur un e-mail vague.
-        print(f"   → ⚠️ Extraction structurée échouée ({e}), repli sur des champs vides.")
-        extracted = ExtractedInfo().model_dump()
+    # Aucun try/except local ici, volontairement (même raisonnement que classifier_node) :
+    # `with_structured_output()` élimine le JSON malformé — l'ancienne raison d'être du fallback
+    # `{"raw": ...}` — et une vraie panne API doit remonter au `RETRY_POLICY` du graphe plutôt que
+    # d'être avalée avant qu'il n'ait la moindre chance de réessayer.
+    result = smart_llm().with_structured_output(ExtractedInfo).invoke(messages)
+    extracted = result.model_dump()
 
     print(f"   → Extrait : {extracted}")
     return {"extracted_info": extracted}
@@ -603,20 +626,32 @@ def enrichissement_node(state: AgentState) -> dict:
 def notification_node(state: AgentState) -> dict:
     """
     Alerte le commercial qu'une analyse attend sa validation (Slack ou e-mail, cf. notify.py).
-    Toujours exécuté juste avant la pause `interrupt_before=["action"]`, sauf SPAM/AUTRE (rien à
-    valider dans ces cas). Dégradation gracieuse : ne bloque jamais le graphe si aucun canal n'est
-    configuré ou si l'envoi échoue.
+    Toujours exécuté juste avant la pause `interrupt_before=["action"]`, sauf SPAM/AUTRE/SUPPORT
+    (rien à valider dans ces cas, normalement) — SAUF si la confiance de classification est sous
+    `CLASSIFICATION_CONFIDENCE_THRESHOLD` : ces catégories court-circuitent d'ordinaire toute
+    validation humaine (auto-routées par `routing_node`), donc une classification peu fiable dans ce
+    groupe est le cas le plus risqué à laisser filer sans alerte — un vrai lead mal classé en SPAM
+    ne serait sinon jamais revu par personne. Dégradation gracieuse : ne bloque jamais le graphe si
+    aucun canal n'est configuré ou si l'envoi échoue.
     """
-    if state["classification"] in CATEGORIES_SANS_SUITE:
+    confidence = state.get("classification_confidence", 1.0)
+    low_confidence = confidence < CLASSIFICATION_CONFIDENCE_THRESHOLD
+    if state["classification"] in CATEGORIES_SANS_SUITE and not low_confidence:
         return {}
 
     print("\n🔔 [Notification] Alerte de l'analyse en attente de validation...")
     email = state["email_raw"]
     info = state.get("extracted_info", {})
-    message = (
-        f"ACA — nouveau lead à valider : {state['classification']} de {email.get('sender', '?')} "
-        f"({info.get('entreprise') or 'entreprise inconnue'}). Urgence : {info.get('urgence') or '?'}."
-    )
+    if low_confidence and state["classification"] in CATEGORIES_SANS_SUITE:
+        message = (
+            f"ACA — classification à confiance faible ({confidence:.0%}) : {state['classification']} "
+            f"de {email.get('sender', '?')} — à vérifier manuellement (auto-routée sans validation)."
+        )
+    else:
+        message = (
+            f"ACA — nouveau lead à valider : {state['classification']} de {email.get('sender', '?')} "
+            f"({info.get('entreprise') or 'entreprise inconnue'}). Urgence : {info.get('urgence') or '?'}."
+        )
     sent = notify.send(message)
     print(f"   → {'Notification envoyée.' if sent else 'Aucun canal configuré (repli gracieux).'}")
     reason = "Notification envoyée." if sent else "Notification : aucun canal configuré."

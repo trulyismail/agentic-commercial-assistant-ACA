@@ -27,19 +27,33 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
                               └──ok──────────────────────────────────────────→ routing
 ```
 
-- `classifier_node` — labels the email `DEMANDE_DEMO | DEVIS | SUPPORT | AUTRE | SPAM`. `AUTRE` =
-  legitimate but out-of-scope; unknown output falls back to `AUTRE`. Valid/no-suite sets are
-  `CATEGORIES_VALIDES` / `CATEGORIES_SANS_SUITE` (`{SPAM, AUTRE, SUPPORT}` — none of these three are
-  sales leads, so none reach `stratege`/the CRM; `SUPPORT`/`AUTRE` are instead handled by
-  `routing_node` below).
+- `classifier_node` — labels the email `DEMANDE_DEMO | DEVIS | SUPPORT | AUTRE | SPAM` **and** a
+  0-1 confidence score via `with_structured_output(ClassificationResult)` (Pydantic `Literal` +
+  `Field(ge=0, le=1)` — tool-calling under the hood, so an out-of-enum category is rejected by the
+  schema itself rather than checked manually after the fact). Below
+  `CLASSIFICATION_CONFIDENCE_THRESHOLD` (0.6), `notification_node` alerts a human **even for**
+  `SPAM`/`AUTRE`/`SUPPORT` (see below) — those categories normally skip validation entirely, so an
+  unreliable classification there is the riskiest case to let slide silently. `CATEGORIES_SANS_SUITE`
+  (`{SPAM, AUTRE, SUPPORT}`) — none of these three are sales leads, so none reach `stratege`/the CRM;
+  `SUPPORT`/`AUTRE` are instead handled by `routing_node` below. No local try/except around the LLM
+  call — a schema/API failure propagates to the graph's `RETRY_POLICY` (3 attempts) rather than
+  being swallowed on the first try, which would silently defeat the retry (see extractor_node below
+  for the same reasoning, discovered together via live testing).
 - `memory_lookup_node` — **long-term memory read**: `sheets.find_leads_by_sender()` fills
   `sender_history` + `is_duplicate` from the "Leads" tab. No LLM.
 - `extractor_node` — extracts `{entreprise, contact, urgence, besoin_principal}` via `with_structured_output(ExtractedInfo)`
-  (Pydantic model, tool-calling under the hood — no manual `json.loads()`, no malformed-JSON risk).
-  Graceful fallback to an all-`None` `ExtractedInfo()` if structured extraction fails outright
-  (network error surviving `RETRY_POLICY`'s 3 attempts, or the model producing something the schema
-  rejects) — never crashes `app.invoke()`, and `clarification_node` asks the human exactly as it
-  would for a genuinely vague email.
+  (Pydantic model, tool-calling under the hood — no manual `json.loads()`, no malformed-JSON risk,
+  no more `{"raw": ...}` fallback that nothing downstream read). Deliberately **no** local
+  try/except around the `.invoke()` call: an earlier version caught every exception there to
+  return an empty `ExtractedInfo()` on failure, which live testing caught as a real regression — it
+  swallowed genuinely transient errors (429/5xx/network) *before* the graph's `RETRY_POLICY` ever
+  got a chance to retry them, since the node "succeeded" (with a degraded result) on the very first
+  attempt. Fixed by removing the catch entirely: `with_structured_output()` already eliminates the
+  malformed-JSON failure mode the old fallback existed for, so any remaining failure is either
+  transient (→ let `RETRY_POLICY` retry the whole node) or a genuine schema rejection at
+  temperature 0 (→ retrying won't change the outcome anyway, so there's nothing a local catch would
+  usefully add). If `RETRY_POLICY` exhausts all 3 attempts, `app.invoke()` raises — the same
+  resilience boundary every other LLM-calling node in this graph already has.
 - `clarification_node` — **interactive reasoning**: if `besoin_principal` is missing/ambiguous (and not
   SPAM/AUTRE/SUPPORT), calls LangGraph's dynamic `interrupt()` to ask the human one question; the
   answer is merged into `extracted_info` on resume (`Command(resume=...)`). Otherwise passes through.
@@ -135,6 +149,7 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
 
 - [app.py](aca/core/app.py) — LangGraph definition, `AgentState` (TypedDict; adds `company_profile`, `next_agent`,
   `reflection_feedback` (critique text from `reflection_node`, consumed by `stratege_node` on rewrite),
+  `classification_confidence` (0-1 score from `classifier_node`, read by `notification_node`),
   `gmail_thread_id` (real Gmail thread, read by `ui.py` after validation for `relance.py` — no node
   touches it, it just rides along in the state), and reducer lists `completed_agents`/`reasoning_log`), the classifier/memory/extractor/clarification
   nodes, the `supervisor_node` + four worker agents (`enrichissement`/`connaissance`/`veille`/`stratege`),
@@ -320,10 +335,12 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   only, never cell values. Run via `python scripts/format_sheets.py`.
 - [eval_dataset.json](aca/eval/eval_dataset.json) — 50 synthetic labeled emails (10 per category, a few
   deliberately ambiguous) for [eval_classifier.py](aca/eval/eval_classifier.py), which runs each through
-  `classifier_node` and reports overall/per-category accuracy + misclassifications. Last measured:
-  96% (48/50). Run via `python -m aca.eval.eval_classifier`; re-run once real emails are available to track
-  accuracy under real conditions instead of the synthetic set.
-- [tests/](tests/) — automated pytest suite (92 tests, offline, ~2s — see Known gaps for full
+  `classifier_node` and reports overall/per-category accuracy + misclassifications. Last measured
+  (2026-07-12, after the switch to structured output + confidence score): **100% (50/50)**, up from
+  96% (48/50) pre-migration — both prior errors were on deliberately ambiguous cases. Run via
+  `python -m aca.eval.eval_classifier`; re-run once real emails are available to track accuracy
+  under real conditions instead of the synthetic set.
+- [tests/](tests/) — automated pytest suite (95 tests, offline, ~2s — see Known gaps for full
   coverage list): [conftest.py](tests/conftest.py) (env isolation + `FakeLLM`/`ExplodingLLM`),
   [test_graph_nodes.py](tests/test_graph_nodes.py), [test_sheets_helpers.py](tests/test_sheets_helpers.py),
   [test_storage.py](tests/test_storage.py) (incl. `sqlite_retry.py` coverage),
@@ -384,7 +401,7 @@ afterward.
 
 ## Known gaps
 
-- ✅ **Fixed (2026-07-12)**: automated test suite now exists — `tests/` (92 tests, pytest, run via
+- ✅ **Fixed (2026-07-12)**: automated test suite now exists — `tests/` (95 tests, pytest, run via
   `python -m pytest tests/`, ~2s, fully offline). `tests/conftest.py` blanks every external-service
   env var *before* any `aca.*` import (`load_dotenv` never overrides pre-set vars, so the real
   `.env` stays inert) and redirects all SQLite paths to a temp dir — no test ever touches Supabase,
@@ -518,7 +535,9 @@ within the 365-day default), and automatic follow-ups (item 7, `relance.py` +
 passed; verified with a mocked Gmail service across all 3 branches: prospect replied, too-soon,
 follow-up triggered), LangSmith tracing (item 11 — connection + 5 traces live-verified in the "ACA"
 project, plus a 50-email labeled eval set (`eval_dataset.json` + `eval_classifier.py`) that measured
-**96% classifier accuracy** (48/50), with the 2 errors both on deliberately ambiguous cases), and a
+**96% classifier accuracy** (48/50) initially, with the 2 errors both on deliberately ambiguous
+cases — remeasured at **100%** (50/50) after the classifier moved to structured output (§10/§11.6
+item 4), which also fixed both ambiguous cases), and a
 real Calendly link appended deterministically to `DEMANDE_DEMO` drafts (item 12, verified: link
 present on the `DEMANDE_DEMO` mock case, absent on `DEVIS`). **All 7 §11.4 P1 items are now done,
 and so are all 6 §11.4 P0 items.** Also done from P2: item 16 (multi-attachment) —

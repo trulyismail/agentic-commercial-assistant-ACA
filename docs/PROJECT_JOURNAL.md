@@ -639,3 +639,95 @@ et complet (tous les champs bien remplis, l'urgence correctement classée « hau
 vague (les champs absents redescendent bien à `None`, pas de plantage). Suite complète repassée :
 92 tests (89 + ces 3 nouveaux) en un peu plus de 2 secondes, plus un run complet des 5 e-mails de
 démonstration contre la vraie API sans aucune régression.
+
+---
+
+## 2026-07-12 (suite 7) — Un score de confiance pour le classificateur, et un vrai bug de résilience trouvé en le testant
+
+### Le problème de départ
+
+Le point suivant de la liste des améliorations restantes (§10 de la feuille de route) : faire en
+sorte que le classificateur (le premier maillon du pipeline, qui décide DEMANDE_DEMO / DEVIS /
+SUPPORT / AUTRE / SPAM) dise aussi **à quel point il est sûr de lui**, et pas seulement son
+verdict. L'idée, déjà notée dans la feuille de route : en dessous d'un certain seuil de confiance,
+prévenir un humain plutôt que de faire confiance aveuglément au verdict de l'IA.
+
+Ce point est particulièrement important pour trois catégories (SPAM, AUTRE, SUPPORT) qui, dans
+l'architecture actuelle, **ne passent jamais devant un humain** — elles sont automatiquement
+transférées à la bonne équipe (`routing_node`) sans jamais s'arrêter à l'écran de validation. Si le
+classificateur se trompe sur l'une de ces trois catégories avec un vrai prospect commercial (par
+exemple : un vrai client potentiel écrit un message ambigu, classé par erreur en SPAM), ce lead est
+purement et simplement perdu, sans qu'aucun humain ne le revoie jamais. C'est donc exactement là que
+la confiance du modèle compte le plus.
+
+### Ce qui a été fait
+
+Même technique que pour l'extracteur la veille : `classifier_node` utilise maintenant
+`with_structured_output()` avec un nouveau schéma, `ClassificationResult` (catégorie + un nombre
+entre 0 et 1 représentant la confiance). En dessous d'un seuil (fixé à 0.6), le nœud
+`notification_node` — qui envoie déjà des alertes Slack/e-mail pour les leads en attente de
+validation — envoie maintenant AUSSI une alerte pour les catégories normalement silencieuses
+(SPAM/AUTRE/SUPPORT), avec un message clair : « classification à confiance faible, à vérifier
+manuellement ». Pas de nouveau mécanisme construit de zéro : on réutilise le canal d'alerte déjà
+en place et déjà vérifié en direct (Slack) la veille.
+
+### Un vrai bug trouvé en testant pour de vrai (et pas seulement avec les tests automatisés)
+
+En relançant la suite de démonstration (les 5 e-mails de test) contre la vraie API Groq pour
+vérifier que tout fonctionnait, un des cas est ressorti avec « AUTRE (confiance 0%) » au lieu du
+résultat attendu (DEMANDE_DEMO). Première réaction : est-ce un vrai bug, ou juste une donnée
+périmée ? Le programme réutilise les mêmes identifiants de conversation à chaque lancement de la
+suite de démonstration (un détail déjà documenté), donc les anciens résultats s'accumulaient
+parfois dans les journaux affichés. Un second lancement a confirmé : cette fois, le même e-mail a
+été classé correctement du premier coup. Le problème n'était donc pas dans la logique du
+classificateur lui-même — il s'agissait d'un vrai raté ponctuel, quelque part dans le passé,
+resté visible dans les journaux accumulés.
+
+Mais ce raté ponctuel a révélé quelque chose d'important en creusant : le code venait tout juste
+d'être écrit avec un filet de sécurité qui attrapait **toutes** les erreurs possibles autour de
+l'appel à l'IA (panne réseau, limite de débit dépassée, sortie invalide...) et renvoyait
+directement un résultat par défaut (« AUTRE », confiance 0). Le problème : le programme a déjà un
+mécanisme de réessai automatique intégré au niveau du graphe entier (`RETRY_POLICY`, qui retente
+jusqu'à 3 fois en cas de panne passagère — une limite de débit dépassée, par exemple). Mais avec ce
+nouveau filet de sécurité posé À L'INTÉRIEUR du nœud, l'erreur ne remontait JAMAIS jusqu'à ce
+mécanisme de réessai — elle était interceptée et « résolue » (avec un résultat dégradé) dès la
+toute première tentative, empêchant tout réessai. Autrement dit : une panne passagère, qui aurait
+probablement réussi à la 2e tentative, se traduisait immédiatement par un résultat dégradé sans
+qu'aucun réessai n'ait jamais lieu.
+
+**Pourquoi c'est un vrai bug et pas un détail** : le mécanisme de réessai existe précisément pour
+absorber ce genre de panne temporaire (une limite de débit dépassée quelques secondes, un délai
+réseau). Le neutraliser silencieusement pour cette seule pièce du code revenait à annuler un filet
+de sécurité déjà en place, sans s'en rendre compte, en en ajoutant un autre au mauvais endroit.
+
+**La correction** : retirer complètement le filet de sécurité local. Techniquement, ça se justifie
+d'autant plus que la raison d'être de l'ancien filet (du texte mal formé que `json.loads()` n'arrive
+pas à lire) a disparu avec la sortie structurée — la nouvelle technique garantit déjà un format
+valide par construction. Ce qui reste comme risque résiduel (une vraie panne d'API) doit maintenant
+remonter jusqu'au mécanisme de réessai du graphe, exactement comme pour tous les autres nœuds du
+projet qui appellent l'IA (aucun d'entre eux n'a de filet de sécurité local équivalent). Si les 3
+tentatives échouent toutes, le programme s'arrête proprement avec une erreur explicite — au lieu de
+continuer silencieusement avec un résultat dégradé qui aurait pu passer inaperçu.
+
+**Ce qu'il faut retenir** : ce bug n'aurait probablement jamais été repéré par la seule suite de
+tests automatisés (qui simule des LLM factices, sans vraie notion de panne réseau réelle) — c'est
+en relançant le programme contre la vraie API, pour de vrai, qu'un résultat inattendu a mis la puce
+à l'oreille. Même leçon que le bug HubSpot de la veille : tester en conditions réelles reste
+irremplaçable pour ce genre de problème de robustesse.
+
+### Effet de bord positif : la précision du classificateur remesurée
+
+En repassant le jeu de 50 e-mails étiquetés (`eval_classifier.py`) après ce changement, la précision
+est passée de 96 % (48/50, mesure d'origine) à **100 % (50/50)** — les deux cas ambigus qui
+posaient problème avant sont maintenant classés correctement. Piste probable (non prouvée avec
+certitude, mais plausible) : contraindre le modèle à remplir un schéma précis via l'appel d'outil
+force une réponse plus disciplinée qu'un simple mot en texte libre, ce qui aide sur les cas limites.
+
+### Comment on sait que ça marche
+
+Cinq nouveaux tests unitaires (label + confiance renvoyés correctement, avertissement de confiance
+faible dans le journal de raisonnement quand le score est bas, propagation de l'erreur au lieu d'un
+repli silencieux sur une sortie invalide, alerte déclenchée pour un SPAM/AUTRE/SUPPORT à confiance
+faible, toujours pas d'alerte si la confiance reste haute). Suite complète repassée : 95 tests, plus
+plusieurs vérifications en direct contre la vraie API Groq et le run complet des 5 e-mails de
+démonstration.
