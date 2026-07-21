@@ -16,7 +16,7 @@ node that calls an external API — absorbs transient Groq/Sheets/Gemini/Tavily/
 of crashing `app.invoke()` (see `docs/ACAM_roadmap.md`):
 
 ```
-START → classifier (8B) → memory_lookup → extractor (70B) → clarification (❓dynamic interrupt)
+START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor (70B) → clarification (❓dynamic interrupt)
       → SUPERVISOR (8B) ⇄ workers ──FINISH── routing ── notification ── interrupt ── action → END
                         ├─ enrichissement (Tavily + Sheets cache → company_profile)
                         ├─ connaissance   (hybrid RAG, dense+sparse RRF fusion → faq_context)
@@ -41,6 +41,13 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   for the same reasoning, discovered together via live testing).
 - `memory_lookup_node` — **long-term memory read**: `sheets.find_leads_by_sender()` fills
   `sender_history` + `is_duplicate` from the "Leads" tab. No LLM.
+- `risk_scan_node` — **deterministic risk scan** (§13, audit of the "ACAM v2 Blueprint" PDFs):
+  [risk_scan.py](aca/core/risk_scan.py)'s `scan_risks()` (bilingual FR/EN, accent/case-insensitive
+  regexes — unlimited liability, late penalties, non-compete clause, bank guarantee, etc.) scans
+  the subject + body + `attachment_text` for contractual red flags into `risk_flags`. No LLM/API
+  call, so **no** `RETRY_POLICY` on this node (nothing external to retry). `risk_flags` feeds
+  `stratege_node` (refuses to commit on flagged clauses, defers to legal/management) and
+  `notification_node` (prepended to the alert).
 - `extractor_node` — extracts `{entreprise, contact, urgence, besoin_principal}` via `with_structured_output(ExtractedInfo)`
   (Pydantic model, tool-calling under the hood — no manual `json.loads()`, no malformed-JSON risk,
   no more `{"raw": ...}` fallback that nothing downstream read). Deliberately **no** local
@@ -98,12 +105,21 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   `approve_knowledge_row` / `reject_knowledge_row`); the answer is still used for *this* proposal
   (reviewed by the human at the "Valider" gate either way). Same hybrid-memory pattern as
   `enrichissement_node`. Graceful `""` fallback if `TAVILY_API_KEY` absent / search fails / no answer.
+  If Tavily also comes back empty (neither `connaissance` nor `veille` found anything), sets
+  `knowledge_gap=True` (§13, audit of the "ACAM v2 Blueprint" PDFs — a lighter, human-gated version
+  of their "[UNANSWERED GAP]" concept, deliberately without a hard similarity-threshold block —
+  see `connaissance_node` above for why a fixed 0.85 gate would be wrong on this stack's embedding
+  model) — consumed by `stratege_node` (answers honestly instead of inventing specifics) and
+  `notification_node` (surfaces the unanswered question to a human).
 - `stratege_node` — **Llama-70B** proposal writer: personalized reply + indicative quote + next action,
   using `company_profile` + `faq_context` + `sender_history` + `extracted_info` (+ `reflection_feedback`
   when `reflection_node` sent it back for a rewrite). Always the last worker. For `DEMANDE_DEMO`,
   appends the real Calendly link (`CALENDLY_URL`) to the draft **deterministically in code** (not
   LLM-generated, to avoid a mangled URL) — absent = graceful no-op, draft unchanged (vague promise,
-  as before).
+  as before). If `risk_flags` is non-empty (§13, `risk_scan_node`), the prompt is told to refuse
+  committing on any flagged clause and defer to legal/management instead. If `knowledge_gap` is
+  set (§13, `veille_node`), the prompt is told to answer honestly and never invent a price/deadline/
+  feature that isn't backed by `faq_context`.
 - `reflection_node` — **self-critique loop** (Llama-8B, a check not a generation): reads `draft_response`
   back against the `faq_context` actually used and looks for an unsupported claim (price/deadline/
   feature not in the FAQ) or an inappropriate tone. `REWRITE: <reason>` sends the draft back to
@@ -124,7 +140,9 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   pause (skipped for `SPAM`/`AUTRE`/`SUPPORT` — nothing to validate there). `notify.send()` tries Slack
   (`SLACK_WEBHOOK_URL`) then a real Gmail send-to-self (`NOTIFY_EMAIL` — an internal alert, not a
   customer-facing action, so auto-sending doesn't violate the "drafts and waits" rule); no-ops if
-  neither is configured.
+  neither is configured. When present, `risk_flags` (§13) is prepended to the alert and
+  `knowledge_gap` (§13) appends the unanswered `besoin_principal` — both surfaced in the alert
+  itself, not just the `reasoning_log` shown later in the UI.
 - `action_node` — runs **only after human validation**: the UI resumes with `app.invoke(None, config)`
   on "Valider" → `sheets.append_lead()` + `hubspot.create_lead()` (real CRM, runs **alongside** Sheets
   during the transition period — see `hubspot.py` below) + (if Gmail-sourced) `mark_as_processed` +
@@ -150,12 +168,39 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
 - [app.py](aca/core/app.py) — LangGraph definition, `AgentState` (TypedDict; adds `company_profile`, `next_agent`,
   `reflection_feedback` (critique text from `reflection_node`, consumed by `stratege_node` on rewrite),
   `classification_confidence` (0-1 score from `classifier_node`, read by `notification_node`),
-  `gmail_thread_id` (real Gmail thread, read by `ui.py` after validation for `relance.py` — no node
-  touches it, it just rides along in the state), and reducer lists `completed_agents`/`reasoning_log`), the classifier/memory/extractor/clarification
-  nodes, the `supervisor_node` + four worker agents (`enrichissement`/`connaissance`/`veille`/`stratege`),
-  `reflection_node` (self-critique after `stratege`), `action_node`, the `SqliteSaver`/`interrupt_before`
-  compile, and a `__main__` block with 5 mock emails
-  (incl. `AUTRE` and `SUPPORT`) that run through the interrupt without a CRM write (`python -m aca.core.app`).
+  `risk_flags` (§13, list of contractual red-flag labels from `risk_scan_node`), `knowledge_gap`
+  (§13, bool set by `veille_node` when no answer was found anywhere), `gmail_thread_id` (real Gmail
+  thread, read by `ui.py` after validation for `relance.py` — no node touches it, it just rides
+  along in the state), `attachments_raw` (§11.6, raw `[(filename, bytes), ...]` pairs consumed by
+  the new `ingestion_node` — see below), and reducer lists `completed_agents`/`reasoning_log`), the
+  `ingestion_node` (§11.6 item 4 — extracts `attachment_text` from `attachments_raw` at the very
+  start of the graph via `attachment_reader.extract_text_from_attachments()`; this used to live
+  outside the graph, duplicated in `ui.py`/`poller.py`, each of which had to call it before
+  `app.invoke()` — a real graph node centralizes it once and inherits `RETRY_POLICY` for free), the
+  classifier/memory/risk_scan/extractor/clarification nodes, the `supervisor_node` + four worker
+  agents (`enrichissement`/`connaissance`/`veille`/`stratege`), `reflection_node` (self-critique
+  after `stratege`), `action_node`, `sum_usage()` (§13, aggregates a `UsageMetadataCallbackHandler`'s
+  per-model token counts — consumed by `ui.py`/`poller.py`/`aca/api.py`), `_calendly_url()`/
+  `_routing_destinations()` (§12 item 7 — read `config_store` first, falling back to the
+  `CALENDLY_URL`/`SUPPORT_EMAIL`/etc. `.env` defaults, so the Streamlit "Réglages" panel takes
+  effect without a restart), the `SqliteSaver`/`PostgresSaver`/`interrupt_before` compile, and a
+  `__main__` block with 6 mock emails (incl. `AUTRE`, `SUPPORT`, and one with a contractual risk
+  clause + an out-of-FAQ question to exercise `risk_flags`/`knowledge_gap`) that run through the
+  interrupt without a CRM write (`python -m aca.core.app`).
+- [risk_scan.py](aca/core/risk_scan.py) — §13: `scan_risks(text) -> list[str]`, pure/deterministic
+  (bilingual FR/EN regexes, accent/case-insensitive via `unicodedata` normalization) for
+  `risk_scan_node`. No LLM, no external call, no `RETRY_POLICY` needed.
+- [auth_lockout.py](aca/core/auth_lockout.py) — §14 item US-41 (security audit, 2026-07-21):
+  `lockout_remaining_seconds()`/`next_lockout_seconds()`, pure functions backing a progressive
+  lockout on `ui.py`'s optional password gate (`_check_auth()`) — exponential backoff (30s, 60s,
+  120s..., capped at 15 min) after 5 failed attempts, stored in `st.session_state`. Fixes a real
+  gap found during the audit: the gate previously compared the password with no attempt limit at
+  all, so a bot could brute-force `ACA_UI_PASSWORD` without any throttle.
+- [tenant.py](aca/core/tenant.py) — `current_org_id()`: the single source of tenant identity for the
+  multi-tenant foundation (§12 item 3, audited §14.3) — reads `ACA_ORG_ID` (default `"default"`)
+  dynamically (never frozen at import, same reasoning as `DATABASE_URL` in `vector_store.py`). One
+  ACA deployment = one tenant (like `DATABASE_URL`/`GOOGLE_SHEETS_ID` already are), not per-request
+  multi-org routing within a single process — there is deliberately no login/session system here.
 - [poller.py](aca/core/poller.py) — standalone background intake: run separately (`python -m aca.core.poller`, own
   process/terminal — not started by Streamlit), polls `gmail_reader.list_unread_emails()` every
   `POLL_INTERVAL_SECONDS` (default 60), and for each email not already in `queue_store` runs it
@@ -163,6 +208,8 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   it — a human still has to click "Valider" in the UI), then records it via `queue_store.enqueue()`
   and logs the classification event via `analytics_store.record_classification()` (dashboard data —
   captured as soon as the graph pauses, independent of whether a human ever opens it in the UI).
+  Also attaches a `UsageMetadataCallbackHandler` to the `invoke()` config and logs the aggregated
+  token count via `analytics_store.record_tokens()` (§13, same pattern as `ui.py`).
 - [queue_store.py](aca/storage/queue_store.py) — tiny local SQLite registry (`data/queue.sqlite`, not the Google
   Sheet) tracking which Gmail messages `poller.py` has already queued (emails stay `UNREAD` until
   validated, so without this they'd be reprocessed every poll cycle) and which are still pending
@@ -175,21 +222,36 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   function is wrapped with `sqlite_retry.with_sqlite_retry()` (below).
 - [sqlite_retry.py](aca/storage/sqlite_retry.py) — `with_sqlite_retry()` decorator (3 attempts, linear
   backoff) applied to every public function of `queue_store.py`/`analytics_store.py`/`audit_log.py`/
-  `followup_store.py` — the standalone SQLite writes these four modules make **outside** the graph
-  (`app.RETRY_POLICY` only covers nodes during `app.invoke()`), so a lock conflict between `poller.py`
-  and `ui.py` opening the same file concurrently no longer raises immediately. Retries only
-  `sqlite3.OperationalError`; any other exception propagates on the first attempt (same "don't retry
-  a programming error" principle as `app._retry_on`).
+  `followup_store.py`/`config_store.py` — the standalone SQLite writes these modules make **outside**
+  the graph (`app.RETRY_POLICY` only covers nodes during `app.invoke()`), so a lock conflict between
+  `poller.py` and `ui.py` opening the same file concurrently no longer raises immediately. Retries
+  only `sqlite3.OperationalError`; any other exception propagates on the first attempt (same "don't
+  retry a programming error" principle as `app._retry_on`).
 - [followup_store.py](aca/storage/followup_store.py) — local SQLite registry (`data/followup.sqlite`) of validated
   leads sourced from Gmail (`track()`, no-op if no `gmail_thread_id` — manual entries can't be
-  followed up automatically), consumed by `relance.py`. `mark_followed_up()` after a follow-up
-  draft is created (one follow-up per lead in this version, no multi-round cadence).
+  followed up automatically), consumed by `relance.py`. `mark_followed_up()` increments
+  `followup_count` (§11.6 item 5, multi-round cadence — replaces the old one-shot `followup_sent`
+  flag, kept in the schema for backward compatibility) up to `relance_max_rounds()` per lead
+  (`RELANCE_MAX_ROUNDS`, default 3, overridable via the "Réglages" panel/`config_store` — ~80% of
+  sales need 5+ touches total). The cadence stops on its own once the prospect replies (the thread's
+  last message is then no longer ours) — no extra bookkeeping needed here for that. `list_active()`
+  is scoped to the current tenant (`org_id`, fondation multi-tenant §12 item 3).
+- [config_store.py](aca/storage/config_store.py) — settings panel backing store (§12 item 7, audited
+  §14): local SQLite registry (`data/config.sqlite`) of per-tenant overrides (`CALENDLY_URL`,
+  `SUPPORT_EMAIL`/`SUPPORT_SLACK_WEBHOOK_URL`, `HR_EMAIL`/`HR_SLACK_WEBHOOK_URL`, `RELANCE_DAYS`,
+  `RELANCE_MAX_ROUNDS`), editable from `ui.py`'s "Réglages" tab without touching `.env`. A key never
+  edited via the UI returns `None` from `get_setting()` — callers (`app.py`, `followup_store.py`,
+  `relance.py`) then fall back to the existing `.env`/default value, so this is a surcouche, not a
+  replacement for `.env`.
 - [relance.py](aca/core/relance.py) — automatic follow-ups (P1 §11.4 item 7): for each tracked lead, reads
   the last message of the real Gmail thread (`threads().get()`); if it's from **us** (the sales
   rep) and at least `RELANCE_DAYS` old (default 4), drafts a follow-up in-thread via
   `gmail_reader.create_draft_reply()` — never auto-sent. If the last message is from the prospect,
-  does nothing (they replied, or we haven't sent our first reply yet). Run via `python -m aca.core.relance`
-  (standalone, meant to be scheduled — e.g. daily — independent of `poller.py`).
+  does nothing (they replied, or we haven't sent our first reply yet). Up to `RELANCE_MAX_ROUNDS`
+  rounds per lead (§11.6 item 5, default 3), the wording varying slightly after the first round;
+  both thresholds read the "Réglages" panel override first, `.env`/default otherwise (same pattern
+  as `app._calendly_url()`). Run via `python -m aca.core.relance` (standalone, meant to be
+  scheduled — e.g. daily — independent of `poller.py`).
 - [audit_log.py](aca/storage/audit_log.py) — minimal traceability (`data/audit.sqlite`, local, not the Google Sheet):
   `log_validation(thread_id, validated_by, classification, sender)` called from `ui.py`'s "Valider"
   handler; `validated_by` comes from the sidebar's "Validé par" free-text field (no real
@@ -203,7 +265,15 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   (separate call, since a clarification pause can log the classification before Stratège has
   written a draft), `record_validation(thread_id)` (closes the response-time measurement, called
   from the "Valider" handler). Read side: `volume_by_category()`, `daily_volume()`,
-  `response_times()`, `funnel_counts()` — all `days`-windowed.
+  `response_times()`, `funnel_counts()` — all `days`-windowed **and now tenant-scoped** (`org_id`,
+  fondation multi-tenant §12 item 3 — each read defaults to the current tenant via
+  `aca.core.tenant.current_org_id()`). Also (§13, audit of the "ACAM v2 Blueprint" PDFs):
+  `record_edit(thread_id, original, edited)` (no-op if unchanged; new `draft_edits` table — a raw
+  corpus for future manual few-shot/eval enrichment, **not** fine-tuning) / `edit_rate(days)`, and
+  `record_tokens(thread_id, input_tokens, output_tokens)` (no-op if both zero; new `token_usage`
+  table, fed by `sum_usage()` in `app.py`/`aca/api.py`) / `token_stats(days)` — the free "first
+  step" of usage tracking anticipated in §12 item 4, now consumed by `aca/integrations/billing.py`
+  (below) for the paid step that follows it.
 - [retention.py](aca/core/retention.py) — GDPR/PII retention sweep (`RETENTION_DAYS`, default 365): purges
   `Leads` rows, their corresponding `data/checkpoints.sqlite` threads (`checkpointer.delete_thread`,
   removes the raw email body from graph state), and old validated `data/queue.sqlite` entries older
@@ -229,29 +299,49 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   (same pattern as `enrichment.py`) if `TAVILY_API_KEY` absent / search fails / no answer.
 - [ui.py](ui.py) — Streamlit front-end, styled with a light "Fluent" theme
   ([.streamlit/config.toml](.streamlit/config.toml)). `_check_auth()` gates the whole app behind an
-  optional password (`ACA_UI_PASSWORD`; absent = no gate, dev mode) before anything else renders.
-  Top of the sidebar has a "Validé par" free-text field (session-scoped, used for `audit_log`) and
-  the **"File d'attente"** panel (`queue_store.list_pending()`) — analyses queued by `poller.py`; clicking "Ouvrir" on an entry
+  optional password (`ACA_UI_PASSWORD`; absent = no gate, dev mode) before anything else renders,
+  now with a **progressive lockout** after 5 failed attempts (§14 item US-41,
+  [auth_lockout.py](aca/core/auth_lockout.py) — exponential backoff capped at 15 min, since the
+  gate previously had no attempt limit at all). Top of the sidebar has a "Validé par" free-text
+  field (session-scoped, used for `audit_log`), the **"File d'attente"** panel
+  (`queue_store.list_pending()`) — analyses queued by `poller.py`; clicking "Ouvrir" on an entry
   calls `load_queued_thread()` to load its already-paused state (no re-run — the graph already ran in
   the poller process) via the shared `_sync_result()` helper (which also logs the classification event
   to `analytics_store.py` — idempotent, so opening an already-poller-logged thread is a no-op). Below
-  that: Gmail import (fetch unread → pick one → load into form, the manual one-at-a-time path) or
-  manual form entry (sender/subject/body + multi-file PDF/Word/Excel upload via `attachment_reader`)
-  → generates a `thread_id` and runs the graph via an `advance_graph()` helper that streams
-  each node live in an `st.status` block, then reads `get_state(config)`. Main area is two
-  `st.tabs`: **"Nouvel e-mail"** (the flow above) and **"Tableau de bord"** (KPIs + charts from
-  `analytics_store.py`, period filter via `st.segmented_control`). If a clarification `interrupt` is
-  pending, it renders the agent's question + a reply box and resumes with `Command(resume=...)`
-  (looping until the validation pause); otherwise it shows a colored category badge / returning-customer
-  + duplicate banners / a "Fiche prospect" card (metrics + urgency + company profile) / a "Raisonnement
-  de l'équipe" expander (`reasoning_log`) / the proposition → "Valider" resumes with
-  `app.invoke(None, config)` → `action_node`, then `queue_store.mark_validated()` (no-op if the thread
-  wasn't queue-sourced), `audit_log.log_validation()`, and `analytics_store.record_validation()`.
+  that: Gmail import (fetch unread → pick one → load into form, the manual one-at-a-time path —
+  raw `(filename, bytes)` attachment pairs are now carried through as `attachments_raw` rather than
+  pre-extracted, §11.6 — extraction happens in the graph's `ingestion_node`) or manual form entry
+  (sender/subject/body + multi-file PDF/Word/Excel upload) → generates a `thread_id` and runs the
+  graph via an `advance_graph()` helper that streams each node live in an `st.status` block (with a
+  `UsageMetadataCallbackHandler` attached to the stream `config` — §13, aggregated via
+  `aca_graph.sum_usage()` and logged with `analytics_store.record_tokens()` once the stream ends),
+  then reads `get_state(config)`. Main area is three `st.tabs`: **"Nouvel e-mail"** (the flow
+  above), **"Tableau de bord"** (KPIs + charts from `analytics_store.py`, period filter via
+  `st.segmented_control`, incl. §13's "brouillons édités" and "tokens/analyse" tiles), and
+  **"Réglages"** (§12 item 7, audited §14 — a form backed by
+  [config_store.py](aca/storage/config_store.py) letting a manager edit the Calendly link,
+  SUPPORT/HR routing addresses and webhooks, and the relance cadence/threshold, without touching
+  `.env`; picked up dynamically by `app.py`'s `_calendly_url()`/`_routing_destinations()` and
+  `followup_store.relance_max_rounds()`/`relance._relance_days()` on the very next run — no
+  restart needed). If a clarification `interrupt` is pending, it renders the
+  agent's question + a reply box and resumes with `Command(resume=...)` (looping until the
+  validation pause); otherwise it shows a colored category badge / returning-customer + duplicate
+  banners / a **risk-flags error banner and a knowledge-gap warning banner** (§13, `risk_flags`/
+  `knowledge_gap`) / a "Fiche prospect" card (metrics + urgency + company profile) / a "Raisonnement
+  de l'équipe" expander (`reasoning_log`) / the proposition, now rendered in an **editable
+  `st.text_area`** (§13) rather than read-only — "Valider" first calls `app.update_state(config,
+  {"draft_response": edited})` if the human changed it (so `action_node` writes the edited version
+  to Sheets/HubSpot/the Gmail draft) and `analytics_store.record_edit()`, then resumes with
+  `app.invoke(None, config)` → `action_node`, then `queue_store.mark_validated()` (no-op if the
+  thread wasn't queue-sourced), `audit_log.log_validation()`, and `analytics_store.record_validation()`.
   `SUPPORT` renders like `AUTRE` (info box + routing-detail expander, no CRM card/validation button —
   both are routed by `routing_node` instead). The sidebar also has a **knowledge-base uploader** (calls
-  `ingest.ingest_document`) and a **"FAQ en attente" review panel** (`sheets.get_pending_knowledge_rows`)
+  `ingest.ingest_document`), a **"FAQ en attente" review panel** (`sheets.get_pending_knowledge_rows`)
   with Valider/Rejeter buttons per row (`approve_knowledge_row`/`reject_knowledge_row`) for content
-  staged by `veille`. `SPAM` shows a plain error box, no validation button.
+  staged by `veille`, and a **"Confidentialité des données" expander** (§14 item US-42, links to
+  [docs/PRIVACY_POLICY.md](docs/PRIVACY_POLICY.md) — the GDPR privacy policy that was previously
+  entirely missing, only the technical `retention.py` purge existed). `SPAM` shows a plain error
+  box, no validation button.
 - [gmail_reader.py](aca/integrations/gmail_reader.py) — Gmail API integration (OAuth "installed app" flow):
   `get_gmail_service()` (auths, caches token in `credentials/gmail_token.json`), `list_unread_emails()`,
   `get_email()` (body + **all** PDF/Word/Excel attachments — `_extract_attachments()` walks every
@@ -288,14 +378,24 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
 - [vector_store.py](aca/integrations/vector_store.py) — pgvector-backed semantic search on Supabase Postgres (P2 §11.1
   vector-DB migration, brought forward ahead of the volume triggers at the user's request — see
   docs/ACAM_roadmap.md §11.1/§11.2 for the original trigger-based plan). `is_enabled()` gates everything on
-  `DATABASE_URL`; `sync_embeddings(pairs, embed_documents)` fully replaces the `faq_embeddings` table
-  (`question | reponse | embedding VECTOR(3072) | updated_at`, no ANN index yet — a sequential scan
-  with pgvector's `<=>` operator is exact and sub-millisecond at FAQ-sized volumes; add
-  `hnsw`/`ivfflat` later if the FAQ grows into the thousands) whenever `sheets.py` detects the FAQ's
-  visible content changed; `search(query_vector, top_n, max_distance)` returns the nearest rows by
-  cosine distance (note: pgvector gives a *distance*, not a similarity — the old `score > 0.5`
-  threshold is `distance < 0.5` here). Absent `DATABASE_URL` = fully inert, `sheets.py` uses its
-  original in-memory path unchanged.
+  `DATABASE_URL`; `sync_embeddings(pairs, embed_documents)` fully replaces the *current tenant's*
+  rows in the `faq_embeddings` table (`question | reponse | embedding VECTOR(3072) | updated_at |
+  org_id` — `org_id` added for the multi-tenant foundation, §12 item 3, audited §14.3; no ANN index
+  yet — a sequential scan with pgvector's `<=>` operator is exact and sub-millisecond at FAQ-sized
+  volumes; add `hnsw`/`ivfflat` later if the FAQ grows into the thousands) whenever `sheets.py`
+  detects the FAQ's visible content changed; `search(query_vector, top_n, max_distance)` returns
+  the nearest rows of the current tenant by cosine distance (note: pgvector gives a *distance*, not
+  a similarity — the old `score > 0.5` threshold is `distance < 0.5` here). **Row-Level Security**
+  (§12 item 3 / §14.3): `faq_embeddings` has `ENABLE`+`FORCE ROW LEVEL SECURITY` and a
+  `tenant_isolation` policy comparing `org_id` to the Postgres session variable
+  `app.current_org_id` — this project never goes through PostgREST/an anon key (only a direct
+  `psycopg` connection via `DATABASE_URL`), so the policy can't rely on `auth.uid()`; `_scope_to_tenant()`
+  sets that session variable via `set_config()` at the start of every borrowed pooled connection,
+  before any query, so a connection reused later by a different tenant can never inherit the
+  previous one's scope. Not live-verified against a real Supabase RLS policy in this session (no
+  Supabase credentials in this environment) — only the migration/query SQL itself, exercised via
+  offline unit tests of the surrounding org_id-scoping logic. Absent `DATABASE_URL` = fully inert,
+  `sheets.py` uses its original in-memory path unchanged.
 - [hubspot.py](aca/integrations/hubspot.py) — real CRM (P2), mirrors `sheets.append_lead()`: called from
   `action_node` **alongside** Sheets (not replacing it — Sheets stays the memory `find_leads_by_sender()`/
   the dashboard read from). `is_enabled()` gates everything on `HUBSPOT_ACCESS_TOKEN` (private-app token).
@@ -313,6 +413,17 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   guaranteeing `return deal_id` never depends on a print succeeding (prints are now try/excepted with an
   ASCII fallback). `python -m aca.integrations.hubspot` runs a one-off live test (creates + reports a real
   test deal — clean up manually afterward, this module has no dry-run mode).
+- [billing.py](aca/integrations/billing.py) — usage-based billing (§12 item 4, audited §14): `report_usage(org_id,
+  days)` reads the current tenant's `analytics_store.token_stats()` (already-free token logging)
+  and, only if `STRIPE_API_KEY` is set **and** a `STRIPE_SUBSCRIPTION_ITEM_ID` is configured for
+  that tenant (via `config_store`), reports the total as a Stripe usage record
+  (`action="set"`, so re-running the same day doesn't double-count). Same graceful-degradation
+  contract as `notify.py`/`hubspot.py`: absent config or a Stripe API failure both return the
+  stats without raising, never blocking the caller. ⚠️ Explicitly the *paid* step the roadmap
+  says makes sense "only in the commercial phase" — deliberately **not** live-verified against a
+  real Stripe account (none exists for this project); only its graceful-degradation contract and
+  its call shape (via a fake Stripe client) are covered by tests, unlike `hubspot.py`'s live-tested
+  portal integration above.
 - [pdf_reader.py](aca/ingestion/pdf_reader.py) — `extract_text_from_pdf()` using PyMuPDF (`fitz`); accepts bytes or a
   path; truncates output to `MAX_CHARS` (15,000) to bound LLM token usage. Used as-is by
   `ingest.py`/the Knowledge_Base uploader (single PDF, unchanged). Internally also exposes
@@ -333,6 +444,21 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   bold/gray header row, wrapped/widened long-text columns, and conditional cell coloring (Leads:
   `Urgence`/`Catégorie` — same palette as the UI's category badges; FAQ: `Statut`). Touches formatting
   only, never cell values. Run via `python scripts/format_sheets.py`.
+- [api.py](aca/api.py) — FastAPI microservice (§12 item 6 — n8n port "Option A", audited §14): exposes the
+  compiled graph over HTTP for a future **self-hosted** n8n workflow (n8n Cloud is paid, cf. §11.5)
+  to drive instead of `poller.py`/`ui.py` — `POST /threads` starts an analysis, `GET /threads/{id}`
+  reads its state, `POST /threads/{id}/clarifier` answers a pending dynamic clarification, and
+  `POST /threads/{id}/valider` is the **only** endpoint that resumes past `interrupt_before=["action"]`
+  (same human-in-the-loop contract as `ui.py`'s "Valider" button — optionally with an
+  `edited_draft`). `GET /metrics` exposes Prometheus-format counters/histogram (§12 item 9, audited
+  §14 — `aca_emails_classified_total`, `aca_leads_validated_total`, `aca_tokens_per_analysis`);
+  the roadmap marks this "useful only once §12 item 3 [multi-tenant] exists and several clients
+  run" — it exists now that the org_id foundation does, but is inert until something actually
+  scrapes it. Launch: `uvicorn aca.api:api --port 8000`. Covered by
+  [test_api.py](tests/test_api.py) via `fastapi.testclient.TestClient` with the same fake-LLM
+  pattern as `test_graph_integration.py` — not exercised against a real n8n instance (none exists
+  for this project; n8n would simply be an HTTP client of this API, nothing to stand up to verify
+  the API itself).
 - [eval_dataset.json](aca/eval/eval_dataset.json) — 50 synthetic labeled emails (10 per category, a few
   deliberately ambiguous) for [eval_classifier.py](aca/eval/eval_classifier.py), which runs each through
   `classifier_node` and reports overall/per-category accuracy + misclassifications. Last measured
@@ -340,13 +466,23 @@ START → classifier (8B) → memory_lookup → extractor (70B) → clarificatio
   96% (48/50) pre-migration — both prior errors were on deliberately ambiguous cases. Run via
   `python -m aca.eval.eval_classifier`; re-run once real emails are available to track accuracy
   under real conditions instead of the synthetic set.
-- [tests/](tests/) — automated pytest suite (95 tests, offline, ~2s — see Known gaps for full
-  coverage list): [conftest.py](tests/conftest.py) (env isolation + `FakeLLM`/`ExplodingLLM`),
-  [test_graph_nodes.py](tests/test_graph_nodes.py), [test_sheets_helpers.py](tests/test_sheets_helpers.py),
-  [test_storage.py](tests/test_storage.py) (incl. `sqlite_retry.py` coverage),
-  [test_degradation.py](tests/test_degradation.py),
-  [test_graph_integration.py](tests/test_graph_integration.py). Run via `python -m pytest tests/`
-  (pytest pinned in requirements.txt).
+- [tests/](tests/) — automated pytest suite (160 tests, offline, ~3s — see Known gaps for full
+  coverage list): [conftest.py](tests/conftest.py) (env isolation + `FakeLLM`/`ExplodingLLM`, now
+  also blanking `ACA_ORG_ID`/`STRIPE_API_KEY` and redirecting `ACA_CONFIG_DB`),
+  [test_graph_nodes.py](tests/test_graph_nodes.py) (incl. §13: `scan_risks()`, `risk_scan_node`,
+  `knowledge_gap` propagation, `sum_usage()`, §11.6's `ingestion_node`, and §12 item 7's
+  `config_store` overrides for Calendly/routing), [test_sheets_helpers.py](tests/test_sheets_helpers.py),
+  [test_storage.py](tests/test_storage.py) (incl. `sqlite_retry.py` coverage, §13's
+  `record_edit`/`edit_rate`/`record_tokens`/`token_stats`, §11.6's multi-round `followup_store`
+  cadence + legacy-schema migration, and §12 item 7's `config_store` get/set/org-scoping),
+  [test_degradation.py](tests/test_degradation.py) (incl. `billing.py`'s disabled-state contract),
+  [test_graph_integration.py](tests/test_graph_integration.py),
+  [test_multitenant.py](tests/test_multitenant.py) (§12 item 3 — org_id isolation across all four
+  local stores, same tenant scenario RLS reproduces on Supabase),
+  [test_auth_lockout.py](tests/test_auth_lockout.py) (§14 item US-41),
+  [test_billing.py](tests/test_billing.py) (§12 item 4, via a fake Stripe client), and
+  [test_api.py](tests/test_api.py) (§12 item 6, via `fastapi.testclient.TestClient`). Run via
+  `python -m pytest tests/` (pytest pinned in requirements.txt).
 
 ## Stack
 
@@ -357,8 +493,10 @@ LangGraph (supervisor graph, `SqliteSaver`/`PostgresSaver`, static + dynamic `in
 optional, see `DATABASE_URL` below) · `tavily-python` (web enrichment, free tier) ·
 Streamlit (Fluent theme via [.streamlit/config.toml](.streamlit/config.toml)) · `gspread` + `google-auth`
 (Google Sheets as CRM + knowledge base) · `google-api-python-client` + `google-auth-oauthlib` (Gmail) ·
-PyMuPDF (PDF) · `python-docx` (Word) · `openpyxl` (Excel) · `python-dotenv`. Pinned in
-[requirements.txt](requirements.txt).
+PyMuPDF (PDF) · `python-docx` (Word) · `openpyxl` (Excel) · `python-dotenv` · `fastapi` + `uvicorn`
+([api.py](aca/api.py), n8n port §12 item 6) · `stripe` ([billing.py](aca/integrations/billing.py),
+§12 item 4, inert without `STRIPE_API_KEY`) · `prometheus-client` (`/metrics` on `api.py`, §12 item
+9). Pinned in [requirements.txt](requirements.txt).
 
 Required env vars (`.env`, gitignored): `GOOGLE_SERVICE_ACCOUNT_FILE`, `GOOGLE_SHEETS_ID`, a Groq API
 key for `langchain_groq`, `GOOGLE_API_KEY` (Gemini, for `search_knowledge_base_semantic`; RAG silently
@@ -386,7 +524,16 @@ exactly as before this migration — see `docs/ACAM_roadmap.md` §11.1/§11.2), 
 `HUBSPOT_ACCESS_TOKEN` (private-app token for [hubspot.py](aca/integrations/hubspot.py); absent =
 `action_node` writes to Sheets only, graceful no-op, same pattern as everything else) with optional
 `HUBSPOT_PIPELINE` / `HUBSPOT_DEALSTAGE` overrides (default `"default"` / `"appointmentscheduled"`,
-present in every fresh HubSpot portal).
+present in every fresh HubSpot portal), and optionally (multi-tenant foundation + commercialization
+scaffolding, §12/§14) `ACA_ORG_ID` (default `"default"` — one ACA deployment/process = one tenant;
+tags every row in the four local stores below plus `faq_embeddings`, and scopes every read to it —
+see [tenant.py](aca/core/tenant.py)), `ACA_CONFIG_DB` (default `data/config.sqlite`, backs the
+"Réglages" settings panel — [config_store.py](aca/storage/config_store.py)), `STRIPE_API_KEY` /
+`STRIPE_SUBSCRIPTION_ITEM_ID` (per-tenant, set via `config_store` not `.env` — usage-based billing,
+[billing.py](aca/integrations/billing.py); absent = token stats still computed locally, no Stripe
+call, graceful no-op like everything else — ⚠️ not live-verified, no Stripe test account exists for
+this project), and `RELANCE_MAX_ROUNDS` (default `3`, overridable via the settings panel — cf.
+[followup_store.py](aca/storage/followup_store.py)'s multi-round cadence, §11.6 item 5).
 
 `credentials/` (gitignored) holds `service_account.json` (Sheets) and `gmail_credentials.json` (Gmail
 OAuth client secret, "installed app" type). `gmail_token.json` is created there on first Gmail auth.
@@ -505,6 +652,31 @@ afterward.
   success/failure print statements are now individually try/excepted with an ASCII-only fallback.
   Re-verified live: a fresh test lead was created cleanly (exit code 0, no exception) under the same
   shell that crashed before the fix, then deleted as cleanup.
+- ✅ **Fixed (2026-07-21)** — §14 security audit + full §11.6/§12 build-out, at the user's explicit
+  request to "finish what's rest in the plan" (confirmed to include §12 P3 commercialization
+  items, normally deliberately deferred until the project is declared finished): (1) US-41,
+  progressive lockout on `ui.py`'s password gate — previously no attempt limit at all, a real
+  brute-force gap; (2) US-42, a GDPR privacy policy document — `retention.py` was a technical purge
+  mechanism only, no policy ever existed; (3) §11.6's last unaddressed item, an explicit
+  `ingestion_node` — attachment extraction used to live outside the graph, duplicated in
+  `ui.py`/`poller.py`; (4) §11.6 item 5, multi-round relance cadence (up to `RELANCE_MAX_ROUNDS`,
+  default 3, was capped at exactly one before); (5) a multi-tenant `org_id` foundation across all
+  four local stores + `faq_embeddings`, with Postgres RLS (session-variable-based, since this
+  project never uses PostgREST/an anon key); (6) a "Réglages" settings panel
+  (`config_store.py`) making Calendly/routing/relance settings editable without `.env`; (7) usage
+  aggregation already existed (`token_stats`, now org-scoped) — added `billing.py` as the
+  Stripe-gated next step, **not live-verified** (no Stripe test account available); (8) a FastAPI
+  microservice (`api.py`) exposing the graph for the planned n8n port, **not exercised against a
+  real n8n instance** (n8n would just be an HTTP client of this API); (9) a Prometheus `/metrics`
+  endpoint. **Deliberately not built**: a dedicated Next.js/Shadcn client dashboard (§12 item 8) —
+  that requires a real framework/hosting decision the audit flagged as inappropriate to make
+  unilaterally, unlike the items above which were pure code additions. 160 tests total (up from
+  125), all offline; see `docs/ACAM_roadmap.md` §14 for the full item-by-item audit reasoning
+  (including two checklist items from the original security audit that were found to be
+  non-issues by architecture and correctly *not* built: exposed API keys — no client-side
+  frontend exists to expose anything from — and "Supabase wide open" in the PostgREST/anon-key
+  sense, which doesn't apply since this project only ever connects via a direct `psycopg`
+  connection string).
 
 ## Status vs. the 8-week roadmap
 
@@ -583,4 +755,16 @@ net-new features rather than refinements, out of scope unless separately request
 looking backlog now lives in `docs/ACAM_roadmap.md` §11.6 (remaining core technical debt — test
 suite, live-credential exercises, out-of-graph SQLite retries, §10 leftovers) and §12 (P3
 commercialization/SaaS items from a second external AI review, each audited against the code with a
-verified done/partial/todo status — to be started only after §11.6).
+verified done/partial/todo status — to be started only after §11.6). Also done, from a third
+external AI-generated document (two overlapping PDF "Bid Governance" blueprints, audited against
+the code and re-scoped away from their single-client framing at the user's request — see
+`docs/ACAM_roadmap.md` §13): a deterministic contractual-risk scanner (`risk_scan_node`), an
+explicit `knowledge_gap` flag when neither the FAQ nor a web search can answer a question (both
+feed `stratege_node`'s prompt and `notification_node`'s alert), an editable draft before validation
+with (original, edited) capture as a future few-shot/eval corpus (not fine-tuning), and per-analysis
+Groq token-usage logging (`sum_usage()` + `analytics_store.record_tokens()`) — the free first step
+of usage tracking already anticipated in §12 item 4. The audit also caught two factual errors in
+the source PDFs before they could be copied in: a hallucination-gate threshold (0.85) that would
+have blocked most genuinely relevant matches on this project's real embedding-similarity
+distribution (0.73–0.80, measured 2026-07-11), and a pgvector schema sized for a paid OpenAI
+embedding model instead of the free Gemini one actually in use.

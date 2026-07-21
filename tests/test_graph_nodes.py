@@ -8,6 +8,8 @@ import json
 import pytest
 from conftest import ExplodingLLM, FakeLLM
 
+from aca.storage import config_store
+
 import aca.core.app as app_module
 from aca.core.app import (
     CATEGORIES_SANS_SUITE,
@@ -17,14 +19,18 @@ from aca.core.app import (
     classifier_node,
     connaissance_node,
     extractor_node,
+    ingestion_node,
     memory_lookup_node,
     notification_node,
     reflection_node,
+    risk_scan_node,
     routing_node,
     stratege_node,
+    sum_usage,
     supervisor_node,
     veille_node,
 )
+from aca.core.risk_scan import scan_risks
 
 EMAIL = {"sender": "jean@entreprise.fr", "subject": "Devis", "body": "Bonjour, un devis SVP pour 10 licences."}
 
@@ -33,6 +39,23 @@ def _state(**overrides):
     base = {"email_raw": EMAIL, "classification": "DEVIS", "extracted_info": {}, "completed_agents": []}
     base.update(overrides)
     return base
+
+
+# ── ingestion_node (§11.6 — extraction des pièces jointes, désormais un nœud de graphe) ────────
+def test_ingestion_no_attachments_returns_empty_text():
+    assert ingestion_node(_state())["attachment_text"] == ""
+    assert ingestion_node(_state(attachments_raw=[]))["attachment_text"] == ""
+
+
+def test_ingestion_extracts_text_from_raw_attachments(monkeypatch):
+    pdf_bytes = b"%PDF-1.4 fake but irrelevant for this fake extractor"
+
+    def fake_extract(attachments):
+        return "\n".join(f"{name}:{len(data)}o" for name, data in attachments)
+
+    monkeypatch.setattr(app_module, "extract_text_from_attachments", fake_extract)
+    out = ingestion_node(_state(attachments_raw=[("cdc.pdf", pdf_bytes)]))
+    assert out["attachment_text"] == f"cdc.pdf:{len(pdf_bytes)}o"
 
 
 # ── classifier_node (sortie structurée + score de confiance) ────────────────────────────────
@@ -52,6 +75,15 @@ def test_classifier_low_confidence_flagged_in_reasoning_log(monkeypatch):
     out = classifier_node(_state())
     assert out["classification_confidence"] == 0.3
     assert "faible" in out["reasoning_log"][0]
+
+
+def test_classifier_prompt_contains_few_shot_examples(monkeypatch):
+    fake = FakeLLM(json.dumps({"categorie": "DEVIS", "confiance": 0.9}))
+    monkeypatch.setattr(app_module, "fast_llm", lambda: fake)
+    classifier_node(_state())
+    system_prompt = fake.last_messages[0].content
+    assert "Exemples de cas limites" in system_prompt
+    assert "SPAM" in system_prompt and "AUTRE" in system_prompt
 
 
 def test_classifier_schema_failure_propagates_to_retry_policy(monkeypatch):
@@ -76,6 +108,15 @@ def test_extractor_returns_structured_fields(monkeypatch):
         "entreprise": "Entreprise SA", "contact": "Jean Dupont",
         "urgence": "haute", "besoin_principal": "10 licences Enterprise",
     }
+
+
+def test_extractor_prompt_contains_urgence_calibration(monkeypatch):
+    fake = FakeLLM(json.dumps({}))
+    monkeypatch.setattr(app_module, "smart_llm", lambda: fake)
+    extractor_node(_state())
+    system_prompt = fake.last_messages[0].content
+    assert "Calibrage de l'urgence" in system_prompt
+    assert "haute" in system_prompt and "moyenne" in system_prompt and "basse" in system_prompt
 
 
 def test_extractor_missing_fields_become_none(monkeypatch):
@@ -246,6 +287,17 @@ def test_veille_uses_shared_rag_query(monkeypatch):
     assert captured["query"] == "intégration Salesforce"
     assert out["faq_context"] == "- Q: q\n  R: r"
     assert out["completed_agents"] == ["veille"]
+    assert out["knowledge_gap"] is False
+
+
+def test_veille_sets_knowledge_gap_when_still_empty(monkeypatch):
+    # Ni la FAQ (connaissance) ni le web (veille) n'ont de réponse : signale explicitement la
+    # lacune (§13, audit des PDF "ACAM v2 Blueprint" — inspiré du "[UNANSWERED GAP]").
+    monkeypatch.setattr(app_module.veille, "search_faq_online", lambda q: "")
+    state = _state(extracted_info={"besoin_principal": "fonctionnalité obscure"}, sender_history="")
+    out = veille_node(state)
+    assert out["faq_context"] == ""
+    assert out["knowledge_gap"] is True
 
 
 # ── stratege_node (lien Calendly déterministe + feedback de réécriture) ──────────────────────
@@ -263,6 +315,16 @@ def test_stratege_no_calendly_for_devis(monkeypatch):
     assert "calendly" not in out["draft_response"].lower()
 
 
+def test_stratege_config_store_calendly_overrides_env(monkeypatch, tmp_path):
+    """§12 item 7 : un lien Calendly édité via le panneau de réglages l'emporte sur `.env`."""
+    monkeypatch.setattr(config_store, "DB_PATH", str(tmp_path / "config.sqlite"))
+    monkeypatch.setattr(app_module, "creative_llm", lambda: FakeLLM("Bonjour, avec plaisir."))
+    monkeypatch.setattr(app_module, "CALENDLY_URL", "https://env-default.example/demo")
+    config_store.set_setting("CALENDLY_URL", "https://panel-override.example/demo")
+    out = stratege_node(_state(classification="DEMANDE_DEMO"))
+    assert out["draft_response"].endswith("https://panel-override.example/demo")
+
+
 def test_stratege_injects_reflection_feedback_in_prompt(monkeypatch):
     fake = FakeLLM("Version corrigée.")
     monkeypatch.setattr(app_module, "creative_llm", lambda: fake)
@@ -276,6 +338,37 @@ def test_stratege_prompt_clean_without_feedback(monkeypatch):
     monkeypatch.setattr(app_module, "creative_llm", lambda: fake)
     stratege_node(_state())
     assert "CORRECTION DEMANDÉE" not in fake.last_messages[0].content
+
+
+def test_stratege_prompt_warns_on_risk_flags(monkeypatch):
+    fake = FakeLLM("Proposition prudente.")
+    monkeypatch.setattr(app_module, "creative_llm", lambda: fake)
+    stratege_node(_state(risk_flags=["Responsabilité illimitée"]))
+    system_prompt = fake.last_messages[0].content
+    assert "CLAUSES À RISQUE" in system_prompt
+    assert "Responsabilité illimitée" in system_prompt
+
+
+def test_stratege_prompt_clean_without_risk_flags(monkeypatch):
+    fake = FakeLLM("Proposition.")
+    monkeypatch.setattr(app_module, "creative_llm", lambda: fake)
+    stratege_node(_state())
+    assert "CLAUSES À RISQUE" not in fake.last_messages[0].content
+
+
+def test_stratege_prompt_honest_on_knowledge_gap(monkeypatch):
+    fake = FakeLLM("Proposition honnête.")
+    monkeypatch.setattr(app_module, "creative_llm", lambda: fake)
+    stratege_node(_state(knowledge_gap=True))
+    system_prompt = fake.last_messages[0].content
+    assert "LACUNE DE CONNAISSANCE" in system_prompt
+
+
+def test_stratege_prompt_clean_without_knowledge_gap(monkeypatch):
+    fake = FakeLLM("Proposition.")
+    monkeypatch.setattr(app_module, "creative_llm", lambda: fake)
+    stratege_node(_state())
+    assert "LACUNE DE CONNAISSANCE" not in fake.last_messages[0].content
 
 
 # ── routing_node / notification_node ─────────────────────────────────────────────────────────
@@ -294,6 +387,21 @@ def test_routing_support_alert_sent(monkeypatch):
     monkeypatch.setattr(app_module.notify, "send", lambda *a, **k: True)
     out = routing_node(_state(classification="SUPPORT"))
     assert any("alerte envoyée" in r.lower() for r in out["reasoning_log"])
+
+
+def test_routing_destinations_config_store_overrides_env(monkeypatch, tmp_path):
+    """§12 item 7 : une adresse/webhook de routage édité via le panneau l'emporte sur `.env`."""
+    monkeypatch.setattr(config_store, "DB_PATH", str(tmp_path / "config.sqlite"))
+    monkeypatch.setenv("SUPPORT_EMAIL", "env-default@entreprise.fr")
+    config_store.set_setting("SUPPORT_EMAIL", "panel-override@entreprise.fr")
+
+    captured = {}
+    monkeypatch.setattr(
+        app_module.notify, "send",
+        lambda message, webhook_url=None, email_to=None, subject=None: captured.update(email_to=email_to) or True,
+    )
+    routing_node(_state(classification="SUPPORT"))
+    assert captured["email_to"] == "panel-override@entreprise.fr"
 
 
 def test_notification_skipped_for_sans_suite(monkeypatch):
@@ -324,6 +432,25 @@ def test_notification_high_confidence_sans_suite_still_skipped(monkeypatch):
     assert out == {}
 
 
+def test_notification_includes_risk_flags(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(app_module.notify, "send", lambda message: captured.setdefault("msg", message) or True)
+    notification_node(_state(classification="DEVIS", risk_flags=["Responsabilité illimitée"]))
+    assert "Risques contractuels détectés" in captured["msg"]
+    assert "Responsabilité illimitée" in captured["msg"]
+
+
+def test_notification_includes_knowledge_gap(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(app_module.notify, "send", lambda message: captured.setdefault("msg", message) or True)
+    notification_node(_state(
+        classification="DEVIS", knowledge_gap=True,
+        extracted_info={"besoin_principal": "compatibilité SAP obscure"},
+    ))
+    assert "sans réponse en base de connaissances" in captured["msg"]
+    assert "compatibilité SAP obscure" in captured["msg"]
+
+
 # ── _retry_on (politique de retry) ───────────────────────────────────────────────────────────
 def test_retry_on_429():
     class _Resp:
@@ -336,3 +463,67 @@ def test_retry_on_429():
 
 def test_no_retry_on_programming_error():
     assert _retry_on(ValueError("bug")) is False
+
+
+# ── risk_scan (§13 — RegEx déterministe, aucun appel LLM) ────────────────────────────────────
+@pytest.mark.parametrize("text", [
+    "Le contrat prévoit une responsabilité illimitée en cas de litige.",
+    "This clause imposes unlimited liability on the vendor.",
+    "Des pénalités de retard s'appliquent après 30 jours.",
+    "Une astreinte quotidienne sera due en cas de manquement.",
+    "Nous exigeons une garantie bancaire à première demande.",
+    "Le prestataire accepte une clause de non-concurrence de 2 ans.",
+    "Résiliation immédiate possible sans préavis.",
+    "Le contrat inclut liquidated damages pour tout retard.",
+])
+def test_scan_risks_detects_known_clauses(text):
+    assert scan_risks(text) != []
+
+
+def test_scan_risks_clean_text_returns_empty():
+    assert scan_risks("Bonjour, quel est le prix pour 10 licences Enterprise ?") == []
+
+
+def test_scan_risks_empty_input():
+    assert scan_risks("") == []
+
+
+def test_scan_risks_accent_and_case_insensitive():
+    # Accents absents + majuscules (frappe rapide réelle) doivent quand même matcher.
+    assert scan_risks("RESPONSABILITE ILLIMITEE en toutes circonstances") != []
+
+
+def test_risk_scan_node_flags_detected(monkeypatch):
+    monkeypatch.setattr(app_module.risk_scan, "scan_risks", lambda text: ["Responsabilité illimitée"])
+    out = risk_scan_node(_state())
+    assert out["risk_flags"] == ["Responsabilité illimitée"]
+    assert any("Risques" in r for r in out["reasoning_log"])
+
+
+def test_risk_scan_node_no_flags(monkeypatch):
+    monkeypatch.setattr(app_module.risk_scan, "scan_risks", lambda text: [])
+    out = risk_scan_node(_state())
+    assert out["risk_flags"] == []
+    assert any("aucune clause" in r.lower() for r in out["reasoning_log"])
+
+
+def test_risk_scan_node_scans_body_and_attachment(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(app_module.risk_scan, "scan_risks", lambda text: captured.setdefault("text", text) or [])
+    state = _state(attachment_text="clause de non-concurrence en annexe")
+    risk_scan_node(state)
+    assert "clause de non-concurrence en annexe" in captured["text"]
+    assert EMAIL["body"] in captured["text"]
+
+
+# ── sum_usage (agrégation du callback UsageMetadataCallbackHandler) ─────────────────────────
+def test_sum_usage_aggregates_across_models():
+    usage_metadata = {
+        "llama-3.1-8b-instant": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
+        "llama-3.3-70b-versatile": {"input_tokens": 300, "output_tokens": 80, "total_tokens": 380},
+    }
+    assert sum_usage(usage_metadata) == (400, 100)
+
+
+def test_sum_usage_empty_dict():
+    assert sum_usage({}) == (0, 0)

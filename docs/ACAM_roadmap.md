@@ -141,9 +141,17 @@ utilisées » sont désormais implémentées (marquées ✅) ; les autres resten
 
 Classées par effort estimé (croissant) :
 
-- **Few-shot prompting** — les prompts de `classifier_node` / `extractor_node` sont zéro-shot ;
-  ajouter 2-3 exemples annotés par catégorie réduirait les erreurs de classification en bordure
-  (ex : SUPPORT vs DEVIS ambigus).
+- ✅ **Fait (2026-07-12) — Few-shot prompting** : `classifier_node` a 3 exemples de cas limites
+  (SUPPORT vs DEVIS, AUTRE vs partenariat, SPAM déguisé en urgence — précisément l'exemple cité
+  ici) ; `extractor_node` a un calibrage explicite des 3 niveaux d'urgence + le format attendu de
+  `besoin_principal`. Vérifié en direct : un e-mail piège (« question urgente » dans l'objet, mais
+  aucun incident réel) classait d'abord l'urgence en "haute" à cause du seul mot "urgent" malgré la
+  règle générale donnée au modèle — corrigé en remplaçant la règle abstraite par un exemple
+  contrastif explicite (« Question urgente : compatible Salesforce ? → basse »), qui a résolu le
+  cas piège sans casser les deux autres cas de calibrage testés. Le classifieur étant déjà à 100 %
+  sur `eval_dataset.json` grâce à la sortie structurée (item précédent), ces exemples ajoutent une
+  marge de robustesse hors de ce jeu d'évaluation plutôt que de corriger un problème mesuré —
+  re-testé après coup : toujours 50/50, aucune régression.
 - ✅ **Fait (2026-07-12) — `with_structured_output()` / Pydantic** au lieu de `json.loads()` manuel
   dans `extractor_node` : nouveau modèle `ExtractedInfo` (Pydantic), extraction forcée par
   tool-calling côté Groq — plus de JSON malformé à parser, plus de fallback `{"raw": ...}` fantôme
@@ -493,17 +501,34 @@ sont pas traités, la phase commercialisation ne démarre pas. Classés par levi
    `RETRY_POLICY`. Vérifié par 5 tests (`tests/test_storage.py`) : succès après un verrou
    transitoire, échec propre après épuisement des tentatives sur un verrou persistant, et aucune
    tentative supplémentaire sur une exception qui n'est pas un conflit de verrou.
-4. 🟡 **Partiel — Améliorations de robustesse LLM ouvertes au §10** :
-   ✅ `with_structured_output()`/Pydantic pour l'extracteur ET le classifieur (fait 2026-07-12, voir
-   §10 — le classifieur a gagné un score de confiance au passage). **Reste** : few-shot prompting
-   (classifier/extractor, encore zéro-shot), nœud `ingestion` explicite dans le graphe (l'extraction
-   des pièces jointes vit encore dans `ui.py`/`poller.py`/`gmail_reader.py`).
-5. **Cadence de relance multi-tours** — une seule relance par lead aujourd'hui (`relance.py`) ;
-   ~80 % des ventes demandent 5+ contacts. Extension : plusieurs relances espacées, arrêt dès que
-   le prospect répond.
-6. **Rapport de stage + backlog Scrum / user stories** — ❌ volontairement en attente (démarre quand
-   le projet est déclaré terminé). Matière première déjà accumulée dans `PROJECT_JOURNAL.md` ;
-   les user stories se dériveront des items P0/P1/P2 de ce document.
+4. ✅ **Soldé (2026-07-21) — Améliorations de robustesse LLM ouvertes au §10** :
+   ✅ `with_structured_output()`/Pydantic pour l'extracteur ET le classifieur (le classifieur a
+   gagné un score de confiance au passage) ; ✅ few-shot prompting sur les deux nœuds (fait
+   2026-07-12, voir §10) ; ✅ nœud `ingestion` explicite dans le graphe — l'extraction des pièces
+   jointes (`attachment_reader.extract_text_from_attachments`) vivait hors du graphe, dupliquée
+   dans `ui.py`/`poller.py`, chacun devant l'appeler avant `app.invoke()` et passer le résultat déjà
+   calculé ; `ingestion_node` (nouveau, tout début du graphe : `START → ingestion → classifier →
+   ...`) centralise cette extraction une seule fois, à partir d'un nouveau champ d'état brut
+   `attachments_raw`, et hérite gratuitement du `RETRY_POLICY` du graphe. Vérifié par 2 nouveaux
+   tests unitaires + la suite d'intégration complète rejouée sans régression.
+5. ✅ **Fait (2026-07-21) — Cadence de relance multi-tours** : `followup_store.py` remplace l'ancien
+   flag booléen `followup_sent` (une seule relance, conservé en base pour compatibilité) par un
+   compteur `followup_count`, plafonné à `RELANCE_MAX_ROUNDS` (défaut 3, réglable via le panneau
+   « Réglages », §12 item 7). La cadence s'arrête d'elle-même dès que le prospect répond (le
+   dernier message du fil n'est alors plus de nous) — aucune logique d'arrêt supplémentaire
+   nécessaire, chaque relance envoyée devient à son tour le dernier message et repousse
+   naturellement la suivante de `RELANCE_DAYS`. Ton légèrement différencié après la première
+   relance. Migration idempotente de schéma (bases existantes non perdues), vérifiée par 3 tests
+   dédiés + les tests de dégradation existants.
+6. 🟡 **Largement fait — Rapport de stage + backlog Scrum / user stories** : la matière première a
+   été transformée en un document de présentation structuré complet
+   ([docs/ACA_presentation_source.md](ACA_presentation_source.md), même session que ce document,
+   2026-07-21) — contexte projet, étude de l'existant, exigences fonctionnelles/techniques, valeur
+   ajoutée, diagramme de cas d'utilisation UML (acteurs corrigés après relecture), et un backlog
+   Scrum complet (8 epics, 40+ user stories, 4 sprints réels + backlog de commercialisation).
+   **Reste** : le document de rapport de stage académique final à proprement dit (mise en forme
+   institution/école, soutenance) — matière première désormais prête, mise en forme restante hors
+   du périmètre d'un audit technique.
 
 ## 12. P3 — Commercialisation / SaaS (à commencer UNIQUEMENT après le §11.6)
 
@@ -526,44 +551,246 @@ l'existant (même esprit que l'avertissement n8n Cloud du §11.5).
    `reasoning_log` affiché dans l'UI. **Manque** : un onglet « Historique » dans l'UI qui consomme
    `audit_log.list_recent()` (déjà codé, jamais branché) et permette de rechercher les exécutions
    passées. ⚠️ Effort modeste : c'est surtout du câblage d'existant, pas une nouvelle infrastructure.
-3. ❌ **Multi-tenant (isolation par client)** : Supabase Auth + table `organizations` + colonne
-   `org_id` sur chaque donnée (Leads, FAQ, analytics, config) + **Row-Level Security** pour un
-   cloisonnement au niveau base. Vérifié : aucun `org_id` nulle part, un seul `.env`, un seul mot de
-   passe UI. C'est LA frontière prototype → produit vendable à plusieurs clients.
-4. ❌ **Suivi de consommation & facturation** : capturer les métadonnées d'usage LLM (tokens
-   entrée/sortie par exécution) dans `analytics_store.py` (vérifié : aucune trace de tokens
-   aujourd'hui), les agréger par `org_id`, et brancher Stripe Billing. ⚠️ Conflit 0 € : Stripe et les
-   modèles payants (Claude/GPT — les limites du free tier Groq ne tiendront pas un trafic commercial)
-   n'ont de sens qu'en phase commerciale ; en attendant, la *première marche* gratuite est de logger
-   les tokens Groq (déjà présents dans les réponses API) pour connaître le coût théorique par client.
+3. 🟡 **Fondation faite (2026-07-21) — Multi-tenant (isolation par client)**. Ajouté : `org_id`
+   (`aca.core.tenant.current_org_id()`, défaut `"default"`, un déploiement ACA = un tenant — pas de
+   routage multi-org au sein d'un même process, aucun login/session ajouté) tague désormais chaque
+   ligne des 4 registres SQLite locaux (`queue_store`, `analytics_store`, `audit_log`,
+   `followup_store` — migration idempotente, historique préservé) ET de `faq_embeddings`
+   (Supabase) ; chaque lecture est scopée dessus par défaut. **Row-Level Security** activée sur
+   `faq_embeddings` (`ENABLE`+`FORCE ROW LEVEL SECURITY` + politique `tenant_isolation`) — ce
+   projet ne passant jamais par PostgREST/une clé anon (uniquement `psycopg` via `DATABASE_URL`),
+   la politique s'appuie sur une variable de session Postgres (`app.current_org_id`, positionnée
+   via `set_config()` à chaque emprunt de connexion au pool) plutôt que sur `auth.uid()`. **Reste
+   non fait** : `Supabase Auth`, table `organizations`, tout écran de login/inscription — c'est la
+   fondation de données, pas un vrai système multi-tenant utilisateur. Non vérifié en direct contre
+   un vrai Supabase dans cette session (pas d'accès réseau/identifiants) — seule la logique de
+   scoping `org_id` autour est couverte par 5 tests unitaires (`tests/test_multitenant.py`).
+4. ✅ **Fait (2026-07-21) — Suivi de consommation, facturation Stripe en scaffold**. Le suivi de
+   tokens (`analytics_store.token_stats`) existait déjà et est maintenant scopé par `org_id` (item
+   3 ci-dessus). Ajouté : [billing.py](../aca/integrations/billing.py) — `report_usage(org_id, days)`
+   reporte la consommation comme un enregistrement d'usage Stripe (`action="set"`) **uniquement**
+   si `STRIPE_API_KEY` est configurée ET qu'un `STRIPE_SUBSCRIPTION_ITEM_ID` est réglé pour ce
+   tenant (via le panneau de réglages, item 7) — sinon renvoie juste les statistiques, sans jamais
+   lever. ⚠️ Conflit 0 € assumé et documenté dans le code lui-même : ce module n'a de sens qu'en
+   phase commerciale, et n'a **jamais été exercé contre un vrai compte Stripe** (aucun compte de
+   test disponible pour ce projet) — seule sa dégradation gracieuse et la forme de son appel (via
+   un faux client Stripe) sont couvertes par les tests (`tests/test_billing.py` +
+   `tests/test_degradation.py`).
 5. 🟡 **Partiel — Trace d'observabilité & graphe d'état visuel** (« graphe LangGraph affiché, nœud
    actif surligné, dropdown "Thought Trace" par worker ») : le « Thought Trace » existe déjà
    (expander « Raisonnement de l'équipe d'agents » + progression nœud par nœud en direct via
    `app.stream()`/`st.status`). **Manque** : le rendu *visuel* du graphe avec surlignage du nœud
    actif. ⚠️ Valeur = confiance client en démo ; à faire dans le futur dashboard (item 8) plutôt
    qu'en Streamlit jetable.
-6. ❌ **Stratégie n8n « Option A » (décision d'architecture actée)** : garder LangGraph/Python
-   intact comme « cerveau », l'exposer en microservice via FastAPI ; n8n devient l'enveloppe
-   d'infrastructure (trigger Gmail natif remplaçant `poller.py`, notifications, file d'attente
-   visuelle, reprise après « Valider »). Vérifié : aucun FastAPI aujourd'hui. ⚠️ Cohérent avec la
-   conception « n8n-ready » déjà actée (§11.5) et son avertissement : n8n **self-hosted** (gratuit),
-   pas n8n Cloud (payant). L'alternative « tout réécrire en nœuds n8n » est explicitement rejetée
-   (perdrait `attachment_reader.py`, le RAG hybride, les garde-fous déterministes...).
-7. ❌ **Panneau de configuration dynamique** : un onglet « Réglages » où un manager (pas un
-   développeur) édite son lien Calendly, ses adresses de routage SUPPORT/RH, ses webhooks, et sa
-   base de connaissances via une grille de données — aujourd'hui tout est dans `.env` (vérifié) et
-   la FAQ ne s'édite que par ingestion/staging. Pré-requis pratique du multi-tenant (item 3) : la
-   config par client doit vivre en base (Supabase), plus dans un fichier local.
+6. ✅ **Fait (2026-07-21) — Stratégie n8n « Option A »**. [api.py](../aca/api.py) : microservice
+   FastAPI exposant le graphe compilé (`POST /threads`, `GET /threads/{id}`,
+   `POST /threads/{id}/clarifier`, `POST /threads/{id}/valider`) — même contrat human-in-the-loop
+   que `ui.py`, `valider` restant le seul point d'entrée qui écrit dans le CRM. Cohérent avec la
+   conception « n8n-ready » déjà actée (§11.5) : n8n resterait **self-hosted** (gratuit), pas n8n
+   Cloud (payant) ; l'alternative « tout réécrire en nœuds n8n » reste explicitement rejetée.
+   Couvert par 7 tests (`tests/test_api.py`, via `fastapi.testclient.TestClient` + les mêmes faux
+   LLM que `test_graph_integration.py`). **Non exercé contre un vrai workflow n8n** — aucune
+   instance n8n n'existe pour ce projet ; n8n ne ferait qu'appeler cette API en HTTP, il n'y a rien
+   côté API elle-même qu'un n8n réel changerait à vérifier.
+7. ✅ **Fait (2026-07-21) — Panneau de configuration dynamique**. Nouvel onglet « Réglages » dans
+   `ui.py`, backé par [config_store.py](../aca/storage/config_store.py) (SQLite local, par tenant) :
+   un manager édite le lien Calendly, les adresses/webhooks de routage SUPPORT/RH, et la cadence de
+   relance (`RELANCE_DAYS`/`RELANCE_MAX_ROUNDS`) sans toucher `.env` — pris en compte dès la
+   prochaine analyse (`app._calendly_url()`/`_routing_destinations()`) ou le prochain cycle
+   planifié (`relance._relance_days()`/`followup_store.relance_max_rounds()`), aucun redémarrage
+   requis. Un réglage jamais édité retombe sur `.env` (surcouche, pas un remplacement). **Non
+   inclus** : édition de la base de connaissances via grille de données (l'ingestion/staging
+   existants restent le chemin d'édition de la FAQ) — hors du périmètre étroit de cet item.
 8. ❌ **Dashboard client dédié** (le document suggère Next.js/Shadcn/Tailwind : login client,
    timeline d'exécution, boutons HITL, réglages, facturation). ⚠️ Décision de phase commerciale,
    pas un manque du prototype : Streamlit reste l'UI assumée du stage ; le choix Next.js vs.
-   Streamlit multi-pages durci se prendra au moment du port, pas avant.
-9. ❌ **Observabilité d'infrastructure (Grafana/Prometheus sur les métriques Supabase)**. ⚠️ Utile
-   uniquement sous vraie charge multi-clients ; LangSmith (gratuit, déjà branché) couvre le besoin
-   d'observabilité au volume prototype. À reconsidérer quand l'item 3 existe et que plusieurs
-   clients tournent.
+   Streamlit multi-pages durci se prendra au moment du port, pas avant. **Délibérément non
+   construit le 2026-07-21** malgré une demande explicite de « finir tout ce qui reste » : un vrai
+   framework front + une décision d'hébergement ne sont pas des choix qu'un passage de code
+   autonome doit trancher à la place d'une vraie décision produit — contrairement aux items
+   ci-dessus, qui étaient des ajouts de code purs.
+9. ✅ **Fait (2026-07-21) — Observabilité (Prometheus)**. `GET /metrics` sur
+   [api.py](../aca/api.py) (`prometheus-client`, gratuit, open source) :
+   `aca_emails_classified_total{classification, org_id}`, `aca_leads_validated_total{org_id}`,
+   `aca_tokens_per_analysis` (histogramme). ⚠️ Le point de vigilance d'origine reste vrai —
+   « utile uniquement sous vraie charge multi-clients » — mais l'endpoint est maintenant prêt pour
+   ce cas futur (scrape Prometheus/Grafana) sans imposer d'infrastructure tant que rien ne le
+   scrape ; LangSmith couvre toujours le besoin d'observabilité au volume prototype actuel.
 
-**Ordre de dépendance suggéré** (si cette phase démarre un jour) : 3 (multi-tenant) → 7 (config par
-client) → 4 (usage/billing) → 8 (dashboard) → 2/5 (audit + graphe visuel dans ce dashboard) →
-6 (port n8n) → 9 (Grafana). Les items 2 et 5 peuvent aussi être prototypés avant, en Streamlit, à
-faible coût.
+**Ordre de dépendance suggéré** (si cette phase démarre un jour) : ~~3 (multi-tenant)~~ (fondation
+faite) → ~~7 (config par client)~~ (fait) → ~~4 (usage/billing)~~ (scaffold fait) → 8 (dashboard) →
+2/5 (audit + graphe visuel dans ce dashboard) → ~~6 (port n8n)~~ (fait) → ~~9 (Grafana)~~ (endpoint
+prêt). Restent réellement ouverts : 2 (onglet Historique), 5 (graphe visuel), 8 (dashboard client
+dédié — décision produit délibérément non prise). Les items 2 et 5 peuvent être prototypés en
+Streamlit, à faible coût.
+
+## 13. Audit d'un 3e document externe — blueprints « Bid Governance » (2026-07-16)
+
+Issu de deux PDF générés par IA reçus le 2026-07-16 ("ACAM v2 Complete Engineering Blueprint" et
+une version condensée "Unified Master Blueprint" — même contenu, la seconde résume la première)
+proposant de repositionner ACAM en moteur de gouvernance d'appels d'offres pour Teamwill (conseil
+bancaire) : score de probabilité de gagner un appel d'offre, disponibilité du personnel, marge de
+rentabilité, seuil de confiance RAG fixe à 0.85, schéma pgvector `vector(1536)`. Même méthode que
+le §12 : chaque idée auditée contre le code réel, pas ajoutée telle quelle. **Décision de cadrage
+de l'utilisateur avant l'audit** : abandonner le cadrage Teamwill/appel d'offres — l'objectif du
+projet est une solution générique pour plusieurs entreprises clientes, pas un pivot sectoriel.
+
+**Déjà construit, souvent en mieux que décrit dans les PDF (ne pas reconstruire) :**
+- *Intake événementiel / « retirer l'humain de l'initiation »* : `poller.py` fait déjà tourner
+  chaque e-mail non lu jusqu'à la pause de validation automatiquement ; la variante webhook n8n est
+  le port déjà prévu (§12 item 6). ⚠️ La rhétorique des PDF (« supprimer la phase HITL
+  d'initiation ») ne doit surtout pas éroder la contrainte fondatrice « rédige et attend » — la
+  pause de validation humaine reste non négociable.
+- *Pré-traitement déterministe (JSON structuré avant tout raisonnement)* : `extractor_node` +
+  `with_structured_output(ExtractedInfo)` (§10, fait).
+- *Interface à deux vues (technique/exécutive)* : en grande partie déjà là — `app.stream()` +
+  `st.status` en direct (trace technique) et l'écran de validation (vue exécutive). Les animations
+  LottieFiles des PDF sont cosmétiques, non retenues.
+- *Optimisation dynamique du contexte* : la troncature globale (`MAX_CHARS`) + l'ingestion
+  granulaire en paires Q/R bornent déjà l'usage de tokens à cette échelle.
+
+**Deux erreurs factuelles dans les PDF, à ne surtout pas copier :**
+- *« Anti-Hallucination Gate » à seuil cosinus fixe 0.85* : la mesure empirique déjà faite sur ce
+  projet (§"Known gaps" de CLAUDE.md, calibrage du 2026-07-11) montre que de vraies reformulations
+  pertinentes obtiennent **0.73–0.80** avec l'embedding réellement utilisé (Gemini) — un seuil à
+  0.85 bloquerait la quasi-totalité des bonnes réponses. Le design existant (double seuil zone
+  ambre 0.72/0.62 + fusion RRF dense/sparse + repli veille + reflection + porte humaine finale) est
+  strictement supérieur. Les seuils de similarité ne se recopient pas d'un modèle d'embedding à
+  l'autre — ils se mesurent. Conservé tel quel ; seule l'idée du drapeau de lacune explicite est
+  retenue (item 2 ci-dessous).
+- *Schéma Supabase pgvector `vector(1536)`, OpenAI `text-embedding-ada-002`, index HNSW* : la
+  stack réelle utilise `gemini-embedding-001` (3072 dimensions, gratuit — `ada-002` est payant,
+  violerait la contrainte 0 €). L'index HNSW avait déjà été sciemment repoussé (scan séquentiel
+  exact et sub-milliseconde au volume actuel de la FAQ).
+
+**Idées jugées bonnes mais non réalisables avec les données actuelles — parquées :**
+- *« Golden Diff » Win Predictor* (score de similarité contre un historique de propositions
+  gagnantes) : nécessite un corpus par client de propositions passées qui n'existe pas. → P3 (§12),
+  reformulé génériquement (« historique de propositions par client »), à ne construire que quand
+  cette donnée existera réellement.
+- *Bench Readiness + Profitability Margin Index* : nécessitent des données de disponibilité
+  consultant + coûts/revenus qui n'existent pas ; la formule elle-même est une simple arithmétique,
+  la vraie difficulté est la donnée. → P3 (§12), après le multi-tenant (item 3).
+- *SME Matchmaker complet* (base de compétences + cartes interactives Teams/Slack) : nécessite une
+  base de compétences + un backend de bot qui n'existent pas — candidat naturel pour le port n8n
+  (§12 item 6). La version légère (question sans réponse poussée dans l'alerte Slack existante) est
+  retenue (item 2 ci-dessous).
+- *Fan-out parallèle des workers* (enrichissement/connaissance en parallèle plutôt que
+  séquentiellement) : LangGraph le permettrait, mais la limite Groq (~30 req/min free tier) et la
+  lisibilité du `reasoning_log` séquentiel rendent le gain marginal. Piste optionnelle future, pas
+  retenue maintenant.
+
+**Idées jugées bonnes ET réalisables — implémentées le 2026-07-16 :**
+
+1. ✅ **Fait — Scanner de risques contractuels déterministe** (inspiré du « Trapdoor Risk Engine »
+   des PDF) : nouveau module [risk_scan.py](../aca/core/risk_scan.py) (expressions régulières
+   bilingues FR/EN, insensibles aux accents/majuscules — responsabilité illimitée, pénalités de
+   retard, clause de non-concurrence, garantie bancaire, astreinte, résiliation
+   unilatérale/immédiate, exclusivité contractuelle) + nouveau `risk_scan_node` dans
+   [app.py](../aca/core/app.py) (placé `memory_lookup → risk_scan → extractor`, sans `RetryPolicy`
+   — aucun appel externe à réessayer). `risk_flags` prévient explicitement `stratege_node` (ne
+   s'engage sur aucune clause détectée, renvoie vers le juridique) et `notification_node` (en tête
+   de l'alerte Slack/e-mail). Vérifié en direct (`python -m aca.core.app`, 6e e-mail de démo
+   ajouté) : « responsabilité illimitée » + « pénalités de retard » détectées, et le brouillon final
+   a correctement refusé tout engagement dessus.
+2. ✅ **Fait — Lacune de connaissance signalée explicitement (`knowledge_gap`)** : avant ce
+   changement, quand `connaissance` ET `veille` ne trouvaient rien, `stratege_node` rédigeait quand
+   même sans aucun contexte factuel, en silence. Version réalisable du « [UNANSWERED GAP] » des
+   PDF (sans le blocage strict à 0.85, voir plus haut) : `veille_node` pose `knowledge_gap=True`
+   dans ce cas précis ; le Stratège est prévenu de rester honnête (jamais de prix/délai/
+   fonctionnalité inventés) et `notification_node` pousse la question sans réponse dans l'alerte —
+   version légère du SME Matchmaker, réutilisant le canal d'alerte existant plutôt qu'un nouveau
+   webhook dédié.
+3. ✅ **Fait — Brouillon éditable avant validation, capture (original, édité)** : le brouillon du
+   Stratège est maintenant modifiable dans un `st.text_area` avant de cliquer « Valider » (au lieu
+   d'un affichage lecture seule) ; c'est la version corrigée qui part vers Sheets/HubSpot/le
+   brouillon Gmail. Chaque édition réelle est journalisée
+   (`analytics_store.record_edit`/`edit_rate`, nouvelle table `draft_edits`). Version réalisable du
+   « Continuous Training Loop » des PDF : **pas de réentraînement automatique** (stack 100 %
+   gratuite, aucun fine-tuning) — un corpus brut pour enrichir manuellement, plus tard, le
+   few-shot prompting (§10) ou `eval_dataset.json`.
+4. ✅ **Fait — Suivi de consommation de tokens (« Quota Usage Tracker »)** : `sum_usage()` dans
+   `app.py` + `UsageMetadataCallbackHandler` (langchain_core, standard) branché dans
+   `ui.py`/`poller.py` sur chaque exécution du graphe ; journalisé via
+   `analytics_store.record_tokens`/`token_stats` (nouvelle table `token_usage`) et affiché comme
+   KPI du tableau de bord. C'est la première marche déjà identifiée en §12 item 4, avant même la
+   lecture de ces PDF — purement informatif tant que Groq reste gratuit.
+
+**Vérification** : 23 nouveaux tests unitaires (détection de chaque motif de risque,
+insensibilité accents/majuscules, absence de faux positif sur texte propre, `knowledge_gap` posé
+seulement quand connaissance ET veille échouent, injection correcte des deux avertissements dans le
+prompt du Stratège, présence des deux signaux dans le message d'alerte, agrégation multi-modèle de
+`sum_usage`, taux d'édition et statistiques de tokens sur bases temporaires) — suite complète
+repassée sans régression : **125 tests, ~5 s**. Vérifié en direct contre la vraie API Groq (6e
+e-mail de démonstration dans `python -m aca.core.app`, voir `docs/PROJECT_JOURNAL.md` entrée
+2026-07-16 pour le détail complet).
+
+## 14. Audit d'une checklist générique « 5 erreurs de sécurité des projets IA » (2026-07-21)
+
+Source : une série de slides génériques (non spécifiques à ACA) listant des erreurs de sécurité
+fréquentes sur les projets « vibe-codés » avec de l'IA — mistake n°01 (clés API exposées), n°02
+(pas de rate limiting), n°03 (Supabase grand ouvert / RLS désactivée), n°05 (pas de politique de
+confidentialité). *Note : la slide n°04 n'a pas été fournie par l'utilisateur — non auditée ici.*
+Même méthode que les §12/§13 : chaque point vérifié contre le code réel avant d'être ajouté au
+backlog, pas recopié tel quel.
+
+1. ✅ **Non applicable — clés API exposées côté client.** Vérifié par grep sur tout le
+   dépôt : `GROQ_API_KEY`/`GOOGLE_API_KEY`/`TAVILY_API_KEY`/`HUBSPOT_ACCESS_TOKEN`/
+   `SLACK_WEBHOOK_URL`/`DATABASE_URL` sont lus exclusivement via `os.getenv()` depuis `.env`
+   (gitignoré), jamais codés en dur, jamais affichés dans l'UI (`ui.py` ne fait aucun `st.write`/
+   `st.text`/`print` sur une valeur contenant *key*/*token*/*secret*). Le point de la slide («AI
+   tools hardcode your secrets into frontend code, one inspect element and you're done») suppose un
+   bundle JS livré au navigateur avec des secrets embarqués — **Streamlit n'a pas cette surface** :
+   c'est un serveur Python qui rend du HTML, il n'y a pas de « code frontend » exposant quoi que ce
+   soit d'inspectable. Rien à corriger ; à surveiller uniquement si une future UI (item 8 du §12,
+   dashboard Next.js) introduit un vrai frontend — à ce moment-là, revérifier qu'aucune clé ne migre
+   côté client.
+2. ❌ **Réel — absence de rate limiting sur le gate mot de passe UI.** `ui.py:19-36`
+   (`_check_auth`) compare `pwd == required` sans aucun compteur de tentatives, verrou temporaire,
+   ni délai — un bot peut soumettre `ACA_UI_PASSWORD` en boucle aussi vite que Streamlit rejoue le
+   script (`st.rerun()`), sans throttle process ni stockage de tentatives échouées. Le
+   commentaire du code assume déjà « usage solo/petite équipe, pas un vrai système
+   multi-utilisateurs » — donc le risque réel est faible en usage interne actuel, mais reste un vrai
+   trou si l'UI est un jour exposée publiquement (ex. démo commerciale). Ajouté au backlog
+   ci-dessous (item nouveau, faible effort : compteur + verrou progressif en session_state, pas de
+   dépendance externe).
+3. 🟡 **Partiellement applicable — pas de RLS sur la table pgvector Supabase.**
+   [vector_store.py](../aca/integrations/vector_store.py) crée `faq_embeddings` (`CREATE TABLE IF
+   NOT EXISTS ...`) sans jamais activer `ROW LEVEL SECURITY` — confirmé par grep, aucune occurrence
+   de RLS/`ENABLE ROW LEVEL SECURITY` dans tout le projet. **Nuance par rapport à la slide** : le
+   scénario qu'elle décrit (« every user can read every other user's data ») suppose une exposition
+   via l'API REST PostgREST de Supabase avec une clé publique *anon* — recherché explicitement
+   (`SUPABASE_ANON_KEY`/PostgREST/`supabase-js`) : **aucune occurrence**. Ce projet n'accède à
+   Postgres que via `psycopg`/`DATABASE_URL` (chaîne de connexion directe, côté serveur uniquement,
+   jamais envoyée à un navigateur) — la surface d'attaque « anon key volée dans le JS » n'existe
+   donc pas aujourd'hui. Cela dit, l'absence de RLS reste une vraie dette : (a) c'est déjà un
+   prérequis identifié du multi-tenant (§12 item 3 — « aucun `org_id` nulle part » — RLS est
+   littéralement la frontière prototype → produit vendable à plusieurs clients), et (b) c'est une
+   défense en profondeur peu coûteuse si `DATABASE_URL` fuitait un jour. Statut : pas une faille
+   activement exploitable dans l'architecture actuelle (mono-tenant, pas de PostgREST exposé), mais
+   à corriger avant tout accès multi-utilisateur/multi-client à Supabase — regroupé avec le
+   multi-tenant plutôt que traité isolément (RLS sans `org_id` n'aurait rien à cloisonner).
+4. ❌ **Réel — absence de politique de confidentialité.** `retention.py` (purge RGPD à
+   `RETENTION_DAYS`) est un **mécanisme technique**, pas une politique publiée : rien dans le dépôt
+   n'informe un prospect de ce qui est collecté (e-mail, pièces jointes, historique), pourquoi, pour
+   combien de temps, ni de ses droits (accès/rectification/effacement/portabilité RGPD), ni qui est
+   le responsable de traitement. Une entreprise qui collecte des e-mails de prospects sans document
+   de ce type est en infraction RGPD (amendes jusqu'à 20M€ ou 4% du CA mondial) — confirmé par grep,
+   aucun fichier « politique de confidentialité »/`privacy policy` n'existe. Ajouté au backlog.
+
+**Backlog consolidé de cette section :**
+
+| # | Tâche | Statut | Priorité | Effort |
+|---|---|---|---|---|
+| 14.1 | Clés API jamais exposées côté client | ✅ Déjà acquis (architecture serveur, rien à faire) | — | — |
+| 14.2 | Rate limiting / verrou progressif sur `_check_auth()` (ui.py) | ✅ **Fait (2026-07-21)** — [auth_lockout.py](../aca/core/auth_lockout.py) (backoff exponentiel, 5 tentatives puis verrou 30s→15min), 7 tests | — | — |
+| 14.3 | RLS sur `faq_embeddings` (et toute table future) | ✅ **Fait (2026-07-21)**, avec le multi-tenant `org_id` (§12 item 3) — `ENABLE`+`FORCE ROW LEVEL SECURITY` + politique par variable de session Postgres (pas de PostgREST/anon key ici). Non vérifié en direct contre un vrai Supabase (pas d'accès réseau dans cette session) | — | — |
+| 14.4 | Rédiger et publier une politique de confidentialité (RGPD) | ✅ **Fait (2026-07-21)** — [docs/PRIVACY_POLICY.md](PRIVACY_POLICY.md), lié depuis un expander de `ui.py`. Champs raison sociale/contact DPO marqués `[À COMPLÉTER]` (décision propre à l'entreprise utilisatrice, pas devinable par le code) | — | — |
+
+**Ce qui n'a volontairement pas été ajouté** : rien d'autre de cette checklist ne s'applique sans
+modification — voir le détail item par item ci-dessus pour la justification de chaque « non
+applicable ». Point de vigilance méthodologique (même qu'aux §12/§13) : une checklist générique
+écrite sans accès au code réel peut décrire des scénarios d'attaque qui ne correspondent pas à
+l'architecture effective (ici : Streamlit n'est pas un frontend JS, et Postgres n'est jamais
+exposé via PostgREST/anon key) — l'auditer contre le code évite d'ajouter une tâche qui ne
+protégerait contre rien, ou d'en manquer une vraie.

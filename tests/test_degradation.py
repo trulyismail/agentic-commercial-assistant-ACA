@@ -12,7 +12,7 @@ from openpyxl import Workbook
 
 import aca.ingestion.attachment_reader as attachment_reader
 from aca.agents import enrichment, veille
-from aca.integrations import hubspot, notify
+from aca.integrations import billing, hubspot, notify
 from aca.ingestion.attachment_reader import extract_text_from_attachments
 
 
@@ -34,6 +34,22 @@ def test_hubspot_create_lead_graceful_none():
         draft="Bonjour.",
     )
     assert result is None
+
+
+# ── billing : Stripe non configuré → statistiques seules, jamais d'appel Stripe ──────────────
+def test_billing_disabled_without_api_key():
+    assert billing.is_enabled() is False
+
+
+def test_billing_report_usage_returns_stats_without_stripe_call(monkeypatch):
+    monkeypatch.setattr(
+        billing.stripe, "SubscriptionItem",
+        type("Exploding", (), {"create_usage_record": staticmethod(
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("Stripe ne doit pas être appelé"))
+        )}),
+    )
+    stats = billing.report_usage()
+    assert set(stats) == {"analyses", "total_entree", "total_sortie", "moyenne_par_analyse"}
 
 
 # ── enrichment : domaine générique ou Tavily absent → "" ─────────────────────────────────────

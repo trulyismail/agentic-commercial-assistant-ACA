@@ -14,25 +14,31 @@ import os
 import time
 import traceback
 from dotenv import load_dotenv
+from langchain_core.callbacks import UsageMetadataCallbackHandler
 
 from aca.storage import analytics_store, queue_store
 from aca.core import app as aca_graph
 from aca.integrations import gmail_reader
-from aca.ingestion.attachment_reader import extract_text_from_attachments
 
 load_dotenv()
 
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "60"))
 
 
-def _initial_state(email: dict, attachment_text: str) -> dict:
-    """Même structure d'état initial que le formulaire manuel de ui.py, pour un e-mail Gmail."""
+def _initial_state(email: dict) -> dict:
+    """
+    Même structure d'état initial que le formulaire manuel de ui.py, pour un e-mail Gmail.
+    `attachments_raw` est transmis brut (§11.6) : l'extraction du texte se fait désormais dans le
+    graphe (`ingestion_node`), plus ici — ce module n'a donc plus besoin d'appeler
+    `extract_text_from_attachments()` lui-même avant `app.invoke()`.
+    """
     return {
         "email_raw": {"sender": email["sender"], "subject": email["subject"], "body": email["body"]},
-        "attachment_text": attachment_text,
+        "attachments_raw": email["attachments"],
         "gmail_message_id": email["id"],
         "gmail_thread_id": email.get("gmail_thread_id"),
-        "extracted_info": {}, "faq_context": "", "company_profile": "", "draft_response": "",
+        "extracted_info": {}, "faq_context": "", "knowledge_gap": False, "company_profile": "",
+        "risk_flags": [], "draft_response": "",
         "sender_history": "", "is_duplicate": False, "action_status": "",
         "completed_agents": [], "reasoning_log": [],
     }
@@ -49,9 +55,9 @@ def process_one(service, summary: dict) -> None:
     thread_id = f"poll-{email['id']}"
     queue_store.enqueue(email["id"], thread_id, email["sender"], email["subject"])
 
-    attachment_text = extract_text_from_attachments(email["attachments"])
-    config = {"configurable": {"thread_id": thread_id}}
-    final_state = aca_graph.app.invoke(_initial_state(email, attachment_text), config)
+    usage_handler = UsageMetadataCallbackHandler()
+    config = {"configurable": {"thread_id": thread_id}, "callbacks": [usage_handler]}
+    final_state = aca_graph.app.invoke(_initial_state(email), config)
 
     # Tableau de bord (P2 §11.4 item 16) : le graphe a déjà tourné jusqu'à la pause dans ce
     # process, donc classification et éventuelle proposition sont connues dès maintenant — pas
@@ -61,6 +67,10 @@ def process_one(service, summary: dict) -> None:
     )
     if final_state.get("draft_response"):
         analytics_store.record_draft_ready(thread_id)
+
+    # Consommation de tokens de cette analyse (§13 item 4, "Quota Usage Tracker").
+    tokens_in, tokens_out = aca_graph.sum_usage(usage_handler.usage_metadata)
+    analytics_store.record_tokens(thread_id, tokens_in, tokens_out)
 
     queue_store.mark_ready(email["id"])
     print(f"   → mis en file d'attente : « {email['subject']} » ({email['sender']})")

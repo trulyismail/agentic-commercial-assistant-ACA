@@ -1,12 +1,14 @@
 import os
+import time
 import uuid
 import streamlit as st
 from langgraph.types import Command
-from aca.storage import analytics_store, audit_log, followup_store, queue_store
+from langchain_core.callbacks import UsageMetadataCallbackHandler
+from aca.storage import analytics_store, audit_log, config_store, followup_store, queue_store
 from aca.core import app as aca_graph
+from aca.core.auth_lockout import lockout_remaining_seconds, next_lockout_seconds
 from aca.integrations import gmail_reader, sheets
 from aca.ingestion import ingest
-from aca.ingestion.attachment_reader import extract_text_from_attachments
 
 st.set_page_config(
     page_title="ACA — Assistant commercial",
@@ -20,18 +22,45 @@ def _check_auth() -> bool:
     Gate mot de passe optionnel (`ACA_UI_PASSWORD`) : usage solo/petite équipe, pas un vrai système
     multi-utilisateurs. Sans variable définie, l'UI reste ouverte comme avant (mode développement) —
     même dégradation gracieuse que les autres options (Tavily, Gemini...).
+
+    §14 (audit sécurité 2026-07-21, US-41) : verrou progressif après plusieurs échecs
+    (`aca.core.auth_lockout`) — sans lui, un bot pouvait soumettre le mot de passe en boucle aussi
+    vite que Streamlit rejoue le script, sans aucun throttle.
     """
     required = os.getenv("ACA_UI_PASSWORD")
     if not required or st.session_state.get("authed"):
         return True
+
+    st.session_state.setdefault("auth_failed_attempts", 0)
+    st.session_state.setdefault("auth_locked_until", 0.0)
+
     st.title("Assistant commercial agentique (ACA)")
+
+    remaining = lockout_remaining_seconds(st.session_state.auth_locked_until, time.time())
+    if remaining > 0:
+        st.error(
+            f"Trop de tentatives échouées. Réessayez dans {int(remaining) + 1} s.",
+            icon=":material/lock_clock:",
+        )
+        return False
+
     pwd = st.text_input("Mot de passe", type="password")
     if st.button("Se connecter", type="primary"):
         if pwd == required:
             st.session_state.authed = True
+            st.session_state.auth_failed_attempts = 0
             st.rerun()
         else:
-            st.error("Mot de passe incorrect.", icon=":material/error:")
+            st.session_state.auth_failed_attempts += 1
+            lockout = next_lockout_seconds(st.session_state.auth_failed_attempts)
+            if lockout > 0:
+                st.session_state.auth_locked_until = time.time() + lockout
+                st.error(
+                    f"Mot de passe incorrect. Trop de tentatives : verrouillé {int(lockout)} s.",
+                    icon=":material/error:",
+                )
+            else:
+                st.error("Mot de passe incorrect.", icon=":material/error:")
     return False
 
 
@@ -48,12 +77,13 @@ st.session_state.setdefault(
     "email_body",
     "Bonjour,\n\nJe suis intéressé par votre solution. Quel est le délai normal de livraison ?\n\nCordialement.",
 )
-st.session_state.setdefault("gmail_attachment_text", "")
+st.session_state.setdefault("gmail_attachments_raw", [])
 st.session_state.setdefault("gmail_message_id", None)
 st.session_state.setdefault("gmail_thread_id", None)
 
 # Étapes du graphe LangGraph — libellés affichés en direct pendant le stream (par nom de nœud).
 NODE_STEPS = {
+    "ingestion": ("Extraction des pièces jointes", ":material/attach_file:"),
     "classifier": ("Classification de l'e-mail", ":material/label:"),
     "memory_lookup": ("Mémoire CRM : historique de l'expéditeur", ":material/history:"),
     "extractor": ("Extraction des informations clés", ":material/data_object:"),
@@ -81,7 +111,11 @@ def advance_graph(payload):
     - `pending_clarification` : la question en attente (si le graphe s'est arrêté sur un interrupt
       dynamique), sinon None (le graphe est alors en pause avant `action`, prêt pour « Valider »).
     """
-    config = {"configurable": {"thread_id": st.session_state.thread_id}}
+    # Callback de comptage de tokens (§13 item 4, "Quota Usage Tracker" des PDF "ACAM v2
+    # Blueprint") : partagé par tous les appels LLM de ce segment de graphe (fast_llm/smart_llm/
+    # creative_llm), agrégé et journalisé une fois le stream terminé.
+    usage_handler = UsageMetadataCallbackHandler()
+    config = {"configurable": {"thread_id": st.session_state.thread_id}, "callbacks": [usage_handler]}
     with st.status("Analyse en cours...", expanded=True) as status:
         seen_nodes = set()  # le superviseur repasse plusieurs fois → chaque étape affichée une seule fois
         for step in aca_graph.app.stream(payload, config=config, stream_mode="updates"):
@@ -93,6 +127,8 @@ def advance_graph(payload):
             st.write(f"{icon} {label}")
         status.update(label="Analyse terminée", state="complete")
 
+    tokens_in, tokens_out = aca_graph.sum_usage(usage_handler.usage_metadata)
+    analytics_store.record_tokens(st.session_state.thread_id, tokens_in, tokens_out)
     _sync_result(st.session_state.thread_id)
 
 
@@ -171,9 +207,10 @@ with st.sidebar:
                     st.session_state.email_body = email["body"]
                     st.session_state.gmail_message_id = email["id"]
                     st.session_state.gmail_thread_id = email["gmail_thread_id"]
-                    st.session_state.gmail_attachment_text = (
-                        extract_text_from_attachments(email["attachments"])
-                    )
+                    # Brut, non extrait ici : l'extraction se fait désormais dans le graphe
+                    # (ingestion_node, §11.6) — plus besoin d'appeler extract_text_from_attachments
+                    # avant même de savoir si cet e-mail sera soumis à l'analyse.
+                    st.session_state.gmail_attachments_raw = email["attachments"]
                 except Exception as e:
                     st.error(f"Erreur lors du chargement de l'e-mail : {e}", icon=":material/error:")
                 else:
@@ -224,12 +261,20 @@ with st.sidebar:
                 st.rerun()
 
     st.divider()
+    with st.expander("Confidentialité des données", icon=":material/policy:"):
+        st.caption(
+            "Résumé : votre e-mail et vos pièces jointes sont analysés pour qualifier votre "
+            "demande, une validation humaine a toujours lieu avant tout enregistrement CRM, et "
+            "vos données sont conservées 365 jours par défaut avant purge automatique. "
+            "Politique complète : `docs/PRIVACY_POLICY.md`."
+        )
+
     st.caption(
         "Modèles : Llama 3.1 8B (routage) · Llama 3.3 70B (extraction/rédaction) · "
         "Gemini embeddings (RAG sémantique)"
     )
 
-tab_email, tab_dashboard = st.tabs(["Nouvel e-mail", "Tableau de bord"])
+tab_email, tab_dashboard, tab_settings = st.tabs(["Nouvel e-mail", "Tableau de bord", "Réglages"])
 
 with tab_email:
     # Interface principale pour simuler/entrer la réception d'un e-mail
@@ -250,22 +295,21 @@ with tab_email:
                 accept_multiple_files=True,
                 label_visibility="collapsed",
             )
-            if st.session_state.gmail_attachment_text:
+            if st.session_state.gmail_attachments_raw:
                 st.caption(":material/attach_file: Pièce(s) jointe(s) récupérée(s) automatiquement depuis Gmail.")
 
         launch = st.button("Lancer l'analyse IA", type="primary", icon=":material/bolt:")
 
     # Bouton déclencheur de l'agent
     if launch:
-        # Extraction texte des éventuelles pièces jointes (upload manuel prioritaire sur l'import Gmail)
-        attachment_text = ""
+        # Pièces jointes brutes (upload manuel prioritaire sur l'import Gmail) — l'extraction du
+        # texte se fait désormais DANS le graphe (ingestion_node, §11.6), plus ici : ui.py/poller.py
+        # n'ont plus qu'à transmettre la liste brute, sans dupliquer l'appel à
+        # extract_text_from_attachments() chacun de leur côté.
         if uploaded_files:
-            with st.spinner("Extraction du texte des pièces jointes..."):
-                attachment_text = extract_text_from_attachments(
-                    [(f.name, f.getvalue()) for f in uploaded_files]
-                )
-        elif st.session_state.gmail_attachment_text:
-            attachment_text = st.session_state.gmail_attachment_text
+            attachments_raw = [(f.name, f.getvalue()) for f in uploaded_files]
+        else:
+            attachments_raw = st.session_state.gmail_attachments_raw
 
         # Construction de l'entrée pour le graphe
         graphe_input = {
@@ -274,7 +318,7 @@ with tab_email:
                 "subject": subject,
                 "body": body,
             },
-            "attachment_text": attachment_text,
+            "attachments_raw": attachments_raw,
             # ID Gmail (ou None) : consommé par action_node pour marquer l'e-mail traité après validation
             "gmail_message_id": st.session_state.gmail_message_id,
             # Vrai threadId Gmail (ou None) : consommé après validation par followup_store.track()
@@ -351,6 +395,21 @@ with tab_email:
 
             info = res.get("extracted_info", {})
 
+            # Alertes déterministes issues de l'audit §13 (PDF "ACAM v2 Blueprint") : clauses
+            # contractuelles à risque (risk_scan_node) et lacune de connaissance (veille_node).
+            if res.get("risk_flags"):
+                st.error(
+                    "Clause(s) contractuelle(s) à risque détectée(s) : " + ", ".join(res["risk_flags"])
+                    + " — à faire relire par l'équipe juridique/la direction avant tout engagement.",
+                    icon=":material/gpp_maybe:",
+                )
+            if res.get("knowledge_gap"):
+                st.warning(
+                    "Aucune réponse vérifiée (base de connaissances ni recherche web) pour ce besoin — "
+                    "la proposition ci-dessous reste volontairement prudente. Relisez avant validation.",
+                    icon=":material/help:",
+                )
+
             with st.container(border=True):
                 st.markdown("##### Fiche prospect")
                 col_a, col_b, col_c = st.columns(3)
@@ -373,9 +432,18 @@ with tab_email:
                     for line in res["reasoning_log"]:
                         st.markdown(f"- {line}")
 
+            # Proposition éditable (§13 item 3 — version réalisable du "Continuous Training Loop"
+            # des PDF "ACAM v2 Blueprint") : un humain peut corriger le brouillon avant validation ;
+            # la version envoyée au CRM/Gmail est celle du champ, et (original, édité) est capturé
+            # comme futur corpus d'amélioration du few-shot prompting, pas pour du fine-tuning.
+            original_draft = res.get("draft_response") or ""
             with st.container(border=True):
                 st.markdown("##### Proposition rédigée")
-                st.write(res.get("draft_response") or "Aucune proposition générée.")
+                st.caption("Modifiable avant validation — la version ci-dessous est celle envoyée au CRM/Gmail.")
+                edited_draft = st.text_area(
+                    "Proposition", value=original_draft, height=180,
+                    key=f"draft_edit_{st.session_state.thread_id}", label_visibility="collapsed",
+                )
 
             # --- PHASE 3 : VALIDATION HUMAINE (reprise du graphe interrompu) ---
             st.subheader("Validation humaine", anchor=False)
@@ -384,9 +452,17 @@ with tab_email:
             if st.button("Valider et ajouter au CRM", type="primary", icon=":material/check_circle:"):
                 with st.spinner("Reprise du graphe et écriture dans Google Sheets..."):
                     try:
+                        graph_config = {"configurable": {"thread_id": st.session_state.thread_id}}
+                        # Si l'humain a modifié le brouillon, on met à jour l'état AVANT de reprendre
+                        # le graphe : action_node lit draft_response depuis l'état, donc HubSpot/
+                        # Sheets/le brouillon Gmail doivent recevoir la version éditée, pas l'originale.
+                        if edited_draft != original_draft:
+                            aca_graph.app.update_state(graph_config, {"draft_response": edited_draft})
+                            analytics_store.record_edit(
+                                st.session_state.thread_id, original_draft, edited_draft,
+                            )
                         # Le graphe était en pause avant 'action'. On le reprend (invoke None) :
                         # action_node écrit dans Leads + marque l'e-mail Gmail comme traité.
-                        graph_config = {"configurable": {"thread_id": st.session_state.thread_id}}
                         final = aca_graph.app.invoke(None, config=graph_config)
                         action_status = final.get("action_status", "Lead ajouté au CRM.")
                         st.success(action_status, icon=":material/check_circle:")
@@ -406,7 +482,7 @@ with tab_email:
                             res.get("email_raw", {}).get("subject", ""),
                         )
                         # On efface le résultat pour passer au suivant
-                        st.session_state.gmail_attachment_text = ""
+                        st.session_state.gmail_attachments_raw = []
                         st.session_state.gmail_message_id = None
                         st.session_state.gmail_thread_id = None
                         st.session_state.pending_clarification = None
@@ -429,6 +505,8 @@ with tab_dashboard:
     daily = analytics_store.daily_volume(days)
     funnel = analytics_store.funnel_counts(days)
     resp_times = analytics_store.response_times(days)
+    edits = analytics_store.edit_rate(days)
+    tokens = analytics_store.token_stats(days)
 
     total = sum(v["count"] for v in volume)
     conversion_pct = round(100 * funnel["validés"] / total, 1) if total else 0
@@ -451,6 +529,16 @@ with tab_dashboard:
                 "Temps de réponse médian",
                 f"{median_minutes:.0f} min" if median_minutes is not None else "—",
                 border=True,
+            )
+            st.metric(
+                "Brouillons édités avant validation", f"{edits['taux_pct']}%", border=True,
+                help="§13 item 3 — % de propositions validées que l'humain a modifiées avant l'envoi.",
+            )
+            st.metric(
+                "Tokens Groq / analyse (moyenne)",
+                f"{tokens['moyenne_par_analyse']:.0f}" if tokens["analyses"] else "—",
+                border=True,
+                help="§13 item 4 — Quota Usage Tracker, purement informatif tant que Groq reste gratuit.",
             )
 
         col1, col2 = st.columns(2)
@@ -477,3 +565,79 @@ with tab_dashboard:
         if resp_times:
             with st.expander("Détail des temps de réponse (leads validés)", icon=":material/schedule:"):
                 st.dataframe(resp_times, hide_index=True, width="stretch")
+
+with tab_settings:
+    st.caption(
+        "Réglages du tenant courant (§12 item 7) — éditables ici sans toucher au fichier `.env`. "
+        "Un champ laissé vide retombe sur la valeur `.env`/par défaut existante ; rien n'est perdu "
+        "en vidant un champ, l'ancien réglage est simplement effacé de cette surcouche."
+    )
+    current = config_store.get_all_settings()
+
+    with st.form("settings_form"):
+        st.markdown("**Lien de réservation**")
+        calendly_url = st.text_input(
+            "Lien Calendly (demandes de démo)",
+            value=current.get("CALENDLY_URL", ""),
+            placeholder=os.getenv("CALENDLY_URL", "(non configuré dans .env)"),
+        )
+
+        st.markdown("**Routage SUPPORT / AUTRE (RH)**")
+        col_support, col_hr = st.columns(2)
+        with col_support:
+            support_email = st.text_input(
+                "E-mail support", value=current.get("SUPPORT_EMAIL", ""),
+                placeholder=os.getenv("SUPPORT_EMAIL", "(non configuré)"),
+            )
+            support_webhook = st.text_input(
+                "Webhook Slack support", value=current.get("SUPPORT_SLACK_WEBHOOK_URL", ""),
+                placeholder=os.getenv("SUPPORT_SLACK_WEBHOOK_URL", "(non configuré)"),
+            )
+        with col_hr:
+            hr_email = st.text_input(
+                "E-mail RH", value=current.get("HR_EMAIL", ""),
+                placeholder=os.getenv("HR_EMAIL", "(non configuré)"),
+            )
+            hr_webhook = st.text_input(
+                "Webhook Slack RH", value=current.get("HR_SLACK_WEBHOOK_URL", ""),
+                placeholder=os.getenv("HR_SLACK_WEBHOOK_URL", "(non configuré)"),
+            )
+
+        st.markdown("**Cadence des relances**")
+        col_days, col_rounds = st.columns(2)
+        with col_days:
+            relance_days = st.text_input(
+                "Jours avant relance", value=current.get("RELANCE_DAYS", ""),
+                placeholder=os.getenv("RELANCE_DAYS", "4"),
+            )
+        with col_rounds:
+            relance_rounds = st.text_input(
+                "Nombre maximum de relances", value=current.get("RELANCE_MAX_ROUNDS", ""),
+                placeholder=os.getenv("RELANCE_MAX_ROUNDS", "3"),
+            )
+
+        submitted = st.form_submit_button("Enregistrer les réglages", type="primary", icon=":material/save:")
+        if submitted:
+            for key, value in {
+                "CALENDLY_URL": calendly_url,
+                "SUPPORT_EMAIL": support_email,
+                "SUPPORT_SLACK_WEBHOOK_URL": support_webhook,
+                "HR_EMAIL": hr_email,
+                "HR_SLACK_WEBHOOK_URL": hr_webhook,
+                "RELANCE_DAYS": relance_days,
+                "RELANCE_MAX_ROUNDS": relance_rounds,
+            }.items():
+                if value.strip():
+                    config_store.set_setting(key, value.strip())
+            st.success(
+                "Réglages enregistrés — pris en compte à la prochaine analyse "
+                "(`CALENDLY_URL`/routage) ou au prochain cycle planifié (`relance.py`).",
+                icon=":material/check_circle:",
+            )
+            st.rerun()
+
+    st.caption(
+        "Ces réglages sont relus à chaque exécution de `relance.py` (processus planifié "
+        "indépendant) et à chaque analyse d'e-mail — pas besoin de redémarrer un process pour "
+        "qu'un changement prenne effet."
+    )

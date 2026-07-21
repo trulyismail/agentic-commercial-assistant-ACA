@@ -731,3 +731,113 @@ repli silencieux sur une sortie invalide, alerte déclenchée pour un SPAM/AUTRE
 faible, toujours pas d'alerte si la confiance reste haute). Suite complète repassée : 95 tests, plus
 plusieurs vérifications en direct contre la vraie API Groq et le run complet des 5 e-mails de
 démonstration.
+
+---
+
+## 2026-07-16 — Deux documents externes audités : scanner de risques, lacune de connaissance signalée, brouillon éditable, suivi des tokens
+
+### Le point de départ
+
+L'utilisateur a reçu deux PDF générés par IA ("ACAM v2 Complete Engineering Blueprint" et une
+version condensée, "Unified Master Blueprint") proposant une refonte du projet en "moteur de
+gouvernance d'appels d'offres" pour Teamwill (conseil bancaire) : score de probabilité de gagner un
+appel d'offre par similarité avec d'anciennes propositions gagnantes, disponibilité du personnel
+consultant, marge de rentabilité automatique, etc. Même démarche que pour le document externe déjà
+audité en §12 de `ACAM_roadmap.md` : auditer chaque idée contre le code réel plutôt que de l'ajouter
+telle quelle. Décision de cadrage de l'utilisateur avant l'audit : oublier le cadrage "Teamwill/appel
+d'offres" — l'objectif réel du projet est une solution générique pour plusieurs entreprises clientes,
+pas un pivot vers un seul secteur.
+
+### Ce que l'audit a trouvé
+
+**Déjà construit, souvent en mieux** : l'intake événementiel (`poller.py` existe déjà), le
+pré-traitement déterministe avant tout raisonnement IA (`extractor_node` structuré existe déjà),
+l'interface à deux vues technique/exécutive (le `st.status` en direct + l'écran de validation
+existent déjà), l'optimisation du contexte (troncature globale déjà en place dans
+`attachment_reader.py`).
+
+**Deux erreurs factuelles repérées dans les PDF**, qui auraient dégradé le projet si copiées
+telles quelles :
+1. Le "Anti-Hallucination Gate" des PDF propose un seuil de similarité cosinus fixe à **0.85** pour
+   bloquer toute génération IA en dessous. Mais la vraie mesure empirique déjà faite sur ce projet
+   (session du 2026-07-11, ci-dessus dans ce journal) montre que de vraies questions pertinentes,
+   reformulées, obtiennent un score entre **0.73 et 0.80** avec le modèle d'embedding réellement
+   utilisé (Gemini). Un seuil à 0.85 aurait donc bloqué la quasi-totalité des bonnes réponses. Les
+   seuils de similarité ne se recopient pas d'un projet à l'autre : ils dépendent du modèle
+   d'embedding utilisé et se mesurent, ils ne se devinent pas.
+2. Le schéma Supabase proposé dans les PDF utilise `vector(1536)` (la dimension des embeddings
+   OpenAI `text-embedding-ada-002`, un modèle payant). Le projet utilise Gemini
+   (`gemini-embedding-001`, gratuit, 3072 dimensions) — copier ce schéma tel quel aurait cassé la
+   contrainte "0 € du projet" sans même que ça saute aux yeux dans un premier temps.
+
+**Trois idées jugées bonnes, mais irréalisables telles quelles avec les données actuelles**, mises
+de côté dans le backlog long terme (§12/§13 de `ACAM_roadmap.md`) : le score de probabilité de
+gagner un appel d'offre (a besoin d'un historique de propositions gagnantes qui n'existe pas), la
+disponibilité du personnel et la marge de rentabilité (ont besoin de données RH/finance qui
+n'existent pas — le calcul lui-même est une simple formule, la vraie difficulté est la donnée), et
+le "SME Matchmaker" complet avec fiches de compétences et cartes interactives Teams/Slack (a besoin
+d'une base de compétences et d'un bot dédié qui n'existent pas).
+
+**Quatre idées jugées bonnes ET réalisables avec ce qui existe déjà**, implémentées cette session :
+
+### 1. Le scanner de risques contractuels (`aca/core/risk_scan.py`)
+
+Inspiré du "Trapdoor Risk Engine" des PDF : avant toute rédaction, un nouveau nœud du graphe
+(`risk_scan_node`, entre la mémoire CRM et l'extraction) cherche dans le corps de l'e-mail et les
+pièces jointes des formulations qui engagent lourdement l'entreprise — responsabilité illimitée,
+pénalités de retard, clause de non-concurrence, garantie bancaire, etc. Entièrement déterministe
+(des expressions régulières, aucun appel à un modèle de langage) : rapide, gratuit, résultat
+identique à chaque exécution sur le même texte. Volontairement placé sans `RetryPolicy` dans le
+graphe (rien d'externe à réessayer). Si une clause est détectée, l'Agent Stratège est explicitement
+prévenu dans son prompt (« ne t'engage sur aucune de ces clauses, renvoie vers l'équipe juridique »)
+et `notification_node` l'ajoute en tête de l'alerte Slack/e-mail. Vérifié en direct : un e-mail de
+test avec « responsabilité illimitée » et « pénalités de retard » a bien été détecté, et le
+brouillon final rédigé par le Stratège a correctement refusé de s'engager sur ces clauses et
+proposé une relecture juridique — exactement le comportement recherché.
+
+### 2. La lacune de connaissance signalée explicitement (`knowledge_gap`)
+
+Avant ce changement, quand ni la FAQ interne (agent Connaissance) ni une recherche web (agent
+Veille) ne trouvaient de réponse, l'Agent Stratège rédigeait quand même une proposition — sans
+aucun contexte factuel, en silence. Inspiré du "[UNANSWERED GAP]" des PDF (en version réalisable :
+pas de blocage strict de la génération, la solution existante avec relecture humaine à la
+validation reste supérieure — voir l'erreur du seuil 0.85 ci-dessus). Maintenant, `veille_node` pose
+un drapeau `knowledge_gap` explicite dans ce cas ; le Stratège est prévenu de rester honnête (ne
+jamais inventer un prix, un délai ou une fonctionnalité) et `notification_node` pousse la question
+sans réponse dans l'alerte humaine — une version économique du "SME Matchmaker" des PDF : pas de
+nouveau canal Teams/Slack dédié, juste la réutilisation du canal d'alerte déjà en place.
+
+### 3. Le brouillon éditable avant validation (capture pour un futur corpus)
+
+Le brouillon rédigé par le Stratège était jusqu'ici affiché en lecture seule dans l'interface — le
+commercial ne pouvait que l'accepter tel quel ou taper sa propre réponse depuis zéro dans Gmail
+après coup. Il est maintenant modifiable directement dans un champ de texte avant de cliquer
+« Valider », et c'est cette version corrigée qui part vers le CRM/HubSpot et le brouillon Gmail (pas
+l'originale). Chaque modification réelle (texte différent) est enregistrée en base locale — la
+paire (brouillon original, brouillon corrigé). Version réalisable du "Continuous Training Loop" des
+PDF : **ce n'est pas du réentraînement automatique** (la stack reste 100 % gratuite, Groq ne
+s'entraîne pas sur ces données), seulement une matière première brute pour, plus tard, enrichir
+manuellement les exemples "few-shot" des prompts ou le jeu d'évaluation `eval_dataset.json` avec de
+vrais cas corrigés par un commercial.
+
+### 4. Le suivi de consommation de tokens (« Quota Usage Tracker »)
+
+Chaque exécution du graphe capture maintenant, via un mécanisme standard de LangChain
+(`UsageMetadataCallbackHandler`), le nombre de tokens envoyés/reçus sur l'ensemble des appels aux
+modèles Groq (classification, extraction, supervision, rédaction). C'est la première marche —
+gratuite — d'un futur suivi de coût par client, déjà identifiée comme telle dans le §12 de
+`ACAM_roadmap.md` avant même la lecture de ces PDF : tant que Groq reste gratuit, c'est purement
+informatif ; le jour où la stack migre vers un fournisseur payant, la base de calcul existe déjà.
+
+### Comment on sait que ça marche
+
+23 nouveaux tests unitaires (détection de chaque motif de risque, insensibilité aux accents/
+majuscules, texte propre sans faux positif, drapeau `knowledge_gap` posé seulement quand Connaissance
+ET Veille échouent toutes les deux, injection correcte des deux avertissements dans le prompt du
+Stratège, présence des deux signaux dans le message d'alerte, agrégation des tokens sur plusieurs
+modèles, taux d'édition et statistiques de tokens sur des bases temporaires). Suite complète repassée
+sans régression : **125 tests, ~5 secondes**. Vérifié en direct contre la vraie API Groq (et les vrais
+Sheets/Tavily/Slack déjà configurés) avec un 6e e-mail de démonstration ajouté au run manuel
+(`python -m aca.core.app`) contenant une clause de responsabilité illimitée et une question hors
+FAQ : les deux clauses à risque ont été détectées, et le brouillon final rédigé par le Stratège a
+correctement refusé tout engagement dessus.

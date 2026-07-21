@@ -33,13 +33,16 @@ _ENV_OVERRIDES = {
     "HR_EMAIL": "",
     "HR_SLACK_WEBHOOK_URL": "",
     "HUBSPOT_ACCESS_TOKEN": "",              # → hubspot.is_enabled() False
+    "STRIPE_API_KEY": "",                    # → billing.is_enabled() False
     "CALENDLY_URL": "",                      # → pas de lien ajouté par défaut (test dédié le simule)
     "LANGCHAIN_TRACING_V2": "false",         # → pas de traces LangSmith pendant les tests
+    "ACA_ORG_ID": "default",                 # → fondation multi-tenant (§12 item 3) : tenant déterministe en test
     "ACA_CHECKPOINT_DB": os.path.join(_TMP_DIR, "checkpoints.sqlite"),
     "ACA_QUEUE_DB": os.path.join(_TMP_DIR, "queue.sqlite"),
     "ACA_ANALYTICS_DB": os.path.join(_TMP_DIR, "analytics.sqlite"),
     "ACA_AUDIT_DB": os.path.join(_TMP_DIR, "audit.sqlite"),
     "ACA_FOLLOWUP_DB": os.path.join(_TMP_DIR, "followup.sqlite"),
+    "ACA_CONFIG_DB": os.path.join(_TMP_DIR, "config.sqlite"),
 }
 os.environ.update(_ENV_OVERRIDES)
 

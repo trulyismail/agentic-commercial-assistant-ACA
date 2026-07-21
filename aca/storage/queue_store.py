@@ -13,6 +13,7 @@ import os
 import sqlite3
 from datetime import datetime, timedelta
 from .sqlite_retry import with_sqlite_retry
+from aca.core.tenant import current_org_id
 
 DB_PATH = os.getenv("ACA_QUEUE_DB", "data/queue.sqlite")
 
@@ -22,8 +23,16 @@ def _connect() -> sqlite3.Connection:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS queue ("
         "message_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, sender TEXT, subject TEXT, "
-        "status TEXT NOT NULL DEFAULT 'en_attente', created_at TEXT NOT NULL)"
+        "status TEXT NOT NULL DEFAULT 'en_attente', created_at TEXT NOT NULL, "
+        "org_id TEXT NOT NULL DEFAULT 'default')"
     )
+    # Migration idempotente (fondation multi-tenant, §12 item 3 / §14.3) : les bases créées avant
+    # `org_id` reçoivent la colonne avec la valeur par défaut "default" pour tout l'historique
+    # existant — comportement inchangé pour le tenant unique déjà en place.
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(queue)").fetchall()}
+    if "org_id" not in existing_cols:
+        conn.execute("ALTER TABLE queue ADD COLUMN org_id TEXT NOT NULL DEFAULT 'default'")
+    conn.commit()
     return conn
 
 
@@ -42,18 +51,21 @@ def is_known(message_id: str) -> bool:
 
 
 @with_sqlite_retry
-def enqueue(message_id: str, thread_id: str, sender: str, subject: str) -> None:
+def enqueue(message_id: str, thread_id: str, sender: str, subject: str, org_id: str = None) -> None:
     """
     Marque un e-mail comme « en_cours » — appelé AVANT `app.invoke()`, pas après, pour qu'un crash
     du poller pendant le traitement n'entraîne pas un retraitement en double au prochain cycle
     (`is_known()` renvoie déjà True dès cet instant). `mark_ready()` bascule vers `en_attente` une
     fois le graphe arrivé à la pause sans erreur ; `reset_stale()` récupère les entrées bloquées.
+    `org_id` (défaut : tenant courant, cf. aca.core.tenant) tague la ligne pour la fondation
+    multi-tenant — un seul process/tenant aujourd'hui, mais `list_pending()` en tient déjà compte.
     """
     with _connect() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO queue (message_id, thread_id, sender, subject, status, created_at) "
-            "VALUES (?, ?, ?, ?, 'en_cours', ?)",
-            (message_id, thread_id, sender, subject, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            "INSERT OR IGNORE INTO queue (message_id, thread_id, sender, subject, status, created_at, org_id) "
+            "VALUES (?, ?, ?, ?, 'en_cours', ?, ?)",
+            (message_id, thread_id, sender, subject, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+             org_id or current_org_id()),
         )
         conn.commit()
 
@@ -84,12 +96,13 @@ def reset_stale(older_than_minutes: int = 15) -> int:
 
 
 @with_sqlite_retry
-def list_pending() -> list:
-    """Analyses en attente de validation humaine, les plus anciennes d'abord."""
+def list_pending(org_id: str = None) -> list:
+    """Analyses en attente de validation humaine du tenant courant, les plus anciennes d'abord."""
     with _connect() as conn:
         rows = conn.execute(
             "SELECT thread_id, sender, subject, created_at FROM queue "
-            "WHERE status = 'en_attente' ORDER BY created_at"
+            "WHERE status = 'en_attente' AND org_id = ? ORDER BY created_at",
+            (org_id or current_org_id(),),
         ).fetchall()
     return [{"thread_id": r[0], "sender": r[1], "subject": r[2], "created_at": r[3]} for r in rows]
 

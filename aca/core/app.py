@@ -12,6 +12,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 from aca.integrations import sheets, notify, hubspot
 from aca.agents import enrichment, veille
+from aca.core import risk_scan
+from aca.ingestion.attachment_reader import extract_text_from_attachments
 
 # Charger toutes les clés API du fichier .env
 load_dotenv()
@@ -35,16 +37,33 @@ def creative_llm():
     return ChatGroq(model="llama-3.3-70b-versatile", temperature=0.3)
 
 
+def sum_usage(usage_metadata: dict) -> tuple[int, int]:
+    """
+    Additionne `input_tokens`/`output_tokens` de tous les modèles présents dans
+    `UsageMetadataCallbackHandler.usage_metadata` (langchain_core) : une exécution du graphe
+    appelle fast_llm/smart_llm/creative_llm, donc plusieurs "model_name" différents peuvent
+    apparaître dans le même dict. Utilisé par ui.py/poller.py pour journaliser la consommation de
+    tokens d'une exécution (cf. `analytics_store.record_tokens` — §13 item 4, "Quota Usage Tracker"
+    des PDF "ACAM v2 Blueprint"). Fonction pure, testable sans callback réel.
+    """
+    total_in = sum(usage.get("input_tokens", 0) or 0 for usage in usage_metadata.values())
+    total_out = sum(usage.get("output_tokens", 0) or 0 for usage in usage_metadata.values())
+    return total_in, total_out
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. État partagé du graphe (mémoire de travail transmise de nœud en nœud)
 # ─────────────────────────────────────────────────────────────────────────────
 class AgentState(TypedDict):
     email_raw: dict            # {sender, subject, body}
-    attachment_text: str       # Texte extrait des pièces jointes (PDF/Word/Excel, cf. attachment_reader.py)
+    attachments_raw: list       # [(nom_fichier, contenu_bytes), ...] — brut, avant extraction (cf. ingestion_node)
+    attachment_text: str       # Texte extrait des pièces jointes (PDF/Word/Excel, rempli par ingestion_node)
     classification: str        # DEMANDE_DEMO | DEVIS | SUPPORT | SPAM | AUTRE
     extracted_info: dict       # Infos structurées extraites
     faq_context: str           # Contexte RAG issu de la Knowledge_Base (Google Sheets)
+    knowledge_gap: bool        # True si connaissance ET veille n'ont rien trouvé (cf. veille_node)
     company_profile: str       # Profil entreprise (agent Enrichissement, Tavily + cache)
+    risk_flags: list[str]      # Clauses contractuelles à risque détectées (cf. risk_scan_node)
     draft_response: str        # Proposition rédigée pour le commercial (agent Stratège)
     reflection_feedback: str   # Critique du nœud Reflect si réécriture demandée ("" si aucune / déjà traitée)
     classification_confidence: float  # Confiance (0-1) du classifieur dans sa catégorie (cf. classifier_node)
@@ -79,7 +98,19 @@ CLASSIFICATION_CONFIDENCE_THRESHOLD = 0.6
 # Lien de réservation réel (Calendly, gratuit) pour les demandes de démo (P1 §11.4 item 12).
 # Ajouté déterministiquement au brouillon par stratege_node (jamais généré par le LLM, pour éviter
 # qu'il déforme l'URL) — absent = repli gracieux, le brouillon reste comme avant (promesse vague).
+# Conservé comme constante de module (repli .env / valeur par défaut) pour compatibilité
+# descendante avec les tests existants qui la monkeypatchent directement ; `_calendly_url()`
+# ci-dessous la complète avec la surcouche éditable du panneau de réglages (§12 item 7).
 CALENDLY_URL = os.getenv("CALENDLY_URL", "")
+
+
+def _calendly_url() -> str:
+    """Lien Calendly effectif : réglage du panneau (config_store, prioritaire) sinon `.env`."""
+    from aca.storage import config_store
+
+    override = config_store.get_setting("CALENDLY_URL")
+    return override if override else CALENDLY_URL
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Routage SUPPORT/AUTRE vers l'équipe compétente (P0 §11.4 item 5)
@@ -90,18 +121,31 @@ CALENDLY_URL = os.getenv("CALENDLY_URL", "")
 # principe que TAVILY_API_KEY/SLACK_WEBHOOK_URL absents) : `routing_node` n'échoue jamais si rien
 # n'est configuré, il journalise juste qu'aucun canal n'était disponible.
 ROUTING_CATEGORIES = {"SUPPORT", "AUTRE"}
-ROUTING_DESTINATIONS = {
-    "SUPPORT": {
-        "label": "l'équipe support",
-        "email": os.getenv("SUPPORT_EMAIL", ""),
-        "webhook": os.getenv("SUPPORT_SLACK_WEBHOOK_URL", ""),
-    },
-    "AUTRE": {
-        "label": "les RH",
-        "email": os.getenv("HR_EMAIL", ""),
-        "webhook": os.getenv("HR_SLACK_WEBHOOK_URL", ""),
-    },
-}
+
+
+def _routing_destinations() -> dict:
+    """
+    Destinations de routage effectives : réglages du panneau (config_store, prioritaires, §12
+    item 7) sinon `.env` — lu dynamiquement (pas figé à l'import, même principe que `_calendly_url`
+    ci-dessus) pour que l'onglet « Réglages » de l'UI prenne effet sans redémarrer le process.
+    """
+    from aca.storage import config_store
+
+    def _get(key: str) -> str:
+        return config_store.get_setting(key) or os.getenv(key, "")
+
+    return {
+        "SUPPORT": {
+            "label": "l'équipe support",
+            "email": _get("SUPPORT_EMAIL"),
+            "webhook": _get("SUPPORT_SLACK_WEBHOOK_URL"),
+        },
+        "AUTRE": {
+            "label": "les RH",
+            "email": _get("HR_EMAIL"),
+            "webhook": _get("HR_SLACK_WEBHOOK_URL"),
+        },
+    }
 
 
 def _retry_on(exc: Exception) -> bool:
@@ -123,6 +167,30 @@ def _retry_on(exc: Exception) -> bool:
 RETRY_POLICY = RetryPolicy(retry_on=_retry_on, max_attempts=3, initial_interval=1.0)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Nœud 0 — Ingestion (extraction des pièces jointes brutes). Aucun appel LLM.
+# ─────────────────────────────────────────────────────────────────────────────
+def ingestion_node(state: AgentState) -> dict:
+    """
+    Extrait le texte des pièces jointes brutes (`attachments_raw`, PDF/Word/Excel — cf.
+    attachment_reader.py) en tout début de graphe, avant même la classification. §11.6 (dette
+    technique restante) : cette extraction vivait jusqu'ici hors du graphe, dupliquée dans
+    `ui.py`/`poller.py`/`gmail_reader.py`, qui devaient chacun l'appeler avant `app.invoke()` et
+    passer le résultat déjà calculé (`attachment_text`) dans l'état initial. Un vrai nœud de graphe
+    centralise cette logique une seule fois, et hérite gratuitement du `RETRY_POLICY` du graphe si
+    l'extraction échoue transitoirement (verrou fichier, etc.) — les appelants n'ont plus qu'à
+    fournir la liste brute `[(nom_fichier, contenu), ...]`.
+    """
+    attachments = state.get("attachments_raw") or []
+    if not attachments:
+        return {"attachment_text": ""}
+
+    print(f"\n📎 [Ingestion] Extraction de {len(attachments)} pièce(s) jointe(s)...")
+    text = extract_text_from_attachments(attachments)
+    print(f"   → {len(text)} caractère(s) extrait(s)." if text else "   → Aucun texte exploitable.")
+    return {"attachment_text": text}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 2. Nœud 1 — Classification (Llama 3.1 8B → vitesse maximale)
 # ─────────────────────────────────────────────────────────────────────────────
 class ClassificationResult(BaseModel):
@@ -137,7 +205,13 @@ class ClassificationResult(BaseModel):
 
 
 def classifier_node(state: AgentState) -> dict:
-    """Classe l'e-mail dans l'une des 5 catégories avec un score de confiance. Llama 8B = rapide + gratuit."""
+    """
+    Classe l'e-mail dans l'une des 5 catégories avec un score de confiance. Llama 8B = rapide +
+    gratuit. Prompt few-shot (3 exemples de cas limites — SUPPORT vs DEVIS, AUTRE vs partenariat,
+    SPAM déguisé en urgence) : le classifieur atteignait déjà 100 % sur `eval_dataset.json` sans ces
+    exemples (grâce à la sortie structurée) ; ils ajoutent une marge de robustesse sur des cas
+    limites hors de ce jeu d'évaluation plutôt que de corriger un problème mesuré.
+    """
     print("\n⚡ [Groq/Llama-8B] Classification de l'e-mail...")
 
     email = state["email_raw"]
@@ -157,7 +231,15 @@ def classifier_node(state: AgentState) -> dict:
             "- SUPPORT        → client existant avec un problème technique\n"
             "- AUTRE          → e-mail légitime mais hors périmètre commercial "
             "(candidature/CV, partenariat, question générale)\n"
-            "- SPAM           → message non sollicité, publicitaire ou frauduleux"
+            "- SPAM           → message non sollicité, publicitaire ou frauduleux\n\n"
+            "Exemples de cas limites :\n"
+            "- « Notre export vers le nouveau format plante, et au passage combien coûterait la "
+            "version Pro ? » → SUPPORT (le problème technique à résoudre prime sur la question de "
+            "tarif secondaire).\n"
+            "- « Sympa votre outil, vous cherchez des partenaires revendeurs ? » → AUTRE "
+            "(partenariat, pas un achat pour son propre usage).\n"
+            "- « Cliquez ici pour débloquer votre offre exclusive avant expiration ! » → SPAM "
+            "(urgence artificielle + lien générique, pas une vraie demande adressée à l'entreprise)."
         )),
         HumanMessage(content=email_text),
     ]
@@ -206,6 +288,29 @@ def memory_lookup_node(state: AgentState) -> dict:
     )
     print(f"   → Client récurrent : {len(previous)} entrée(s).")
     return {"sender_history": history, "is_duplicate": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scanner de risques contractuels — déterministe (RegEx), aucun appel LLM/API
+# ─────────────────────────────────────────────────────────────────────────────
+def risk_scan_node(state: AgentState) -> dict:
+    """
+    Scanne le corps de l'e-mail + les pièces jointes à la recherche de clauses contractuelles à
+    risque (cf. aca/core/risk_scan.py — issu de l'audit des PDF "ACAM v2 Blueprint", §13). Purement
+    déterministe : PAS de `retry_policy` sur ce nœud dans le graphe (aucun appel externe à réessayer,
+    contrairement aux autres nœuds). Placé tôt (juste après la mémoire CRM, avant l'extraction) pour
+    que `risk_flags` soit disponible à `stratege_node` (prudence dans la rédaction) et
+    `notification_node` (alerte humaine) sans dépendre de l'ordre de passage des workers.
+    """
+    email = state["email_raw"]
+    text = f"{email.get('subject', '')}\n{email.get('body', '')}\n{state.get('attachment_text', '')}"
+    flags = risk_scan.scan_risks(text)
+    if flags:
+        print(f"\n⚠️  [Risques] Clause(s) détectée(s) : {', '.join(flags)}")
+        reason = f"Risques : {len(flags)} clause(s) à risque détectée(s) — {', '.join(flags)}."
+    else:
+        reason = "Risques : aucune clause à risque détectée."
+    return {"risk_flags": flags, "reasoning_log": [reason]}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -292,9 +397,19 @@ def veille_node(state: AgentState) -> dict:
     query = _build_rag_query(state)
     answer = veille.search_faq_online(query)
     print(f"   → {'FAQ enrichie, réponse injectée.' if answer else 'Aucune réponse en ligne.'}")
+
+    # Ni la FAQ (connaissance) ni le web (veille) n'ont de réponse : le Stratège va devoir rédiger
+    # sans aucun contexte factuel. `knowledge_gap` le signale explicitement (au lieu de laisser
+    # `faq_context` vide en silence, cf. audit §13 — inspiré du "[UNANSWERED GAP]" des PDF) pour que
+    # `stratege_node` reste honnête sur ce qu'il ne sait pas et que `notification_node` pousse la
+    # question sans réponse vers un humain (repli léger du "SME Matchmaker" des PDF : pas de webhook
+    # dédié, on réutilise le canal Slack/e-mail déjà existant).
+    gap = not answer
     reason = ("Veille : FAQ enrichie via recherche web." if answer
-              else "Veille : recherche web infructueuse (clé absente ou pas de résultat).")
-    return {"faq_context": answer, "completed_agents": ["veille"], "reasoning_log": [reason]}
+              else "Veille : recherche web infructueuse (clé absente ou pas de résultat) — "
+                   "lacune de connaissance signalée.")
+    return {"faq_context": answer, "knowledge_gap": gap, "completed_agents": ["veille"],
+            "reasoning_log": [reason]}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -318,7 +433,12 @@ class ExtractedInfo(BaseModel):
 
 
 def extractor_node(state: AgentState) -> dict:
-    """Extrait les informations clés au format structuré (Pydantic). Llama 70B = précision."""
+    """
+    Extrait les informations clés au format structuré (Pydantic). Llama 70B = précision. Prompt
+    few-shot : calibrage explicite des trois niveaux d'urgence (le mot « urgent » dans l'e-mail
+    n'est pas un signal fiable à lui seul) et du format attendu de `besoin_principal` (une phrase
+    factuelle, pas une paraphrase du ton de l'e-mail).
+    """
     print("\n🧠 [Groq/Llama-70B] Extraction des informations clés...")
 
     email = state["email_raw"]
@@ -335,7 +455,20 @@ def extractor_node(state: AgentState) -> dict:
     messages = [
         SystemMessage(content=(
             "Tu es un assistant d'extraction de données. Lis l'e-mail et extrais les informations "
-            "demandées. Laisse un champ vide si l'information est absente du message."
+            "demandées. Laisse un champ vide si l'information est absente du message.\n\n"
+            "Calibrage de l'urgence — ignore le mot « urgent » lui-même, juge sur les FAITS "
+            "concrets décrits (un incident réel en cours ? une échéance datée ? juste une "
+            "question ?) :\n"
+            "- haute   → un incident en cours, une échéance sous 48h, ou une perte d'argent/de "
+            "temps déjà en train de se produire. Ex. : « Notre production est bloquée » → haute.\n"
+            "- moyenne → un besoin réel avec un délai souple (« la semaine prochaine », « bientôt »).\n"
+            "- basse   → une question générale, sans incident ni délai, MÊME si l'expéditeur écrit "
+            "« urgent » dans l'objet. Ex. : « Question urgente : êtes-vous compatible avec "
+            "Salesforce ? » → basse (c'est une simple question produit, rien de réellement urgent "
+            "ne s'est produit).\n"
+            "`besoin_principal` : une phrase courte et factuelle (le QUOI, pas le contexte "
+            "autour) — ex. « Devis pour 50 licences Enterprise », pas « Le client aimerait "
+            "beaucoup, s'il vous plaît, en savoir plus sur nos tarifs pour ses 50 employés »."
         )),
         HumanMessage(content=email_text),
     ]
@@ -401,6 +534,8 @@ def stratege_node(state: AgentState) -> dict:
     history = state.get("sender_history", "")
     profile = state.get("company_profile", "")
     feedback = state.get("reflection_feedback", "")
+    risk_flags = state.get("risk_flags", [])
+    knowledge_gap = state.get("knowledge_gap", False)
 
     messages = [
         SystemMessage(content=(
@@ -415,6 +550,20 @@ def stratege_node(state: AgentState) -> dict:
             f"--- BASE DE CONNAISSANCES (FAQ) ---\n{faq_text if faq_text else 'Aucune FAQ pertinente trouvée.'}\n"
             f"--- HISTORIQUE CLIENT ---\n{history if history else 'Nouveau contact.'}\n"
             + (f"--- CORRECTION DEMANDÉE PAR LE RELECTEUR (nœud Reflect) ---\n{feedback}\n" if feedback else "")
+            + (
+                "--- CLAUSES À RISQUE DÉTECTÉES ---\n"
+                f"{', '.join(risk_flags)}\nNe t'engage sur AUCUNE de ces clauses dans ta réponse — "
+                "mentionne qu'elles nécessitent une relecture par l'équipe juridique/la direction "
+                "avant tout engagement écrit.\n" if risk_flags else ""
+            )
+            + (
+                "--- LACUNE DE CONNAISSANCE ---\n"
+                "Aucune information vérifiée (FAQ interne ni recherche web) ne répond à ce besoin. "
+                "Réponds honnêtement : ne réponds JAMAIS à la question précise si l'information "
+                "n'est pas confirmée. Reconnais la demande et indique qu'un point sera fait par "
+                "notre équipe pour la préciser, sans inventer de prix, délai ou fonctionnalité.\n"
+                if knowledge_gap else ""
+            )
         )),
         HumanMessage(content=(
             f"Type de demande : {state['classification']}\n"
@@ -430,8 +579,9 @@ def stratege_node(state: AgentState) -> dict:
 
     # Créneaux réels pour une démo (P1 §11.4 item 12) : lien ajouté par le code, pas par le LLM,
     # pour ne jamais risquer une URL déformée.
-    if state["classification"] == "DEMANDE_DEMO" and CALENDLY_URL:
-        draft += f"\n\nVous pouvez réserver directement un créneau qui vous convient ici : {CALENDLY_URL}"
+    calendly = _calendly_url()
+    if state["classification"] == "DEMANDE_DEMO" and calendly:
+        draft += f"\n\nVous pouvez réserver directement un créneau qui vous convient ici : {calendly}"
 
     print(f"   → Proposition rédigée ({len(draft)} caractères)")
     return {"draft_response": draft, "completed_agents": ["stratege"],
@@ -652,6 +802,15 @@ def notification_node(state: AgentState) -> dict:
             f"ACA — nouveau lead à valider : {state['classification']} de {email.get('sender', '?')} "
             f"({info.get('entreprise') or 'entreprise inconnue'}). Urgence : {info.get('urgence') or '?'}."
         )
+    # Risques contractuels (cf. risk_scan_node) et lacune de connaissance (cf. veille_node) : deux
+    # signaux issus de l'audit §13 des PDF "ACAM v2 Blueprint" qui méritent d'être visibles dans
+    # l'alerte elle-même, pas seulement dans le reasoning_log affiché en fin de chaîne dans l'UI.
+    risk_flags = state.get("risk_flags", [])
+    if risk_flags:
+        message += f"\n⚠️ Risques contractuels détectés : {', '.join(risk_flags)}."
+    if state.get("knowledge_gap"):
+        besoin = info.get("besoin_principal") or "(besoin non précisé)"
+        message += f"\n❔ Question sans réponse en base de connaissances : {besoin}."
     sent = notify.send(message)
     print(f"   → {'Notification envoyée.' if sent else 'Aucun canal configuré (repli gracieux).'}")
     reason = "Notification envoyée." if sent else "Notification : aucun canal configuré."
@@ -677,7 +836,7 @@ def routing_node(state: AgentState) -> dict:
         return {}
 
     print(f"\n📮 [Routage] {classification} → équipe compétente...")
-    dest = ROUTING_DESTINATIONS.get(classification, {})
+    dest = _routing_destinations().get(classification, {})
     email = state["email_raw"]
     reasons = []
 
@@ -716,8 +875,8 @@ def routing_node(state: AgentState) -> dict:
 # Construction du graphe LangGraph (superviseur + équipe, mémoire hybride)
 # ─────────────────────────────────────────────────────────────────────────────
 #
-#   START → [classifier] → [memory_lookup] → [extractor] → [SUPERVISEUR] ⇄ workers
-#              (8B)          (CRM read)         (70B)         (8B, routage)
+#   START → [ingestion] → [classifier] → [memory_lookup] → [risk_scan] → [extractor] → [SUPERVISEUR] ⇄ workers
+#            (pièces jointes)   (8B)          (CRM read)      (RegEx, déterministe)  (70B)   (8B, routage)
 #                                                              ├─ enrichissement (Tavily + cache)
 #                                                              ├─ connaissance   (RAG sémantique, requête décontextualisée)
 #                                                              ├─ veille         (Tavily si FAQ vide → enrichit la FAQ)
@@ -733,8 +892,10 @@ def routing_node(state: AgentState) -> dict:
 # - Mémoire long terme  : Google Sheets (Leads = CRM, FAQ = Knowledge_Base, Enrichissement_Cache).
 #
 workflow = StateGraph(AgentState)
+workflow.add_node("ingestion", ingestion_node, retry_policy=RETRY_POLICY)
 workflow.add_node("classifier", classifier_node, retry_policy=RETRY_POLICY)
 workflow.add_node("memory_lookup", memory_lookup_node, retry_policy=RETRY_POLICY)
+workflow.add_node("risk_scan", risk_scan_node)  # déterministe (RegEx) : pas d'appel externe à réessayer
 workflow.add_node("extractor", extractor_node, retry_policy=RETRY_POLICY)
 workflow.add_node("clarification", clarification_node)  # aucun appel externe (interrupt uniquement)
 workflow.add_node("supervisor", supervisor_node, retry_policy=RETRY_POLICY)
@@ -747,9 +908,11 @@ workflow.add_node("routing", routing_node, retry_policy=RETRY_POLICY)
 workflow.add_node("notification", notification_node, retry_policy=RETRY_POLICY)
 workflow.add_node("action", action_node, retry_policy=RETRY_POLICY)
 
-workflow.add_edge(START, "classifier")
+workflow.add_edge(START, "ingestion")
+workflow.add_edge("ingestion", "classifier")
 workflow.add_edge("classifier", "memory_lookup")
-workflow.add_edge("memory_lookup", "extractor")
+workflow.add_edge("memory_lookup", "risk_scan")
+workflow.add_edge("risk_scan", "extractor")
 workflow.add_edge("extractor", "clarification")
 workflow.add_edge("clarification", "supervisor")
 
@@ -842,6 +1005,18 @@ if __name__ == "__main__":
             "subject": "Problème de connexion à la plateforme",
             "body": "Bonjour, je n'arrive plus à me connecter depuis ce matin, erreur 500. Pouvez-vous m'aider ?",
         },
+        {
+            # Démontre risk_scan_node (clause à risque) + le repli honnête sur knowledge_gap
+            # (question hors de la FAQ de démo) — cf. §13 (audit des PDF "ACAM v2 Blueprint").
+            "sender": "achats@grand-compte-banque.fr",
+            "subject": "Cahier des charges — intégration critique",
+            "body": (
+                "Bonjour, notre cahier des charges impose une responsabilité illimitée du "
+                "prestataire en cas de manquement, ainsi que des pénalités de retard. Par "
+                "ailleurs, votre solution est-elle compatible avec notre mainframe COBOL "
+                "propriétaire des années 1980 ?"
+            ),
+        },
     ]
 
     for i, faux_email in enumerate(exemples, 1):
@@ -866,6 +1041,10 @@ if __name__ == "__main__":
             print(f"  🔎 Profil     : {output['company_profile'][:120]}...")
         if output.get("sender_history"):
             print(f"  🗃️  Historique : {output['sender_history']}")
+        if output.get("risk_flags"):
+            print(f"  ⚠️  Risques    : {', '.join(output['risk_flags'])}")
+        if output.get("knowledge_gap"):
+            print("  ❔ Lacune de connaissance : aucune réponse vérifiée trouvée pour ce besoin.")
         if output.get("reasoning_log"):
             print("  🧠 Raisonnement :")
             for line in output["reasoning_log"]:
