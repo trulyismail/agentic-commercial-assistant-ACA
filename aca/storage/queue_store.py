@@ -116,6 +116,18 @@ def mark_validated(thread_id: str) -> None:
 
 
 @with_sqlite_retry
+def mark_rejected(thread_id: str) -> None:
+    """
+    Retire une entrée de la file après rejet humain — le dashboard (aca/api.py) l'utilise pour un
+    lead dont l'analyse ne doit PAS être écrite au CRM (contrairement à `mark_validated`, aucune
+    action n'est déclenchée côté graphe : `action_node` n'est jamais invoqué pour un thread rejeté).
+    """
+    with _connect() as conn:
+        conn.execute("UPDATE queue SET status = 'rejeté' WHERE thread_id = ?", (thread_id,))
+        conn.commit()
+
+
+@with_sqlite_retry
 def list_validated_older_than(days: int) -> list:
     """Thread IDs validés depuis plus de `days` jours (RGPD — cf. retention.py)."""
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")

@@ -1,0 +1,110 @@
+@import "tailwindcss";
+
+/*
+  ACA Dashboard — design tokens (§12 item 8).
+  "Night ops cockpit for a small AI sales team" — not a generic analytics dashboard: the palette
+  and signature graph exist to make the multi-agent pipeline (superviseur + 4 workers) legible and
+  literally watchable, since that IS the product's real differentiator.
+*/
+:root {
+  --ink-950: #0a0e17;
+  --ink-900: #0d1220;
+  --ink-850: #10151f;
+  --ink-800: #141b28;
+  --ink-750: #171e2c;
+  --line: #232c3d;
+  --line-soft: #1a2130;
+  --paper: #edeff3;
+  --paper-dim: #c7cddb;
+  --muted: #7c879c;
+  --muted-dim: #576076;
+
+  --amber-400: #f5a524;
+  --amber-300: #ffc561;
+  --teal-400: #2fd9c4;
+  --teal-300: #7ce9db;
+  --rose-400: #fb5f6b;
+  --rose-300: #ff9aa2;
+  --violet-400: #8b7cf6;
+
+  --font-display: var(--font-space-grotesk);
+  --font-body: var(--font-inter);
+  --font-mono: var(--font-plex-mono);
+}
+
+@theme inline {
+  --color-ink-950: var(--ink-950);
+  --color-ink-900: var(--ink-900);
+  --color-ink-850: var(--ink-850);
+  --color-ink-800: var(--ink-800);
+  --color-ink-750: var(--ink-750);
+  --color-line: var(--line);
+  --color-line-soft: var(--line-soft);
+  --color-paper: var(--paper);
+  --color-paper-dim: var(--paper-dim);
+  --color-muted: var(--muted);
+  --color-muted-dim: var(--muted-dim);
+  --color-amber-400: var(--amber-400);
+  --color-amber-300: var(--amber-300);
+  --color-teal-400: var(--teal-400);
+  --color-teal-300: var(--teal-300);
+  --color-rose-400: var(--rose-400);
+  --color-rose-300: var(--rose-300);
+  --color-violet-400: var(--violet-400);
+  --font-sans: var(--font-body);
+  --font-display: var(--font-space-grotesk);
+  --font-mono: var(--font-plex-mono);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--ink-950);
+  color: var(--paper);
+  font-family: var(--font-body), system-ui, sans-serif;
+  background-image:
+    radial-gradient(ellipse 60% 40% at 15% -10%, rgba(47, 217, 196, 0.06), transparent),
+    radial-gradient(ellipse 50% 35% at 100% 0%, rgba(245, 165, 36, 0.05), transparent);
+  background-attachment: fixed;
+}
+
+::selection {
+  background: var(--teal-400);
+  color: var(--ink-950);
+}
+
+/* Visible keyboard focus everywhere — quality floor, not optional. */
+:focus-visible {
+  outline: 2px solid var(--teal-400);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 3px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}

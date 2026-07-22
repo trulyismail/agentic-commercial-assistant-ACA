@@ -841,3 +841,172 @@ Sheets/Tavily/Slack déjà configurés) avec un 6e e-mail de démonstration ajou
 (`python -m aca.core.app`) contenant une clause de responsabilité illimitée et une question hors
 FAQ : les deux clauses à risque ont été détectées, et le brouillon final rédigé par le Stratège a
 correctement refusé tout engagement dessus.
+
+---
+
+## 2026-07-21 (suite) — Onglet Historique + graphe visuel, un bug Gmail silencieux trouvé, et la RLS Supabase vérifiée en direct (et corrigée)
+
+### Le point de départ
+
+Après la clôture du §14 (audit sécurité) et du §12 (fondation multi-tenant + scaffold
+commercialisation) plus tôt le même jour, trois choses restaient : deux items du backlog §12 qui
+sont de purs ajouts de code (onglet « Historique », graphe LangGraph visuel), et la vérification en
+direct des points marqués « codé mais jamais exercé en réel » — en particulier la policy RLS sur
+Supabase, jamais testée contre un vrai réseau faute d'accès dans les sessions précédentes.
+
+### 1. Onglet « Historique » et graphe visuel (§12 items 2 et 5)
+
+`audit_log.list_recent()` existait déjà mais n'était branché nulle part dans `ui.py`. Nouvel onglet
+« Historique » : tableau des validations passées avec une recherche texte libre (expéditeur,
+classification, validé par, ID). Le graphe visuel réutilise `st.graphviz_chart` (rendu côté
+navigateur via viz.js, aucune dépendance système Graphviz nécessaire) pour dessiner la topologie
+réelle du `StateGraph` : nœud actif en orange pendant une analyse en direct (mis à jour à chaque
+étape du `stream()`), nœuds déjà passés en vert ; une version statique du même graphe apparaît aussi
+dans les expanders « Raisonnement »/« Détail du routage » pour les analyses déjà terminées ou
+chargées depuis la file d'attente du poller. L'item 8 (dashboard client Next.js dédié) reste
+volontairement non construit, comme déjà décidé le même jour — décision produit, pas un manque de
+code.
+
+### 2. Un bug Gmail silencieux trouvé en préparant la vérification du routage
+
+En préparant le test en direct du brouillon de transfert Gmail de `routing_node` (SUPPORT/AUTRE),
+lecture du code a révélé `import gmail_reader` (import nu) au lieu de
+`from aca.integrations import gmail_reader`, à deux endroits d'`app.py` (`action_node` et
+`routing_node`). Cet import échoue toujours en réalité (`ModuleNotFoundError`, il n'existe aucun
+`gmail_reader.py` à la racine du projet) — mais l'échec était systématiquement absorbé par un
+`try/except` déjà en place, donc le graphe ne plantait jamais : il sautait juste silencieusement la
+création du brouillon de réponse après « Valider » **et** le brouillon de transfert SUPPORT/AUTRE,
+sans aucun symptôme visible. Aucun test ne couvrait ce chemin (les tests ne fixent jamais
+`gmail_message_id`, donc la branche Gmail de ces deux nœuds n'est jamais exercée). Corrigé aux deux
+endroits ; suite de tests repassée sans régression.
+
+### 3. La vérification en direct du routage Gmail, débloquée et confirmée
+
+Premier essai bloqué : `google.auth.exceptions.RefreshError: Token has been expired or revoked`. Le
+token OAuth mis en cache (`credentials/gmail_token.json`) avait expiré et nécessitait un nouveau
+consentement navigateur interactif — impossible à faire depuis une session non interactive. Après
+que l'utilisateur a supprimé l'ancien token et relancé `python -m aca.integrations.gmail_reader`
+(depuis le venv du projet, `.\venv\Scripts\python.exe`) pour renouveler le consentement, le test
+en direct de `routing_node` contre un vrai message Gmail a été rejoué avec succès pour les deux
+catégories : **SUPPORT** → alerte Slack envoyée + brouillon de transfert créé vers
+`hajriismail02@gmail.com` ; **AUTRE** → alerte Slack envoyée + brouillon de transfert créé vers
+`worldwc26@gmail.com` — les deux brouillons visibles dans Gmail, jamais auto-envoyés. Confirme que
+le bug `import gmail_reader` corrigé au point 2 ci-dessus fonctionne réellement de bout en bout, pas
+seulement en théorie.
+
+### 4. La RLS Supabase, vérifiée en direct pour la première fois — et trouvée inopérante
+
+Contrairement au reste du § 14.3 (marqué « non vérifié en direct, pas d'accès réseau »), le réseau
+était disponible cette session. Vérification directe au niveau SQL (en contournant volontairement le
+`WHERE org_id = ...` applicatif, qui aurait masqué une policy cassée) : un tenant bidon et même une
+connexion sans variable de session positionnée voyaient les **74** lignes réelles de
+`faq_embeddings` — alors qu'ils auraient dû en voir zéro. Cause confirmée par requête directe sur
+`pg_roles` : le rôle `postgres` utilisé par `DATABASE_URL` a `rolbypassrls = true` (comportement par
+défaut du rôle de connexion standard chez Supabase). Un rôle avec cet attribut ignore **toutes** les
+policies RLS, quoi que fasse `FORCE ROW LEVEL SECURITY` — cette clause n'a d'effet que sur le
+propriétaire de la table quand celui-ci n'a ni `SUPERUSER` ni `BYPASSRLS`. Le code SQL de la policy
+elle-même était correct ; c'est le rôle de connexion qui rendait toute la protection cosmétique.
+
+**Correction, avec l'accord explicite de l'utilisateur** ("Create a restricted DB role now") :
+
+1. Création d'un rôle Postgres restreint `aca_app` (ni superuser, ni `BYPASSRLS`), avec les
+   privilèges nécessaires sur les tables/séquences existantes de `public`.
+2. Vérifié en direct : sous ce rôle, le tenant bidon et la session non positionnée voient bien
+   **0** ligne, le tenant réel voit ses **74** lignes — la policy s'applique enfin réellement.
+3. **Deuxième bug trouvé en testant le premier fix** : les tables de checkpoint LangGraph
+   (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`) avaient elles
+   aussi la RLS activée automatiquement par Supabase (comportement par défaut sur toute nouvelle
+   table du schéma `public`, pour éviter une exposition accidentelle via PostgREST) — mais sans
+   aucune policy, ce qui équivaut à un refus total pour un rôle sans `BYPASSRLS`. Sans rapport avec
+   le travail multi-tenant de cette session (ces tables n'ont pas de colonne `org_id`, leur isolation
+   se fait par `thread_id`, entièrement gérée par les requêtes internes de LangGraph) : une policy
+   permissive (`USING (true)`) suffit, exécutée une fois par l'utilisateur via l'éditeur SQL Supabase.
+4. **Troisième bug, trouvé en rejouant la suite complète sous le nouveau rôle** :
+   `vector_store._get_pool()` réexécute à chaque démarrage de process les commandes
+   `ALTER TABLE ... ENABLE/FORCE ROW LEVEL SECURITY` et `CREATE POLICY` — des opérations réservées
+   au propriétaire de la table. Sous `postgres` (propriétaire), aucun souci ; sous `aca_app` (non
+   propriétaire, par construction), ces commandes échouaient (`InsufficientPrivilege`). Un premier
+   passage semblait pourtant réussir de bout en bout (`python -m aca.core.app`, 6 cas) — en creusant,
+   ce succès était un faux positif : le `reasoning_log` affiché provenait d'un état déjà persisté par
+   des runs précédents dans le même thread Postgres (mêmes `thread_id` figés dans le bloc `__main__`),
+   donc `connaissance_node` n'avait pas été réellement réinvoqué. Corrigé en encadrant ce bloc de
+   migration/policy d'un `try/except` : une erreur « must be owner » y est maintenant traitée comme
+   normale (configuration déjà faite par un rôle admin), pas comme un échec. Une régression annexe
+   trouvée au passage et corrigée immédiatement : le message d'information de ce nouveau `except`
+   utilisait un caractère spécial qui faisait planter l'affichage sous la console Windows cp1252 —
+   exactement le même type de bug déjà corrigé une fois dans `hubspot.py` (§ Known gaps) — remplacé
+   par un texte ASCII pur.
+5. Revérifié en direct après chaque correction : `sheets.search_knowledge_base_semantic()` sur une
+   vraie question renvoie maintenant un vrai résultat pertinent, sans aucun repli silencieux vers la
+   recherche par mots-clés. `DATABASE_URL` bascule sur le rôle `aca_app` ; le rôle `postgres`
+   d'origine reste disponible pour l'administration (migrations futures) mais n'est plus utilisé à
+   l'exécution.
+
+### Ce que ça veut dire concrètement
+
+La routine de vérification "on code une protection, elle est testée par des tests unitaires, mais
+jamais rejouée contre le vrai service" a, cette fois, effectivement révélé un problème réel — le
+scénario exact que "non vérifié en direct" était censé signaler comme risque. Trois bugs distincts
+liés entre eux (rôle avec BYPASSRLS, RLS par défaut de Supabase sur les tables du checkpointer,
+DDL réservée au propriétaire réexécutée à chaque démarrage) ont été trouvés et corrigés dans la
+même session de vérification, chacun révélé par la correction du précédent — illustrant pourquoi
+"non vérifié en direct" reste une mention honnête à garder tant que le test réel n'a pas eu lieu,
+plutôt que de supposer qu'un code qui passe les tests unitaires se comporte forcément pareil contre
+le vrai service.
+
+
+## 2026-07-22 — Le dashboard client Next.js tourne, et la validation passe désormais dans Slack
+
+### Le point de départ
+
+Le dashboard Next.js avait été échafaudé la veille (§12 item 8) mais jamais lancé : `npm install`
+échouait en boucle avec `ERR_SSL_CIPHER_OPERATION_FAILED` — un bug connu de Node/OpenSSL (TLS 1.3,
+`ossl_gcm_stream_update`) sur cette machine Windows, pas un problème de réseau. Contourné en passant
+à **pnpm** (pile réseau différente), puis un simple dépassement de délai sur les deux plus gros
+fichiers (`next` + le binaire natif `swc-win32`), réglé avec un `.npmrc` (`fetch-timeout` allongé).
+Le serveur de dev tourne, la page de login s'affiche avec son graphe d'agents animé en fond — vérifié
+visuellement par l'utilisateur.
+
+### La vraie question posée : le dashboard était-il le bon choix ?
+
+L'utilisateur a demandé, en temps réel, si un dashboard Node.js était le choix pertinent pour de
+« l'automatisation de workflow pour des entreprises ». Réponse honnête : le dashboard est une **tour
+de contrôle**, pas l'automatisation elle-même (le moteur, c'est le graphe + le poller). Pour une
+entreprise, la vraie commodité, c'est de **valider là où l'équipe travaille déjà** — Slack, Gmail —
+pas d'ouvrir encore une application web. D'où trois décisions de cadrage (§12bis de la roadmap) :
+
+1. **Le dashboard devient la colonne vertébrale UI** ; Streamlit est reclassé en outil
+   d'administration/curation interne. La migration future de Streamlit, quand elle aura lieu, doit
+   séparer par audience (vues client dans le dashboard, curation dans un futur groupe `(admin)`) —
+   sinon on ne fait que refaire Streamlit avec de plus jolies polices.
+2. **n8n reste la dernière chose à câbler**, repositionné en couche d'intégration optionnelle (« si
+   une entreprise fait déjà tourner n8n, elle pilote ACA via l'API »), plus une 3e UI concurrente.
+3. **La boucle d'approbation Slack** est ajoutée comme le vrai gain de commodité.
+
+### Ce qui a été construit : Valider/Rejeter directement dans Slack
+
+L'alerte Slack d'un nouveau lead porte maintenant deux boutons cliquables « ✅ Valider » / « ✕
+Rejeter » (`notify.send_approval`, format Block Kit, le `thread_id` embarqué dans le bouton). Un clic
+déclenche un POST signé de Slack vers un nouvel endpoint `POST /slack/interactions` (aca/api.py), qui
+rejoue le graphe jusqu'à l'écriture CRM (Valider) ou retire le lead de la file (Rejeter) — exactement
+la même logique que le bouton « Valider » de l'UI, mais **sans ouvrir aucune interface**. La
+validation humaine, cœur non négociable du projet, est préservée : le clic EST la validation humaine.
+
+Sécurité : cet endpoint est le seul où un clic déclenche une écriture CRM sans passer par la clé API
+(Slack n'envoie pas notre en-tête). Il est protégé par la **signature HMAC de Slack**
+(`aca/core/slack_verify.py`, pur/stdlib, `SLACK_SIGNING_SECRET`) et **échoue fermé** (rejet 503) si
+ce secret est absent — à l'inverse du reste de l'API dont la garde est optionnelle. La logique de
+validation/rejet a été factorisée (`_do_validate`/`_do_reject`) pour que REST et Slack partagent une
+seule source de vérité.
+
+Un vrai bug corrigé au passage : `notify.py` avait le même `import gmail_reader` nu que celui trouvé
+la veille dans `app.py` — l'envoi e-mail de secours était donc silencieusement cassé. Corrigé.
+
+### Comment on sait que ça marche
+
+5 nouveaux tests (`test_api.py`, 22 tests au total) : vérification de signature pure (bonne/mauvaise
+signature, secret absent, horodatage trop ancien), endpoint non configuré → 503, mauvaise signature
+→ 401, et les flux complets Valider/Rejeter avec des requêtes **réellement signées en HMAC** comme
+Slack le ferait. Suite complète : **175 tests, hors ligne, ~4 s**. Non vérifié contre une vraie app
+Slack (nécessite une app Slack avec Interactivité + une URL publique/tunnel — étape manuelle de
+l'utilisateur, comme l'OAuth Gmail l'a été) ni contre une vraie instance n8n.

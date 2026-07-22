@@ -9,6 +9,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import interrupt, RetryPolicy, default_retry_on
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_groq import ChatGroq
 from aca.integrations import sheets, notify, hubspot
 from aca.agents import enrichment, veille
@@ -666,7 +667,7 @@ def action_node(state: AgentState) -> dict:
     if msg_id:
         service = None
         try:
-            import gmail_reader
+            from aca.integrations import gmail_reader
             service = gmail_reader.get_gmail_service()
             gmail_reader.mark_as_processed(service, msg_id)
             status += " E-mail Gmail marqué comme traité."
@@ -773,7 +774,7 @@ def enrichissement_node(state: AgentState) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # Notification — alerte humaine juste avant la pause de validation (P0-2, ACAM_roadmap.md §11.4)
 # ─────────────────────────────────────────────────────────────────────────────
-def notification_node(state: AgentState) -> dict:
+def notification_node(state: AgentState, config: RunnableConfig | None = None) -> dict:
     """
     Alerte le commercial qu'une analyse attend sa validation (Slack ou e-mail, cf. notify.py).
     Toujours exécuté juste avant la pause `interrupt_before=["action"]`, sauf SPAM/AUTRE/SUPPORT
@@ -783,6 +784,12 @@ def notification_node(state: AgentState) -> dict:
     groupe est le cas le plus risqué à laisser filer sans alerte — un vrai lead mal classé en SPAM
     ne serait sinon jamais revu par personne. Dégradation gracieuse : ne bloque jamais le graphe si
     aucun canal n'est configuré ou si l'envoi échoue.
+
+    Pour un vrai lead (hors CATEGORIES_SANS_SUITE) qui va s'arrêter à la pause de validation,
+    l'alerte Slack porte des boutons « Valider »/« Rejeter » cliquables (`notify.send_approval`) —
+    la validation peut alors se faire directement dans Slack sans ouvrir aucune UI. Le `thread_id`
+    (LangGraph) vient de `config` — LangGraph le passe en 2e argument si le nœud l'accepte ; il
+    reste optionnel (`None` en appel direct dans les tests) → repli sur l'alerte simple sans boutons.
     """
     confidence = state.get("classification_confidence", 1.0)
     low_confidence = confidence < CLASSIFICATION_CONFIDENCE_THRESHOLD
@@ -811,7 +818,15 @@ def notification_node(state: AgentState) -> dict:
     if state.get("knowledge_gap"):
         besoin = info.get("besoin_principal") or "(besoin non précisé)"
         message += f"\n❔ Question sans réponse en base de connaissances : {besoin}."
-    sent = notify.send(message)
+    # Vrai lead à valider → alerte Slack avec boutons Valider/Rejeter (validation depuis Slack).
+    # Alerte informative (confiance faible sur une catégorie auto-routée) → pas de boutons : elle ne
+    # s'arrête à aucune pause de validation, un bouton n'aurait rien à déclencher.
+    thread_id = (config or {}).get("configurable", {}).get("thread_id")
+    is_real_lead = state["classification"] not in CATEGORIES_SANS_SUITE
+    if is_real_lead and thread_id:
+        sent = notify.send_approval(message, thread_id)
+    else:
+        sent = notify.send(message)
     print(f"   → {'Notification envoyée.' if sent else 'Aucun canal configuré (repli gracieux).'}")
     reason = "Notification envoyée." if sent else "Notification : aucun canal configuré."
     return {"reasoning_log": [reason]}
@@ -855,7 +870,7 @@ def routing_node(state: AgentState) -> dict:
     forward_to = dest.get("email")
     if msg_id and forward_to:
         try:
-            import gmail_reader
+            from aca.integrations import gmail_reader
             service = gmail_reader.get_gmail_service()
             gmail_reader.create_forward_draft(
                 service, msg_id, to=forward_to,

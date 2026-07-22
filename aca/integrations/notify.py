@@ -20,12 +20,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def _notify_slack(message: str, webhook_url: str | None = None) -> bool:
+def _notify_slack(message: str, webhook_url: str | None = None, blocks: list | None = None) -> bool:
     webhook_url = webhook_url or os.getenv("SLACK_WEBHOOK_URL")
     if not webhook_url:
         return False
+    # `text` reste toujours présent même avec des `blocks` : Slack l'utilise pour la notification
+    # push/mobile et les lecteurs d'écran (accessibilité), le rendu visuel venant des blocks.
+    payload = {"text": message, "blocks": blocks} if blocks else {"text": message}
     try:
-        response = requests.post(webhook_url, json={"text": message}, timeout=5)
+        response = requests.post(webhook_url, json=payload, timeout=5)
         response.raise_for_status()
         return True
     except Exception as e:
@@ -38,7 +41,7 @@ def _notify_email(message: str, to: str | None = None, subject: str | None = Non
     if not to:
         return False
     try:
-        import gmail_reader
+        from aca.integrations import gmail_reader
         service = gmail_reader.get_gmail_service()
         mime = MIMEText(message)
         mime["To"] = to
@@ -64,6 +67,46 @@ def send(
     boîte support ou RH (cf. `routing_node` dans app.py) sans dupliquer cette logique d'envoi.
     """
     if _notify_slack(message, webhook_url):
+        return True
+    if _notify_email(message, email_to, subject):
+        return True
+    return False
+
+
+def _approval_blocks(message: str, thread_id: str) -> list:
+    """
+    Message Block Kit avec deux boutons « Valider »/« Rejeter » portant le `thread_id` dans leur
+    `value` — le clic déclenche un POST signé de Slack vers `/slack/interactions` (cf. aca/api.py),
+    qui rejoue le graphe jusqu'à l'écriture CRM (Valider) ou retire le lead de la file (Rejeter),
+    exactement comme le bouton « Valider » de l'UI. `action_id` distingue les deux côté serveur.
+    """
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": message}},
+        {"type": "actions", "elements": [
+            {"type": "button", "text": {"type": "plain_text", "text": "✅ Valider"},
+             "style": "primary", "action_id": "aca_approve", "value": thread_id},
+            {"type": "button", "text": {"type": "plain_text", "text": "✕ Rejeter"},
+             "style": "danger", "action_id": "aca_reject", "value": thread_id},
+        ]},
+    ]
+
+
+def send_approval(
+    message: str,
+    thread_id: str,
+    webhook_url: str | None = None,
+    email_to: str | None = None,
+    subject: str | None = None,
+) -> bool:
+    """
+    Comme `send()`, mais l'alerte Slack porte des boutons cliquables « Valider »/« Rejeter » —
+    la validation humaine se fait alors DANS Slack, sans ouvrir aucune UI (le plus grand gain de
+    commodité pour une équipe commerciale qui vit déjà dans Slack). Nécessite, côté Slack, une app
+    avec l'interactivité activée pointant vers `/slack/interactions` (cf. slack_verify.py) — le
+    webhook entrant seul poste le message mais ne reçoit pas les clics. Repli gracieux identique à
+    `send()` : e-mail sans boutons si Slack absent, silencieux si rien n'est configuré.
+    """
+    if _notify_slack(message, webhook_url, blocks=_approval_blocks(message, thread_id)):
         return True
     if _notify_email(message, email_to, subject):
         return True

@@ -201,6 +201,14 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   dynamically (never frozen at import, same reasoning as `DATABASE_URL` in `vector_store.py`). One
   ACA deployment = one tenant (like `DATABASE_URL`/`GOOGLE_SHEETS_ID` already are), not per-request
   multi-org routing within a single process — there is deliberately no login/session system here.
+- [slack_verify.py](aca/core/slack_verify.py) — `verify_slack_signature(signing_secret, timestamp,
+  body, signature)`: pure/stdlib-only (`hmac`/`hashlib`/`time`) HMAC-SHA256 verification of Slack's
+  signed interactivity requests (the "✅ Valider"/"✕ Rejeter" buttons — see `notify.send_approval`
+  and `api.py`'s `POST /slack/interactions`). Uses `SLACK_SIGNING_SECRET` (distinct from the
+  posting `SLACK_WEBHOOK_URL`), constant-time compare, and a 5-min replay window. `/slack/interactions`
+  is the one endpoint where a click triggers a CRM write **without** `require_api_key` (Slack won't
+  send our header), so this signature is its only gate — it **fails closed** (rejects) if
+  `SLACK_SIGNING_SECRET` is unset, unlike the rest of the API whose key is optional.
 - [poller.py](aca/core/poller.py) — standalone background intake: run separately (`python -m aca.core.poller`, own
   process/terminal — not started by Streamlit), polls `gmail_reader.list_unread_emails()` every
   `POLL_INTERVAL_SECONDS` (default 60), and for each email not already in `queue_store` runs it
@@ -284,7 +292,16 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   or `email_to` override) as a graceful-degradation chain, same pattern as `enrichment.py`/`veille.py`.
   Called by `notification_node` (generic leads channel) and `routing_node` (per-category
   `SUPPORT_EMAIL`/`HR_EMAIL` overrides). `python -m aca.integrations.notify` sends a one-off test message on whichever
-  channel is configured.
+  channel is configured. Also `send_approval(message, thread_id, ...)` — same chain, but the Slack
+  alert carries **interactive "✅ Valider"/"✕ Rejeter" buttons** (Block Kit) whose `value` holds the
+  `thread_id`; a click POSTs to `POST /slack/interactions` (see `api.py`) so the human-in-the-loop
+  validation can happen **inside Slack, without opening any UI** — the highest-convenience surface
+  for a sales team that already lives in Slack. `notification_node` uses `send_approval` for a real
+  lead (has a `thread_id`, will pause for validation) and plain `send` for the informational
+  low-confidence alert (auto-routed, no pause to act on). Graceful-degradation unchanged: falls back
+  to a buttonless e-mail if Slack is absent. (Live approval requires a Slack **app** with
+  interactivity enabled pointing at `/slack/interactions` — the incoming webhook alone posts the
+  message but can't receive clicks; see `SLACK_SIGNING_SECRET` below.)
 - [ingest.py](aca/ingestion/ingest.py) — knowledge ingestion: `ingest_document(source, mode)` extracts text (PDF via
   `pdf_reader`, or `.md`/`.txt`), asks Groq to split it into Q/R pairs, and writes them to the
   Knowledge_Base tab via `sheets.write_knowledge_rows`. CLI (`python -m aca.ingestion.ingest <path> [append|replace]`)
@@ -315,10 +332,12 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   graph via an `advance_graph()` helper that streams each node live in an `st.status` block (with a
   `UsageMetadataCallbackHandler` attached to the stream `config` — §13, aggregated via
   `aca_graph.sum_usage()` and logged with `analytics_store.record_tokens()` once the stream ends),
-  then reads `get_state(config)`. Main area is three `st.tabs`: **"Nouvel e-mail"** (the flow
+  then reads `get_state(config)`. Main area is four `st.tabs`: **"Nouvel e-mail"** (the flow
   above), **"Tableau de bord"** (KPIs + charts from `analytics_store.py`, period filter via
-  `st.segmented_control`, incl. §13's "brouillons édités" and "tokens/analyse" tiles), and
-  **"Réglages"** (§12 item 7, audited §14 — a form backed by
+  `st.segmented_control`, incl. §13's "brouillons édités" et "tokens/analyse" tiles),
+  **"Historique"** (§12 item 2 — a searchable table over `audit_log.list_recent()`, filtering
+  client-side across sender/classification/validator/thread ID), and **"Réglages"** (§12 item 7,
+  audited §14 — a form backed by
   [config_store.py](aca/storage/config_store.py) letting a manager edit the Calendly link,
   SUPPORT/HR routing addresses and webhooks, and the relance cadence/threshold, without touching
   `.env`; picked up dynamically by `app.py`'s `_calendly_url()`/`_routing_destinations()` and
@@ -328,7 +347,11 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   validation pause); otherwise it shows a colored category badge / returning-customer + duplicate
   banners / a **risk-flags error banner and a knowledge-gap warning banner** (§13, `risk_flags`/
   `knowledge_gap`) / a "Fiche prospect" card (metrics + urgency + company profile) / a "Raisonnement
-  de l'équipe" expander (`reasoning_log`) / the proposition, now rendered in an **editable
+  de l'équipe" expander (`reasoning_log`, now opening with a **visual graph render** — §12 item 5,
+  `st.graphviz_chart` over a DOT string built from the real `StateGraph` topology, gold-highlighting
+  the active node live during `advance_graph()`'s stream and green for completed nodes; the same
+  static render also appears in the `SUPPORT`/`AUTRE` "Détail du routage" expander) / the
+  proposition, now rendered in an **editable
   `st.text_area`** (§13) rather than read-only — "Valider" first calls `app.update_state(config,
   {"draft_response": edited})` if the human changed it (so `action_node` writes the edited version
   to Sheets/HubSpot/the Gmail draft) and `analytics_store.record_edit()`, then resumes with
@@ -392,10 +415,25 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   `psycopg` connection via `DATABASE_URL`), so the policy can't rely on `auth.uid()`; `_scope_to_tenant()`
   sets that session variable via `set_config()` at the start of every borrowed pooled connection,
   before any query, so a connection reused later by a different tenant can never inherit the
-  previous one's scope. Not live-verified against a real Supabase RLS policy in this session (no
-  Supabase credentials in this environment) — only the migration/query SQL itself, exercised via
-  offline unit tests of the surrounding org_id-scoping logic. Absent `DATABASE_URL` = fully inert,
-  `sheets.py` uses its original in-memory path unchanged.
+  previous one's scope. **Live-verified against real Supabase (2026-07-21)** — and found broken on
+  the first pass: the `postgres` role Supabase's standard `DATABASE_URL` connects as has
+  `rolbypassrls=true` by default, which makes `FORCE ROW LEVEL SECURITY` a no-op regardless (that
+  clause only binds the table *owner*, never a role with `BYPASSRLS`/`SUPERUSER`). Fixed by creating
+  a restricted `aca_app` role (no superuser, no `BYPASSRLS`) that the app now connects as instead;
+  `postgres` remains available for admin/migrations only. Two more real bugs surfaced while fixing
+  this, both now fixed: (1) Supabase auto-enables RLS with zero policies on any new `public` table
+  — including LangGraph's own `checkpoints`/`checkpoint_blobs`/`checkpoint_writes`/
+  `checkpoint_migrations`, which have no `org_id` column and were never meant to be tenant-scoped
+  (isolation there is by `thread_id`, inside LangGraph's own queries) — so they needed a one-time
+  permissive policy, added manually via the Supabase SQL editor; (2) `_get_pool()` used to
+  unconditionally re-run the owner-only `ENABLE`/`FORCE ROW LEVEL SECURITY` + `CREATE POLICY` setup
+  on every process start, which crashed under the new non-owner role — now wrapped in a try/except
+  that treats "must be owner" as "already configured by an admin" and continues. Re-verified after
+  each fix: a bogus tenant and a connection with no session variable set both correctly see 0 rows
+  of the real 74; the real tenant sees all 74; `search_knowledge_base_semantic()` returns genuine
+  pgvector results end-to-end with no silent fallback to keyword search. See
+  `docs/PROJECT_JOURNAL.md` (2026-07-21 entry) for the full investigation. Absent `DATABASE_URL` =
+  fully inert, `sheets.py` uses its original in-memory path unchanged.
 - [hubspot.py](aca/integrations/hubspot.py) — real CRM (P2), mirrors `sheets.append_lead()`: called from
   `action_node` **alongside** Sheets (not replacing it — Sheets stays the memory `find_leads_by_sender()`/
   the dashboard read from). `is_enabled()` gates everything on `HUBSPOT_ACCESS_TOKEN` (private-app token).
@@ -450,15 +488,62 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   reads its state, `POST /threads/{id}/clarifier` answers a pending dynamic clarification, and
   `POST /threads/{id}/valider` is the **only** endpoint that resumes past `interrupt_before=["action"]`
   (same human-in-the-loop contract as `ui.py`'s "Valider" button — optionally with an
-  `edited_draft`). `GET /metrics` exposes Prometheus-format counters/histogram (§12 item 9, audited
+  `edited_draft`; now also mirrors `ui.py`'s post-validation bookkeeping —
+  `queue_store.mark_validated()`, `audit_log.log_validation()`, `analytics_store.record_validation()`
+  — which the endpoint didn't do before the `dashboard/` client existed, §12 item 8). `GET /metrics`
+  exposes Prometheus-format counters/histogram (§12 item 9, audited
   §14 — `aca_emails_classified_total`, `aca_leads_validated_total`, `aca_tokens_per_analysis`);
   the roadmap marks this "useful only once §12 item 3 [multi-tenant] exists and several clients
   run" — it exists now that the org_id foundation does, but is inert until something actually
-  scrapes it. Launch: `uvicorn aca.api:api --port 8000`. Covered by
-  [test_api.py](tests/test_api.py) via `fastapi.testclient.TestClient` with the same fake-LLM
-  pattern as `test_graph_integration.py` — not exercised against a real n8n instance (none exists
-  for this project; n8n would simply be an HTTP client of this API, nothing to stand up to verify
-  the API itself).
+  scrapes it. Launch: `uvicorn aca.api:api --port 8000`. **Extended for the dashboard (§12 item 8,
+  2026-07-21)**: an optional `require_api_key` dependency (`ACA_API_KEY` — same graceful-degradation
+  contract as `ACA_UI_PASSWORD`, absent = no gate) on every route except `/metrics`; `GET
+  /threads/pending` (`queue_store.list_pending`) and `GET /threads/history`
+  (`audit_log.list_recent`) — declared *before* `GET /threads/{thread_id}` in the file, since
+  FastAPI/Starlette resolves same-shaped routes in registration order, a real bug caught by the new
+  tests; `POST /threads/{thread_id}/rejeter` — a genuinely new capability (`queue_store.
+  mark_rejected`), since no "reject a lead without writing to CRM" path existed anywhere before,
+  not even in `ui.py` (a rejection was just never clicking "Valider"); `GET /stats` (bundles
+  `analytics_store`'s aggregates); `GET`/`POST /settings` (wraps `config_store`). **Slack approval
+  loop (2026-07-22)**: `POST /slack/interactions` receives clicks on the "✅ Valider"/"✕ Rejeter"
+  buttons from `notify.send_approval`'s alert, so validation can happen inside Slack with no UI. It
+  is **not** behind `require_api_key` (Slack won't send the header) — instead it verifies Slack's
+  HMAC signature (`slack_verify.py`, `SLACK_SIGNING_SECRET`) and **fails closed** (503) if that
+  secret is unset. The shared `_do_validate`/`_do_reject` helpers back both the REST endpoints and
+  this Slack path (one source of truth for the CRM-write + post-validation bookkeeping). Slack's
+  3-second response budget is usually met by `action_node` at prototype volume; a production
+  high-load version would ack immediately then update via `response_url` (noted as a known limit,
+  not built). Covered by [test_api.py](tests/test_api.py) (22 tests) via
+  `fastapi.testclient.TestClient` with the same fake-LLM pattern as `test_graph_integration.py` —
+  the Slack tests build genuinely HMAC-signed requests and cover approve/reject/bad-signature/
+  unconfigured. Not exercised against a real n8n instance or a real Slack app (neither exists for
+  this project; both would simply be HTTP clients of this API).
+- [dashboard/](dashboard/) — the dedicated Next.js client dashboard (§12 item 8), **built
+  2026-07-21 at the user's explicit request** — previously deliberately deferred as a product/
+  hosting decision, not a code gap. Next.js 16 (App Router, TypeScript, Tailwind v4). **Product
+  positioning (decided 2026-07-22):** this dashboard is the **intended long-term UI spine** — the
+  client-facing "cockpit" (queue, visual agent graph, HITL approve/reject/edit, settings, usage) —
+  and `ui.py` (Streamlit) is reframed as the **internal admin/curator tool** (knowledge ingestion,
+  FAQ approve/reject, advanced back-office config). They run **alongside** today; the migration
+  intent when Streamlit is eventually retired is to move its *client-facing* pieces into the
+  dashboard's main views and its *curator* pieces into a future role-gated `(admin)` group — the
+  point of migrating is that **separation**, not just the framework (copying Streamlit's
+  everything-on-one-sidebar layout verbatim would just be Streamlit with nicer fonts). Talks only to
+  `aca/api.py`, never to the database directly — `ACA_API_KEY` is attached server-side
+  (`lib/aca.ts`, marked `server-only`) and never reaches the browser. Own password gate
+  (`DASHBOARD_PASSWORD`, HMAC-signed session cookie via `lib/session.ts`, checked in `proxy.ts` —
+  renamed from `middleware.ts`, the Next 16 convention) — same shared-secret pattern as
+  `ACA_UI_PASSWORD`, not a real multi-user auth system. Signature element:
+  `components/pulse-graph.tsx`, an animated SVG rendering of the real `StateGraph` topology
+  (`lib/graph-topology.ts`, kept in sync with `aca/core/app.py` the same way `ui.py`'s `GRAPH_EDGES`
+  already is) — an ambient looping animation on the login background, and a live progress view
+  (active/done nodes) inside the HITL drawer. Dependencies install via **pnpm** (`pnpm install` in
+  `dashboard/`) — npm's `ERR_SSL_CIPHER_OPERATION_FAILED` (a Node/OpenSSL TLS-1.3 bug on this
+  Windows box) blocked the plain `npm` path; `.npmrc` also raises `fetch-timeout` for the large
+  `next`/`swc` binaries. See [dashboard/README.md](dashboard/README.md) for setup and the full
+  file-by-file breakdown. Runs locally via `npm run dev`/`pnpm dev` (verified: login page renders
+  with the animated graph; backend on `uvicorn aca.api:api --port 8000`) — not deployed anywhere yet
+  (hosting still a deferred decision).
 - [eval_dataset.json](aca/eval/eval_dataset.json) — 50 synthetic labeled emails (10 per category, a few
   deliberately ambiguous) for [eval_classifier.py](aca/eval/eval_classifier.py), which runs each through
   `classifier_node` and reports overall/per-category accuracy + misclassifications. Last measured
@@ -481,7 +566,9 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   local stores, same tenant scenario RLS reproduces on Supabase),
   [test_auth_lockout.py](tests/test_auth_lockout.py) (§14 item US-41),
   [test_billing.py](tests/test_billing.py) (§12 item 4, via a fake Stripe client), and
-  [test_api.py](tests/test_api.py) (§12 item 6, via `fastapi.testclient.TestClient`). Run via
+  [test_api.py](tests/test_api.py) (§12 item 6 + item 8 — 22 tests incl. the Slack approval loop:
+  genuinely HMAC-signed `/slack/interactions` requests covering approve/reject/bad-signature/
+  unconfigured, via `fastapi.testclient.TestClient`). **175 tests total**, offline, ~4s. Run via
   `python -m pytest tests/` (pytest pinned in requirements.txt).
 
 ## Stack
@@ -507,7 +594,15 @@ if absent), and optionally `GMAIL_CREDENTIALS_FILE` / `GMAIL_TOKEN_FILE` (defaul
 [poller.py](aca/core/poller.py) (default `60`), `SLACK_WEBHOOK_URL` / `NOTIFY_EMAIL` for
 [notify.py](aca/integrations/notify.py) (both optional; no-ops if absent — see Gmail setup notes for the incoming-
 webhook steps, no new account needed for `NOTIFY_EMAIL` since it reuses the existing Gmail auth),
-`ACA_UI_PASSWORD` (optional password gate for [ui.py](ui.py); absent = no gate), `ACA_ANALYTICS_DB`
+`SLACK_SIGNING_SECRET` (optional — enables the Slack "Valider"/"Rejeter" approval buttons'
+callback via `POST /slack/interactions`; absent = the buttons still post but clicks 503, i.e. the
+loop fails closed rather than open — see `slack_verify.py`. This is the Slack **app** signing
+secret, distinct from the `SLACK_WEBHOOK_URL` used only to post; enabling live approval also
+requires turning on Interactivity in the Slack app and pointing its Request URL at
+`/slack/interactions`, which needs the API reachable — a public host or a tunnel like ngrok in
+local dev), `ACA_API_KEY` (optional shared key gating every `aca/api.py` route except `/metrics`
+and `/slack/interactions`; absent = no gate, dev mode — must match the dashboard's server-side
+`ACA_API_KEY`), `ACA_UI_PASSWORD` (optional password gate for [ui.py](ui.py); absent = no gate), `ACA_ANALYTICS_DB`
 (default `data/analytics.sqlite`, dashboard event log), `ACA_AUDIT_DB`
 (default `data/audit.sqlite`), `RETENTION_DAYS` for [retention.py](aca/core/retention.py) (default `365`),
 `ACA_FOLLOWUP_DB` (default `data/followup.sqlite`) / `RELANCE_DAYS` (default `4`) for
@@ -668,9 +763,11 @@ afterward.
   Stripe-gated next step, **not live-verified** (no Stripe test account available); (8) a FastAPI
   microservice (`api.py`) exposing the graph for the planned n8n port, **not exercised against a
   real n8n instance** (n8n would just be an HTTP client of this API); (9) a Prometheus `/metrics`
-  endpoint. **Deliberately not built**: a dedicated Next.js/Shadcn client dashboard (§12 item 8) —
-  that requires a real framework/hosting decision the audit flagged as inappropriate to make
-  unilaterally, unlike the items above which were pure code additions. 160 tests total (up from
+  endpoint. **Deliberately not built in this pass**: a dedicated Next.js/Shadcn client dashboard
+  (§12 item 8) — that requires a real framework/hosting decision the audit flagged as inappropriate
+  to make unilaterally, unlike the items above which were pure code additions. (Built later the
+  same day, once the user explicitly asked for it and answered the framework/auth/scope questions
+  directly — see [dashboard/](dashboard/) above.) 160 tests total (up from
   125), all offline; see `docs/ACAM_roadmap.md` §14 for the full item-by-item audit reasoning
   (including two checklist items from the original security audit that were found to be
   non-issues by architecture and correctly *not* built: exposed API keys — no client-side
@@ -692,9 +789,10 @@ closed**: Gmail draft-reply after "Valider" (item 1, live-verified), background 
 `SqliteSaver` persistence surviving a simulated restart (item 4, live-verified), human-facing
 notification via `notify.py` (item 2, coded + graceful-fallback path verified, not yet exercised
 against a real Slack/e-mail destination), human staging/approval for `veille`'s web content
-(item 6, live-verified), and routing `SUPPORT`/`AUTRE` via `routing_node` (item 5, coded +
-graceful-fallback path verified — `SUPPORT` now bypasses Stratège/CRM like SPAM/AUTRE, alert +
-Gmail forward draft ready as soon as real `SUPPORT_EMAIL`/`HR_EMAIL` destinations are configured).
+(item 6, live-verified), and routing `SUPPORT`/`AUTRE` via `routing_node` (item 5, **live-verified
+2026-07-21** — `SUPPORT` now bypasses Stratège/CRM like SPAM/AUTRE; both the Slack alert and the
+Gmail forward-draft branches confirmed against real `SUPPORT_EMAIL`/`HR_EMAIL` destinations and a
+real Gmail message — see `docs/PROJECT_JOURNAL.md`).
 Also done this session: `format_sheets.py` visual polish
 (frozen/bold headers, conditional coloring, wrapped columns) on all 3 Sheets tabs, and 4 of the 7
 §11.4 P1 items — `RetryPolicy` on every external-call node (item 9, verified with a simulated 429),

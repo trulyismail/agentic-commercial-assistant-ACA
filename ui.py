@@ -102,6 +102,70 @@ CATEGORY_STYLE = {
     "DEVIS": ("blue", ":material/request_quote:"),
 }
 
+# Graphe visuel (§12 item 5) : rendu via st.graphviz_chart (viz.js côté navigateur, aucune
+# dépendance système Graphviz requise). Reflète la topologie réelle du StateGraph (app.py,
+# workflow.add_edge/add_conditional_edges) — à tenir synchronisé si le graphe évolue.
+GRAPH_LABELS = {
+    "ingestion": "Ingestion", "classifier": "Classifieur", "memory_lookup": "Mémoire",
+    "risk_scan": "Risques", "extractor": "Extracteur", "clarification": "Clarification",
+    "supervisor": "Superviseur", "enrichissement": "Enrichissement", "connaissance": "Connaissance",
+    "veille": "Veille", "stratege": "Stratège", "reflection": "Réflexion", "routing": "Routage",
+    "notification": "Notification", "action": "Action",
+}
+GRAPH_EDGES = [
+    ("START", "ingestion"), ("ingestion", "classifier"), ("classifier", "memory_lookup"),
+    ("memory_lookup", "risk_scan"), ("risk_scan", "extractor"), ("extractor", "clarification"),
+    ("clarification", "supervisor"),
+    ("supervisor", "enrichissement"), ("enrichissement", "supervisor"),
+    ("supervisor", "connaissance"), ("connaissance", "supervisor"),
+    ("supervisor", "veille"), ("veille", "supervisor"),
+    ("supervisor", "stratege"), ("stratege", "reflection"),
+    ("reflection", "stratege"), ("reflection", "routing"),
+    ("routing", "notification"), ("notification", "action"), ("action", "END"),
+]
+# Nœuds toujours traversés une fois la pause de validation atteinte (§13/§14 audits) — seuls les
+# workers (enrichissement/connaissance/veille/stratege/reflection) sont conditionnels, cf.
+# `_completed_graph_nodes` ci-dessous et `supervisor`'s `add_conditional_edges` dans app.py.
+GRAPH_FIXED_NODES = {
+    "ingestion", "classifier", "memory_lookup", "risk_scan", "extractor", "clarification",
+    "supervisor", "routing", "notification",
+}
+
+
+def _build_graph_dot(current: str = None, done: set = frozenset()) -> str:
+    """Construit le graphe LangGraph en DOT, nœud actif en surbrillance, nœuds déjà passés en vert."""
+    lines = [
+        "digraph G {", 'rankdir=LR; bgcolor="transparent"; splines=true;',
+        'node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11, margin="0.15,0.08"];',
+        'edge [color="#9e9e9e"];',
+        '"START" [shape=ellipse, style=filled, fillcolor="#616161", fontcolor=white, label="START"];',
+        '"END" [shape=ellipse, style=filled, fillcolor="#616161", fontcolor=white, label="END"];',
+    ]
+    for node, label in GRAPH_LABELS.items():
+        if node == current:
+            fill = "#FFB300"
+        elif node in done:
+            fill = "#43A047"
+        else:
+            fill = "#E0E0E0"
+        fontcolor = "white" if node in done and node != current else "black"
+        lines.append(f'"{node}" [label="{label}", fillcolor="{fill}", fontcolor="{fontcolor}"];')
+    for a, b in GRAPH_EDGES:
+        style = ' [style=dashed, label="rewrite"]' if (a, b) == ("reflection", "stratege") else ""
+        lines.append(f'"{a}" -> "{b}"{style};')
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def _completed_graph_nodes(res: dict) -> set:
+    """Nœuds déjà traversés pour l'état courant (post-pause) — pipeline fixe + workers effectivement appelés."""
+    done = set(GRAPH_FIXED_NODES)
+    completed_agents = res.get("completed_agents") or []
+    done.update(a for a in completed_agents if a in GRAPH_LABELS)
+    if "stratege" in completed_agents:
+        done.add("reflection")
+    return done
+
 
 def advance_graph(payload):
     """
@@ -117,6 +181,8 @@ def advance_graph(payload):
     usage_handler = UsageMetadataCallbackHandler()
     config = {"configurable": {"thread_id": st.session_state.thread_id}, "callbacks": [usage_handler]}
     with st.status("Analyse en cours...", expanded=True) as status:
+        graph_slot = st.empty()
+        graph_slot.graphviz_chart(_build_graph_dot(), width="stretch")
         seen_nodes = set()  # le superviseur repasse plusieurs fois → chaque étape affichée une seule fois
         for step in aca_graph.app.stream(payload, config=config, stream_mode="updates"):
             node_name = next(iter(step))
@@ -125,6 +191,8 @@ def advance_graph(payload):
             seen_nodes.add(node_name)
             label, icon = NODE_STEPS.get(node_name, (node_name, ":material/bolt:"))
             st.write(f"{icon} {label}")
+            graph_slot.graphviz_chart(_build_graph_dot(current=node_name, done=seen_nodes), width="stretch")
+        graph_slot.graphviz_chart(_build_graph_dot(done=seen_nodes), width="stretch")
         status.update(label="Analyse terminée", state="complete")
 
     tokens_in, tokens_out = aca_graph.sum_usage(usage_handler.usage_metadata)
@@ -274,7 +342,9 @@ with st.sidebar:
         "Gemini embeddings (RAG sémantique)"
     )
 
-tab_email, tab_dashboard, tab_settings = st.tabs(["Nouvel e-mail", "Tableau de bord", "Réglages"])
+tab_email, tab_dashboard, tab_history, tab_settings = st.tabs(
+    ["Nouvel e-mail", "Tableau de bord", "Historique", "Réglages"]
+)
 
 with tab_email:
     # Interface principale pour simuler/entrer la réception d'un e-mail
@@ -364,6 +434,9 @@ with tab_email:
             )
             if res.get("reasoning_log"):
                 with st.expander("Détail du routage", icon=":material/network_node:"):
+                    st.graphviz_chart(
+                        _build_graph_dot(done=_completed_graph_nodes(res)), width="stretch",
+                    )
                     for line in res["reasoning_log"]:
                         st.markdown(f"- {line}")
 
@@ -376,6 +449,9 @@ with tab_email:
             )
             if res.get("reasoning_log"):
                 with st.expander("Détail du routage", icon=":material/network_node:"):
+                    st.graphviz_chart(
+                        _build_graph_dot(done=_completed_graph_nodes(res)), width="stretch",
+                    )
                     for line in res["reasoning_log"]:
                         st.markdown(f"- {line}")
 
@@ -429,6 +505,9 @@ with tab_email:
             # Trace de raisonnement de l'équipe d'agents (superviseur + workers)
             if res.get("reasoning_log"):
                 with st.expander("Raisonnement de l'équipe d'agents", icon=":material/network_node:"):
+                    st.graphviz_chart(
+                        _build_graph_dot(done=_completed_graph_nodes(res)), width="stretch",
+                    )
                     for line in res["reasoning_log"]:
                         st.markdown(f"- {line}")
 
@@ -565,6 +644,42 @@ with tab_dashboard:
         if resp_times:
             with st.expander("Détail des temps de réponse (leads validés)", icon=":material/schedule:"):
                 st.dataframe(resp_times, hide_index=True, width="stretch")
+
+with tab_history:
+    st.caption(
+        "Journal d'audit (`audit_log.py`, §12 item 2) — qui a validé quel lead, quand, et sous "
+        "quelle classification. Ne couvre que les événements de validation (« Valider ») ; le "
+        "Tableau de bord ci-dessus couvre lui *toutes* les classifications, y compris SPAM/AUTRE."
+    )
+    col_limit, col_search = st.columns([1, 3])
+    with col_limit:
+        history_limit = st.number_input(
+            "Nombre d'entrées", min_value=10, max_value=500, value=100, step=10,
+        )
+    with col_search:
+        history_query = st.text_input(
+            "Rechercher une exécution passée",
+            placeholder="expéditeur, classification, validé par, ID...",
+        )
+
+    history_rows = audit_log.list_recent(limit=int(history_limit))
+    if history_query.strip():
+        needle = history_query.strip().lower()
+        history_rows = [
+            r for r in history_rows if needle in " ".join(str(v) for v in r.values()).lower()
+        ]
+
+    if not history_rows:
+        st.caption("Aucun événement de validation pour le moment (ou aucun résultat pour cette recherche).")
+    else:
+        st.dataframe(
+            history_rows, hide_index=True, width="stretch",
+            column_config={
+                "thread_id": "ID d'analyse", "validated_by": "Validé par",
+                "classification": "Classification", "sender": "Expéditeur",
+                "validated_at": "Date de validation",
+            },
+        )
 
 with tab_settings:
     st.caption(

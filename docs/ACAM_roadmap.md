@@ -545,12 +545,11 @@ l'existant (même esprit que l'avertissement n8n Cloud du §11.5).
    auto-envoyé. ⚠️ Ne pas reconstruire : la variante « webhook → frontend → retour n8n » décrite par
    le document est la *forme* que prendra ce mécanisme existant lors du port n8n (item 6 ci-dessous),
    pas une fonctionnalité nouvelle.
-2. 🟡 **Partiel — Journal d'audit consultable & transparence** (« retrouver pour chaque exécution
-   passée les sorties brutes, prompts et récupérations de chaque étape ») : les données existent déjà
-   — `audit_log.py` (qui/quoi/quand par validation), traces LangSmith (détail par nœud),
-   `reasoning_log` affiché dans l'UI. **Manque** : un onglet « Historique » dans l'UI qui consomme
-   `audit_log.list_recent()` (déjà codé, jamais branché) et permette de rechercher les exécutions
-   passées. ⚠️ Effort modeste : c'est surtout du câblage d'existant, pas une nouvelle infrastructure.
+2. ✅ **Fait (2026-07-21, suite) — Journal d'audit consultable & transparence** (« retrouver pour
+   chaque exécution passée les sorties brutes, prompts et récupérations de chaque étape ») : nouvel
+   onglet « Historique » dans `ui.py`, consommant `audit_log.list_recent()` (déjà codé, jusqu'ici
+   jamais branché) avec une recherche texte libre (expéditeur, classification, validé par, ID).
+   Complète le « Thought Trace » déjà existant (`reasoning_log`) et les traces LangSmith détaillées.
 3. 🟡 **Fondation faite (2026-07-21) — Multi-tenant (isolation par client)**. Ajouté : `org_id`
    (`aca.core.tenant.current_org_id()`, défaut `"default"`, un déploiement ACA = un tenant — pas de
    routage multi-org au sein d'un même process, aucun login/session ajouté) tague désormais chaque
@@ -562,9 +561,12 @@ l'existant (même esprit que l'avertissement n8n Cloud du §11.5).
    la politique s'appuie sur une variable de session Postgres (`app.current_org_id`, positionnée
    via `set_config()` à chaque emprunt de connexion au pool) plutôt que sur `auth.uid()`. **Reste
    non fait** : `Supabase Auth`, table `organizations`, tout écran de login/inscription — c'est la
-   fondation de données, pas un vrai système multi-tenant utilisateur. Non vérifié en direct contre
-   un vrai Supabase dans cette session (pas d'accès réseau/identifiants) — seule la logique de
-   scoping `org_id` autour est couverte par 5 tests unitaires (`tests/test_multitenant.py`).
+   fondation de données, pas un vrai système multi-tenant utilisateur. **Vérifié en direct contre un
+   vrai Supabase le 2026-07-21** (suite) : la policy s'est révélée inopérante au premier passage
+   (rôle `postgres` = `rolbypassrls=true` par défaut chez Supabase, rendant `FORCE` sans effet),
+   corrigée via un rôle applicatif restreint `aca_app` — voir §14.3 et `docs/PROJECT_JOURNAL.md`
+   pour le détail complet. La logique de scoping `org_id` reste aussi couverte par 5 tests unitaires
+   (`tests/test_multitenant.py`).
 4. ✅ **Fait (2026-07-21) — Suivi de consommation, facturation Stripe en scaffold**. Le suivi de
    tokens (`analytics_store.token_stats`) existait déjà et est maintenant scopé par `org_id` (item
    3 ci-dessus). Ajouté : [billing.py](../aca/integrations/billing.py) — `report_usage(org_id, days)`
@@ -576,12 +578,13 @@ l'existant (même esprit que l'avertissement n8n Cloud du §11.5).
    test disponible pour ce projet) — seule sa dégradation gracieuse et la forme de son appel (via
    un faux client Stripe) sont couvertes par les tests (`tests/test_billing.py` +
    `tests/test_degradation.py`).
-5. 🟡 **Partiel — Trace d'observabilité & graphe d'état visuel** (« graphe LangGraph affiché, nœud
-   actif surligné, dropdown "Thought Trace" par worker ») : le « Thought Trace » existe déjà
-   (expander « Raisonnement de l'équipe d'agents » + progression nœud par nœud en direct via
-   `app.stream()`/`st.status`). **Manque** : le rendu *visuel* du graphe avec surlignage du nœud
-   actif. ⚠️ Valeur = confiance client en démo ; à faire dans le futur dashboard (item 8) plutôt
-   qu'en Streamlit jetable.
+5. ✅ **Fait (2026-07-21, suite) — Trace d'observabilité & graphe d'état visuel** (« graphe LangGraph
+   affiché, nœud actif surligné, dropdown "Thought Trace" par worker ») : le rendu visuel du graphe
+   (`st.graphviz_chart`, viz.js côté navigateur — aucune dépendance système Graphviz) surligne
+   désormais le nœud actif en direct pendant `app.stream()`, et une version statique du même graphe
+   apparaît dans les expanders « Raisonnement »/« Détail du routage » pour les analyses déjà
+   terminées. Prototypé directement en Streamlit plutôt que d'attendre le futur dashboard (item 8),
+   comme anticipé dans l'ordre de dépendance ci-dessous.
 6. ✅ **Fait (2026-07-21) — Stratégie n8n « Option A »**. [api.py](../aca/api.py) : microservice
    FastAPI exposant le graphe compilé (`POST /threads`, `GET /threads/{id}`,
    `POST /threads/{id}/clarifier`, `POST /threads/{id}/valider`) — même contrat human-in-the-loop
@@ -601,14 +604,27 @@ l'existant (même esprit que l'avertissement n8n Cloud du §11.5).
    requis. Un réglage jamais édité retombe sur `.env` (surcouche, pas un remplacement). **Non
    inclus** : édition de la base de connaissances via grille de données (l'ingestion/staging
    existants restent le chemin d'édition de la FAQ) — hors du périmètre étroit de cet item.
-8. ❌ **Dashboard client dédié** (le document suggère Next.js/Shadcn/Tailwind : login client,
-   timeline d'exécution, boutons HITL, réglages, facturation). ⚠️ Décision de phase commerciale,
-   pas un manque du prototype : Streamlit reste l'UI assumée du stage ; le choix Next.js vs.
-   Streamlit multi-pages durci se prendra au moment du port, pas avant. **Délibérément non
-   construit le 2026-07-21** malgré une demande explicite de « finir tout ce qui reste » : un vrai
-   framework front + une décision d'hébergement ne sont pas des choix qu'un passage de code
-   autonome doit trancher à la place d'une vraie décision produit — contrairement aux items
-   ci-dessus, qui étaient des ajouts de code purs.
+8. ✅ **Fait (2026-07-21, plus tard le même jour) — Dashboard client dédié**. Délibérément non
+   construit plus tôt dans la session (voir ci-dessous) malgré la demande de « finir tout ce qui
+   reste » — les questions de framework/hébergement/authentification/périmètre n'étaient pas des
+   choix qu'un passage de code autonome devait trancher à la place d'une vraie décision produit.
+   Construit ensuite le même jour une fois l'utilisateur explicitement revenu dessus et ces
+   questions posées et tranchées avec lui (Next.js en local pour l'instant, pas de décision
+   d'hébergement ; mot de passe partagé + clé API plutôt qu'une vraie authentification
+   multi-utilisateur ; tourne à côté de Streamlit, ne le remplace pas). Voir
+   [dashboard/README.md](../dashboard/README.md) pour le détail — login animé, vue d'ensemble
+   (roster de l'équipe d'agents + file d'attente + historique), tiroir HITL (Valider/Rejeter/
+   Éditer/répondre à une clarification), Réglages, Facturation/usage. Signature visuelle : un rendu
+   SVG animé de la topologie réelle du `StateGraph` (nœud actif en direct, mêmes données que le
+   graphe Streamlit — §12 item 5 — mais dans un langage visuel propre au dashboard). A nécessité
+   d'étendre `aca/api.py` : garde optionnelle par clé API (`ACA_API_KEY`), `GET /threads/pending`,
+   `GET /threads/history`, `POST /threads/{id}/rejeter` (fonctionnalité réellement nouvelle — aucun
+   chemin de « rejet » n'existait avant, y compris dans `ui.py`), `GET /stats`, `GET`/`POST
+   /settings` — et a révélé un vrai bug de routage FastAPI (routes statiques déclarées après la
+   route dynamique `/threads/{thread_id}`, donc jamais atteintes), corrigé et couvert par les 17
+   tests de `test_api.py`. Ancien texte de cadrage, conservé pour l'historique : « ⚠️ Décision de
+   phase commerciale, pas un manque du prototype : Streamlit reste l'UI assumée du stage ; le choix
+   Next.js vs. Streamlit multi-pages durci se prendra au moment du port, pas avant. »
 9. ✅ **Fait (2026-07-21) — Observabilité (Prometheus)**. `GET /metrics` sur
    [api.py](../aca/api.py) (`prometheus-client`, gratuit, open source) :
    `aca_emails_classified_total{classification, org_id}`, `aca_leads_validated_total{org_id}`,
@@ -618,11 +634,36 @@ l'existant (même esprit que l'avertissement n8n Cloud du §11.5).
    scrape ; LangSmith couvre toujours le besoin d'observabilité au volume prototype actuel.
 
 **Ordre de dépendance suggéré** (si cette phase démarre un jour) : ~~3 (multi-tenant)~~ (fondation
-faite) → ~~7 (config par client)~~ (fait) → ~~4 (usage/billing)~~ (scaffold fait) → 8 (dashboard) →
-2/5 (audit + graphe visuel dans ce dashboard) → ~~6 (port n8n)~~ (fait) → ~~9 (Grafana)~~ (endpoint
-prêt). Restent réellement ouverts : 2 (onglet Historique), 5 (graphe visuel), 8 (dashboard client
-dédié — décision produit délibérément non prise). Les items 2 et 5 peuvent être prototypés en
-Streamlit, à faible coût.
+faite, RLS vérifiée en direct) → ~~7 (config par client)~~ (fait) → ~~4 (usage/billing)~~ (scaffold
+fait) → ~~2 (onglet Historique)~~ (fait) → ~~5 (graphe visuel)~~ (fait, prototypé en Streamlit) →
+~~8 (dashboard)~~ (fait) → ~~6 (port n8n)~~ (fait) → ~~9 (Grafana)~~ (endpoint prêt). **Les 9 items
+de cette section sont maintenant tous faits.**
+
+### 12bis. Positionnement des surfaces après le dashboard (décidé 2026-07-22)
+
+Une fois le dashboard construit, trois surfaces de contrôle coexistaient (Streamlit, dashboard
+Next.js, port n8n) et se chevauchaient. Décision de cadrage, prise avec l'utilisateur, pour éviter
+le « impressionnant mais incohérent » :
+
+- **Le dashboard Next.js est la colonne vertébrale UI à long terme** (le « cockpit » client :
+  file d'attente, graphe d'agents animé, HITL, réglages, usage). Streamlit (`ui.py`) est
+  reclassé en **outil d'administration/curation interne** (ingestion de connaissances, validation
+  FAQ, config back-office avancée). Les deux tournent côte à côte aujourd'hui ; le jour où Streamlit
+  est retiré, ses pièces *client* migrent dans les vues principales du dashboard et ses pièces
+  *curation* dans un futur groupe `(admin)` protégé par rôle — l'intérêt de migrer, c'est cette
+  **séparation** par audience, pas le simple changement de framework.
+- **La boucle d'approbation Slack (Valider/Rejeter directement dans Slack)** a été ajoutée comme la
+  vraie « commodité pour l'entreprise » : un commercial valide un lead depuis le Slack qu'il a déjà
+  ouvert, sans se connecter à aucune UI. Réutilise `aca/api.py` (`POST /slack/interactions`, signé
+  HMAC, cf. `slack_verify.py`) et `notify.send_approval` (boutons Block Kit). Testée hors ligne
+  (requêtes réellement signées), **non vérifiée contre une vraie app Slack** (nécessite une app
+  Slack avec Interactivité activée + une URL publique/tunnel — étape de config manuelle de
+  l'utilisateur, comme l'OAuth Gmail ou le webhook Slack déjà en place).
+- **n8n est repositionné en couche d'intégration OPTIONNELLE, pas une 3e UI** : « si une entreprise
+  fait déjà tourner n8n, elle peut piloter ACA depuis n8n via `aca/api.py` ». Il cesse ainsi de
+  concurrencer le dashboard pour le rôle « vue du workflow ». Reste, comme toujours dans ce projet,
+  **la dernière chose à réellement câbler** (le port API existe déjà et suffit ; aucune instance n8n
+  n'est montée), même s'il restera une fonctionnalité principale offerte à terme.
 
 ## 13. Audit d'un 3e document externe — blueprints « Bid Governance » (2026-07-16)
 
@@ -784,7 +825,7 @@ backlog, pas recopié tel quel.
 |---|---|---|---|---|
 | 14.1 | Clés API jamais exposées côté client | ✅ Déjà acquis (architecture serveur, rien à faire) | — | — |
 | 14.2 | Rate limiting / verrou progressif sur `_check_auth()` (ui.py) | ✅ **Fait (2026-07-21)** — [auth_lockout.py](../aca/core/auth_lockout.py) (backoff exponentiel, 5 tentatives puis verrou 30s→15min), 7 tests | — | — |
-| 14.3 | RLS sur `faq_embeddings` (et toute table future) | ✅ **Fait (2026-07-21)**, avec le multi-tenant `org_id` (§12 item 3) — `ENABLE`+`FORCE ROW LEVEL SECURITY` + politique par variable de session Postgres (pas de PostgREST/anon key ici). Non vérifié en direct contre un vrai Supabase (pas d'accès réseau dans cette session) | — | — |
+| 14.3 | RLS sur `faq_embeddings` (et toute table future) | ✅ **Fait ET vérifié en direct (2026-07-21)**, avec le multi-tenant `org_id` (§12 item 3) — `ENABLE`+`FORCE ROW LEVEL SECURITY` + politique par variable de session Postgres (pas de PostgREST/anon key ici). La vérification en direct a trouvé la protection réellement inopérante (rôle `postgres` = `rolbypassrls=true` par défaut chez Supabase, ce qui rend `FORCE` sans effet) ; corrigé via un rôle applicatif restreint `aca_app`, re-vérifié en direct (bogus tenant/session non positionnée → 0 ligne, tenant réel → 74). Détail complet : `docs/PROJECT_JOURNAL.md` (entrée 2026-07-21, suite) | — | — |
 | 14.4 | Rédiger et publier une politique de confidentialité (RGPD) | ✅ **Fait (2026-07-21)** — [docs/PRIVACY_POLICY.md](PRIVACY_POLICY.md), lié depuis un expander de `ui.py`. Champs raison sociale/contact DPO marqués `[À COMPLÉTER]` (décision propre à l'entreprise utilisatrice, pas devinable par le code) | — | — |
 
 **Ce qui n'a volontairement pas été ajouté** : rien d'autre de cette checklist ne s'applique sans

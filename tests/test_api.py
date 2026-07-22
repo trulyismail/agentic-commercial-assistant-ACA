@@ -4,14 +4,19 @@ test_graph_integration.py (le microservice n'est qu'une façade HTTP sur le grap
 vérifie ici le câblage HTTP lui-même : démarrage d'un thread, clarification dynamique, pause de
 validation, et que la validation reste le seul point d'entrée qui déclenche l'écriture CRM.
 """
+import hashlib
+import hmac
 import json
+import time
 import uuid
+from urllib.parse import quote
 
 from conftest import FakeLLM
 from fastapi.testclient import TestClient
 
 import aca.core.app as app_module
 from aca.api import api
+from aca.core.slack_verify import verify_slack_signature
 
 client = TestClient(api)
 
@@ -139,3 +144,192 @@ def test_metrics_endpoint_exposes_prometheus_format(monkeypatch):
     assert "aca_emails_classified_total" in body
     assert "aca_leads_validated_total" in body
     assert 'classification="DEVIS"' in body
+
+
+# ── Auth (§12 item 8, dashboard) ──────────────────────────────────────────────────────────────
+def test_no_api_key_required_when_unset():
+    """Comportement inchangé (mode développement) tant que ACA_API_KEY n'est pas réglée."""
+    resp = client.get("/threads/pending")
+    assert resp.status_code == 200
+
+
+def test_api_key_required_when_set(monkeypatch):
+    monkeypatch.setenv("ACA_API_KEY", "s3cret")
+    try:
+        assert client.get("/threads/pending").status_code == 401
+        assert client.get("/threads/pending", headers={"X-API-Key": "wrong"}).status_code == 401
+        assert client.get("/threads/pending", headers={"X-API-Key": "s3cret"}).status_code == 200
+    finally:
+        monkeypatch.delenv("ACA_API_KEY", raising=False)
+
+
+def test_metrics_never_requires_api_key(monkeypatch):
+    monkeypatch.setenv("ACA_API_KEY", "s3cret")
+    try:
+        assert client.get("/metrics").status_code == 200
+    finally:
+        monkeypatch.delenv("ACA_API_KEY", raising=False)
+
+
+# ── Nouveaux endpoints de lecture/écriture pour le dashboard (§12 item 8) ────────────────────
+def test_validate_thread_updates_queue_and_audit(monkeypatch):
+    _mock_integrations(monkeypatch)
+    _install_fast_llm(monkeypatch, supervisor_replies=["connaissance", "stratege"])
+    thread_id = f"api-test-{uuid.uuid4()}"
+    client.post("/threads", json={**EMAIL_PAYLOAD, "thread_id": thread_id})
+
+    resp = client.post(f"/threads/{thread_id}/valider", json={"validated_by": "Alice"})
+    assert resp.status_code == 200
+
+    history = client.get("/threads/history").json()
+    assert any(row["thread_id"] == thread_id and row["validated_by"] == "Alice" for row in history)
+
+
+def test_reject_thread_skips_action_and_removes_from_queue(monkeypatch):
+    _mock_integrations(monkeypatch)
+    _install_fast_llm(monkeypatch, supervisor_replies=["connaissance", "stratege"])
+    thread_id = f"api-test-{uuid.uuid4()}"
+    client.post("/threads", json={**EMAIL_PAYLOAD, "thread_id": thread_id})
+
+    resp = client.post(f"/threads/{thread_id}/rejeter")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["rejected"] is True
+    assert body["done"] is False  # jamais résolu vers action_node
+    assert body["action_status"] is None
+
+
+def test_reject_thread_rejects_when_not_awaiting():
+    thread_id = f"api-test-nonexistent-{uuid.uuid4()}"
+    resp = client.post(f"/threads/{thread_id}/rejeter")
+    assert resp.status_code == 400
+
+
+def test_list_pending_threads():
+    resp = client.get("/threads/pending")
+    assert resp.status_code == 200
+    assert isinstance(resp.json(), list)
+
+
+def test_stats_endpoint_shape():
+    resp = client.get("/stats")
+    assert resp.status_code == 200
+    body = resp.json()
+    for key in ("volume_by_category", "daily_volume", "response_times", "funnel_counts", "edit_rate", "token_stats"):
+        assert key in body
+
+
+def test_settings_get_and_post_round_trip(monkeypatch):
+    # Un vrai config_store en mémoire pour ce test (pas le fichier SQLite partagé par toute la
+    # session de tests) : ce module est un registre PROCESS-WIDE (même fichier `ACA_CONFIG_DB`
+    # réutilisé par tous les tests) et un `set_setting` non isolé pollue durablement le tenant
+    # "default" que d'autres tests (ex. test_graph_nodes.py::test_stratege_appends_calendly_for_demo)
+    # supposent vierge — trouvé en faisant tourner la suite complète.
+    store: dict[str, str] = {}
+    from aca import api as api_module
+
+    monkeypatch.setattr(
+        api_module.config_store, "set_setting", lambda key, value, org_id=None: store.__setitem__(key, value)
+    )
+    monkeypatch.setattr(api_module.config_store, "get_all_settings", lambda org_id=None: dict(store))
+
+    resp = client.post("/settings", json={"values": {"CALENDLY_URL": "https://calendly.com/test"}})
+    assert resp.status_code == 200
+    assert resp.json()["values"]["CALENDLY_URL"] == "https://calendly.com/test"
+
+    resp = client.get("/settings")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["values"]["CALENDLY_URL"] == "https://calendly.com/test"
+    assert "CALENDLY_URL" in body["schema"]
+
+
+def test_settings_post_ignores_blank_values(monkeypatch):
+    store: dict[str, str] = {}
+    from aca import api as api_module
+
+    monkeypatch.setattr(
+        api_module.config_store, "set_setting", lambda key, value, org_id=None: store.__setitem__(key, value)
+    )
+    monkeypatch.setattr(api_module.config_store, "get_all_settings", lambda org_id=None: dict(store))
+
+    client.post("/settings", json={"values": {"RELANCE_DAYS": "7"}})
+    resp = client.post("/settings", json={"values": {"RELANCE_DAYS": "  "}})
+    assert resp.json()["values"]["RELANCE_DAYS"] == "7"
+
+
+# ── Boutons Slack Valider/Rejeter (§12 item 8bis — validation depuis Slack) ──────────────────────
+SLACK_SECRET = "slack-signing-secret-for-tests"
+
+
+def _slack_request(action_id, thread_id, user="alice", ts=None, tamper=False):
+    """Construit un corps + en-têtes Slack signés comme Slack le ferait réellement."""
+    payload = {
+        "type": "block_actions",
+        "user": {"username": user, "name": user},
+        "actions": [{"action_id": action_id, "value": thread_id}],
+    }
+    body = "payload=" + quote(json.dumps(payload))
+    ts = ts or str(int(time.time()))
+    sig = "v0=" + hmac.new(SLACK_SECRET.encode(), f"v0:{ts}:{body}".encode(), hashlib.sha256).hexdigest()
+    if tamper:
+        sig = "v0=" + "0" * 64
+    headers = {
+        "X-Slack-Request-Timestamp": ts,
+        "X-Slack-Signature": sig,
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    return body, headers
+
+
+def test_verify_slack_signature_pure():
+    body, headers = _slack_request("aca_approve", "t1")
+    ts, sig = headers["X-Slack-Request-Timestamp"], headers["X-Slack-Signature"]
+    assert verify_slack_signature(SLACK_SECRET, ts, body, sig) is True
+    assert verify_slack_signature(SLACK_SECRET, ts, body, "v0=deadbeef") is False   # mauvaise signature
+    assert verify_slack_signature("", ts, body, sig) is False                        # secret absent
+    assert verify_slack_signature(SLACK_SECRET, "1", body, sig) is False             # timestamp trop ancien
+
+
+def test_slack_interactions_unconfigured_fails_closed(monkeypatch):
+    monkeypatch.delenv("SLACK_SIGNING_SECRET", raising=False)
+    body, headers = _slack_request("aca_approve", "whatever")
+    resp = client.post("/slack/interactions", content=body, headers=headers)
+    assert resp.status_code == 503  # échec fermé : pas de secret = pas de validation possible
+
+
+def test_slack_interactions_rejects_bad_signature(monkeypatch):
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", SLACK_SECRET)
+    body, headers = _slack_request("aca_approve", "whatever", tamper=True)
+    resp = client.post("/slack/interactions", content=body, headers=headers)
+    assert resp.status_code == 401
+
+
+def test_slack_approve_validates_thread(monkeypatch):
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", SLACK_SECRET)
+    _mock_integrations(monkeypatch)
+    _install_fast_llm(monkeypatch, supervisor_replies=["connaissance", "stratege"])
+    thread_id = f"api-test-{uuid.uuid4()}"
+    client.post("/threads", json={**EMAIL_PAYLOAD, "thread_id": thread_id})
+
+    body, headers = _slack_request("aca_approve", thread_id, user="bob")
+    resp = client.post("/slack/interactions", content=body, headers=headers)
+    assert resp.status_code == 200
+    assert "validé par bob" in resp.json()["text"]
+    # Le thread est bien passé par action_node (écriture CRM) → terminé.
+    assert client.get(f"/threads/{thread_id}").json()["done"] is True
+
+
+def test_slack_reject_skips_action(monkeypatch):
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", SLACK_SECRET)
+    _mock_integrations(monkeypatch)
+    _install_fast_llm(monkeypatch, supervisor_replies=["connaissance", "stratege"])
+    thread_id = f"api-test-{uuid.uuid4()}"
+    client.post("/threads", json={**EMAIL_PAYLOAD, "thread_id": thread_id})
+
+    body, headers = _slack_request("aca_reject", thread_id, user="bob")
+    resp = client.post("/slack/interactions", content=body, headers=headers)
+    assert resp.status_code == 200
+    assert "rejeté par bob" in resp.json()["text"]
+    # Jamais résolu vers action_node : action_status reste vide.
+    assert client.get(f"/threads/{thread_id}").json()["action_status"] is None

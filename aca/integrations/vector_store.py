@@ -75,27 +75,47 @@ def _get_pool():
                     "WHERE table_name = 'faq_embeddings'"
                 ).fetchall()
             }
-            if "org_id" not in existing_cols:
+            # Migrations de schéma + policy RLS : opérations réservées au PROPRIÉTAIRE de la table
+            # (§14.3 — depuis le passage au rôle applicatif restreint `aca_app`, sans BYPASSRLS,
+            # DATABASE_URL n'est plus le propriétaire de `faq_embeddings`). Ces étapes sont de
+            # l'administration ponctuelle (exécutée une fois par un rôle admin type `postgres`),
+            # pas quelque chose que chaque process applicatif doit refaire à froid : un rôle
+            # restreint qui ne peut pas les exécuter n'est donc pas une erreur — la policy existe
+            # déjà, c'est justement CE QUI REND la restriction du rôle utile.
+            try:
+                if "org_id" not in existing_cols:
+                    conn.execute(
+                        "ALTER TABLE faq_embeddings ADD COLUMN org_id TEXT NOT NULL DEFAULT 'default'"
+                    )
+                # RLS (§14.3) : ce projet se connecte uniquement via `DATABASE_URL` (psycopg direct,
+                # jamais PostgREST/anon key), donc la politique s'appuie sur une variable de session
+                # (`app.current_org_id`, positionnée par `_scope_to_tenant()` avant chaque requête) et
+                # non sur `auth.uid()`. `DROP POLICY IF EXISTS` + `CREATE POLICY` est idempotent
+                # indépendamment de la version de Postgres (contrairement à un hypothétique
+                # `CREATE POLICY IF NOT EXISTS`, non supporté).
+                conn.execute("ALTER TABLE faq_embeddings ENABLE ROW LEVEL SECURITY")
+                # FORCE, pas seulement ENABLE : sans elle, Postgres exempte le PROPRIÉTAIRE de la
+                # table de ses propres politiques RLS — la protection serait silencieusement
+                # inactive pour une connexion qui se ferait passer pour le propriétaire.
+                conn.execute("ALTER TABLE faq_embeddings FORCE ROW LEVEL SECURITY")
+                conn.execute("DROP POLICY IF EXISTS tenant_isolation ON faq_embeddings")
                 conn.execute(
-                    "ALTER TABLE faq_embeddings ADD COLUMN org_id TEXT NOT NULL DEFAULT 'default'"
+                    "CREATE POLICY tenant_isolation ON faq_embeddings FOR ALL "
+                    "USING (org_id = current_setting('app.current_org_id', true)) "
+                    "WITH CHECK (org_id = current_setting('app.current_org_id', true))"
                 )
-            # RLS (§14.3) : ce projet se connecte uniquement via `DATABASE_URL` (psycopg direct,
-            # jamais PostgREST/anon key), donc la politique s'appuie sur une variable de session
-            # (`app.current_org_id`, positionnée par `_scope_to_tenant()` avant chaque requête) et
-            # non sur `auth.uid()`. `DROP POLICY IF EXISTS` + `CREATE POLICY` est idempotent
-            # indépendamment de la version de Postgres (contrairement à un hypothétique
-            # `CREATE POLICY IF NOT EXISTS`, non supporté).
-            conn.execute("ALTER TABLE faq_embeddings ENABLE ROW LEVEL SECURITY")
-            # FORCE, pas seulement ENABLE : sans elle, Postgres exempte le PROPRIÉTAIRE de la table
-            # (le rôle de connexion habituel via DATABASE_URL) de ses propres politiques RLS — la
-            # protection serait silencieusement inactive pour la connexion applicative normale.
-            conn.execute("ALTER TABLE faq_embeddings FORCE ROW LEVEL SECURITY")
-            conn.execute("DROP POLICY IF EXISTS tenant_isolation ON faq_embeddings")
-            conn.execute(
-                "CREATE POLICY tenant_isolation ON faq_embeddings FOR ALL "
-                "USING (org_id = current_setting('app.current_org_id', true)) "
-                "WITH CHECK (org_id = current_setting('app.current_org_id', true))"
-            )
+            except Exception as e:
+                if "must be owner" in str(e).lower():
+                    # Pas d'accent/emoji ici : un print qui échoue sous cp1252 (console Windows,
+                    # cf. le même bug corrigé dans hubspot.py) romprait précisément la dégradation
+                    # gracieuse que ce bloc est censé fournir.
+                    print(
+                        "[vector_store] Role applicatif restreint (pas proprietaire de "
+                        "faq_embeddings) : migration de schema/policy RLS ignoree, deja en place "
+                        "cote administration."
+                    )
+                else:
+                    raise
     return _pool
 
 
