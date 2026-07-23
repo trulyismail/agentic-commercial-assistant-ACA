@@ -267,7 +267,7 @@ flowchart TB
 | UI | **Streamlit** (Fluent theme) | Validation gate, queue, clarification dialog, editable draft, dashboard — built in days, not weeks |
 | Documents | PyMuPDF · python-docx · openpyxl | Multi-format attachment extraction |
 | Observability | **LangSmith** (free tier) + local analytics SQLite + token logging | Per-node traces; KPIs without paid infra |
-| Testing | **pytest** — 125 offline tests (~5 s) + 50-email labeled eval set | Fake LLMs, temp DBs, full-graph integration tests; classifier measured at 100 % |
+| Testing | **pytest** — 191 offline tests (~4.5 s) + 50-email labeled eval set | Fake LLMs, temp DBs, full-graph integration tests; classifier measured at 100 % |
 
 ### Non-functional requirements (all implemented)
 
@@ -313,13 +313,13 @@ flowchart TB
 | **Query de-contextualization** | RAG queries are built from the extracted need (and resolved against customer history for implicit references), not the raw email — measurably better retrieval |
 | **Classification confidence routing** | Low-confidence classifications alert a human even for normally-silent categories (spam/support) — the riskiest silent failure is eliminated |
 | **Edit-capture corpus** | Every human edit of a draft is recorded as an (original, edited) pair — a free future few-shot/eval dataset |
-| **Full measurement culture** | 125 automated tests, a 50-email labeled eval set (100 % accuracy), token-per-analysis logging, edit rate, response-time funnel |
+| **Full measurement culture** | 191 automated tests, a 50-email labeled eval set (100 % accuracy), token-per-analysis logging, edit rate, response-time funnel |
 | **Critical audit of AI-generated advice** | Three external AI-written architecture documents were audited against the real code; good ideas were adopted, and **two factual errors were caught before being copied in** (a wrong hallucination-gate threshold and a mis-sized vector schema) |
 
 ### Measured results
 
 - Classifier accuracy: **100 %** (50/50) on the labeled eval set (96 % before structured-output migration).
-- Test suite: **125 tests, ~5 s, fully offline**.
+- Test suite: **191 tests, ~4.5 s, fully offline**.
 - Live-verified integrations: Gmail, Google Sheets, Slack, Tavily, HubSpot, Supabase (pgvector +
   cross-process checkpointing), LangSmith, Calendly link injection.
 - Verification caught **real bugs before production**: a retry-swallowing anti-pattern, a
@@ -342,9 +342,11 @@ flowchart TB
 - The prototype is deliberately **product-ready in shape**: n8n-ready module boundaries, a
   documented commercialization backlog (multi-tenant, usage billing, client dashboard), and a
   technical-debt list already mostly paid down (tests, retries, structured outputs).
-- Honest limits: single-tenant today; follow-ups are single-round; dashboard not yet observed over
-  a real multi-day run; free-tier rate limits won't survive commercial traffic (a paid-model
-  switch is budgeted in the SaaS phase).
+- Honest limits: single-tenant today; the multi-round follow-up cadence (up to 3 touches) isn't yet
+  verified against a real Gmail thread with a prospect reply; dashboard built but not yet observed
+  over a real multi-day run, nor deployed; usage billing (Stripe) scaffolded but not live-verified
+  (no test account); free-tier rate limits won't survive commercial traffic (a paid-model switch is
+  budgeted in the SaaS phase).
 
 ### Sustainable Development Goals alignment
 
@@ -558,21 +560,26 @@ Priorities in MoSCoW; estimates in story points (Fibonacci). Statuses reflect th
 
 **Sprint goal:** a production-shaped system: resilient, measured, auditable, background-capable.
 
-### Future backlog — Sprint 5+ (commercialization phase, not started by design)
+### Sprint 5+ backlog — commercialization phase (planned post-internship, **largely delivered ahead of schedule** at the user's request)
 
-| ID | User story | Epic | MoSCoW | Pts |
-|----|-----------|------|--------|-----|
-| US-33 | As a **new customer org**, I want my data isolated (multi-tenant, org_id + Row-Level Security) so that ACA can serve several companies | E8 | Must | 13 |
-| US-34 | As a **manager**, I want a settings panel (Calendly link, routing addresses, thresholds) so that configuration doesn't require a developer | E8 | Must | 8 |
-| US-35 | As the **vendor**, I want usage metering aggregated per organization and billed (Stripe) so that ACA becomes a sustainable SaaS | E8 | Must | 8 |
-| US-36 | As a **client**, I want a dedicated dashboard (login, execution timeline, HITL buttons) so that the product feels professional | E8 | Should | 13 |
-| US-37 | As an **ops engineer**, I want the LangGraph brain exposed as a FastAPI microservice inside self-hosted n8n so that infrastructure (triggers, queues, waits) is visual and standard | E8 | Should | 13 |
-| US-38 | As a **sales rep**, I want multi-round follow-up cadences (stop on reply) so that persistence matches real sales practice (~5+ touches) | E6 | Should | 5 |
-| US-39 | As an **auditor**, I want a searchable "History" tab over past executions so that any past decision can be justified | E6 | Could | 3 |
-| US-40 | As a **developer**, I want attachment extraction moved into an explicit graph `ingestion` node so that the whole pipeline lives in the graph | E1 | Could | 3 |
-| US-41 | As an **admin**, I want the UI password gate to lock out after repeated failed attempts so that it can't be brute-forced by a bot | E9 | Must | 3 |
-| US-42 | As a **prospect / data subject**, I want a published privacy policy describing what's collected and my GDPR rights so that the company isn't in violation before it ever collects real leads | E9 | Must | 3 |
-| US-43 | As a **client organization**, I want Row-Level Security enabled on Supabase tables so that another tenant's data is cloisonné at the database level | E9 (bundled with US-33) | Must | — *(effort folded into US-33's 13 pts — RLS has nothing to enforce without `org_id` first)* |
+*This backlog was scoped as post-internship work. In practice most of it was pulled forward and
+built during the internship at the user's explicit request — the Status column reflects the real
+repository, not the original plan. Only usage billing (US-35) remains partial (scaffolded, no Stripe
+test account to live-verify against).*
+
+| ID | User story | Epic | MoSCoW | Pts | Status |
+|----|-----------|------|--------|-----|--------|
+| US-33 | As a **new customer org**, I want my data isolated (multi-tenant, org_id + Row-Level Security) so that ACA can serve several companies | E8 | Must | 13 | ✅ Foundation — `org_id` across all local stores + pgvector RLS live-verified; tenant onboarding/provisioning still future |
+| US-34 | As a **manager**, I want a settings panel (Calendly link, routing addresses, thresholds) so that configuration doesn't require a developer | E8 | Must | 8 | ✅ Done — `config_store.py` + "Réglages" tab |
+| US-35 | As the **vendor**, I want usage metering aggregated per organization and billed (Stripe) so that ACA becomes a sustainable SaaS | E8 | Must | 8 | 🟡 Scaffolded — `billing.py`; **not** live-verified (no Stripe account) |
+| US-36 | As a **client**, I want a dedicated dashboard (login, execution timeline, HITL buttons) so that the product feels professional | E8 | Should | 13 | ✅ Built — Next.js dashboard; runs locally, not yet deployed |
+| US-37 | As an **ops engineer**, I want the LangGraph brain exposed as a FastAPI microservice inside self-hosted n8n so that infrastructure (triggers, queues, waits) is visual and standard | E8 | Should | 13 | ✅ Done — `aca/api.py`; not yet exercised against a real n8n |
+| US-38 | As a **sales rep**, I want multi-round follow-up cadences (stop on reply) so that persistence matches real sales practice (~5+ touches) | E6 | Should | 5 | ✅ Done — `RELANCE_MAX_ROUNDS` (default 3); not yet verified on a real replied thread |
+| US-39 | As an **auditor**, I want a searchable "History" tab over past executions so that any past decision can be justified | E6 | Could | 3 | ✅ Done — "Historique" tab over `audit_log` |
+| US-40 | As a **developer**, I want attachment extraction moved into an explicit graph `ingestion` node so that the whole pipeline lives in the graph | E1 | Could | 3 | ✅ Done — `ingestion_node` in the graph |
+| US-41 | As an **admin**, I want the UI password gate to lock out after repeated failed attempts so that it can't be brute-forced by a bot | E9 | Must | 3 | ✅ Done — `auth_lockout.py` |
+| US-42 | As a **prospect / data subject**, I want a published privacy policy describing what's collected and my GDPR rights so that the company isn't in violation before it ever collects real leads | E9 | Must | 3 | ✅ Done — `docs/PRIVACY_POLICY.md` |
+| US-43 | As a **client organization**, I want Row-Level Security enabled on Supabase tables so that another tenant's data is cloisonné at the database level | E9 (bundled with US-33) | Must | — | ✅ Done — live-verified 2026-07-21 (folded into US-33's 13 pts) |
 
 > **Security audit note (2026-07-21):** a generic "5 AI security mistakes" checklist was checked
 > against this codebase before adding anything above. Two items from that checklist were **already
@@ -596,7 +603,7 @@ Priorities in MoSCoW; estimates in story points (Fibonacci). Statuses reflect th
 | S2 | 21 | 21 ✅ | HITL loop complete |
 | S3 | 27 | 27 ✅ | Knowledge + real Gmail |
 | S4 | 89 | 89 ✅ | Multi-agent + full hardening (largest sprint — many small verified items) |
-| S5+ | 72 | — | Deliberately deferred: starts only after the internship deliverable (includes 6 pts of security/compliance hardening added 2026-07-21, US-41/US-42) |
+| S5+ | 72 | ~64 ✅ | Planned post-internship but mostly pulled forward at the user's request (multi-tenant foundation, dashboard, API/n8n port, settings, follow-up cadence, History, security US-41/42/43). Only US-35 (Stripe billing, 8 pts) left partial — scaffolded, no test account to verify against |
 
 ---
 
