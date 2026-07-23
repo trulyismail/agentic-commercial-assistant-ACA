@@ -1010,3 +1010,69 @@ signature, secret absent, horodatage trop ancien), endpoint non configuré → 5
 Slack le ferait. Suite complète : **175 tests, hors ligne, ~4 s**. Non vérifié contre une vraie app
 Slack (nécessite une app Slack avec Interactivité + une URL publique/tunnel — étape manuelle de
 l'utilisateur, comme l'OAuth Gmail l'a été) ni contre une vraie instance n8n.
+
+---
+
+## 2026-07-22 (suite) — Durcissement sécurité : injection de formule, limitation de débit, comparaisons à temps constant
+
+### Le point de départ
+
+En préparant la présentation, on s'est posé la question « est-ce que la partie sécurité est
+complète pour un vrai usage en entreprise ? ». Un audit honnête a séparé les problèmes en **deux
+paquets** : ceux qui se corrigent proprement tout de suite, et ceux qui sont de vraies décisions
+d'architecture (une phase ultérieure). On a corrigé les premiers et **documenté honnêtement** les
+seconds, sans faire semblant — un système d'authentification à moitié construit qui *a l'air* vrai
+mais ne l'est pas serait un risque, pas une sécurité.
+
+### Ce qui a été corrigé (dans le code, avec tests)
+
+**1. Injection de formule dans Google Sheets (CSV/Sheets injection).** C'est le bug le plus concret.
+Une donnée venant d'un e-mail entrant (nom, besoin, brouillon, réponse web de la veille) est du texte
+**non fiable**. Si elle commence par `=`, `+`, `-`, `@`, Google Sheets l'interprète comme une
+**formule** quand un humain ouvre la feuille — par exemple `=IMPORTXML(...)` peut exfiltrer discrètement
+des données de la feuille, `=HYPERLINK(...)` piéger un clic. C'est une attaque classique contre
+exactement notre flux (e-mail non fiable → tableur). Corrigé par une fonction pure `_escape_formula`
+qui préfixe une apostrophe (Sheets traite alors la cellule comme du texte ; l'apostrophe reste
+invisible à l'affichage, « -5 » reste affiché « -5 »), appliquée aux seuls champs d'origine non fiable
+— jamais à la date ni à la catégorie, qui viennent de notre propre code. Couvert par 12 tests.
+
+**2. Limitation de débit (rate limiting) sur l'API.** La clé API empêchait l'accès *non authentifié*,
+mais pas l'*abus* par un client (rafales, brute-force du mot de passe, déni de service). Ajout d'une
+fenêtre glissante en mémoire par client (clé API si présente, sinon IP source) sur toutes les routes
+sauf `/metrics`, en middleware ASGI : au-delà de `ACA_RATE_LIMIT` requêtes par `ACA_RATE_WINDOW_SECONDS`
+(défaut 60 s), la réponse est un HTTP 429 + en-tête `Retry-After`. Même contrat gracieux que le reste
+du projet : variable absente = désactivé, comportement historique inchangé (usage local/n8n et tests).
+Lu dynamiquement à chaque requête (jamais gelé à l'import — la leçon déjà apprise avec `DATABASE_URL`).
+Couvert par 4 tests (désactivé par défaut, blocage au seuil, `/metrics` exempté, quotas séparés par
+client).
+
+**3. Comparaisons à temps constant sur les secrets.** Le gate mot de passe de Streamlit faisait
+`pwd == required` et la vérification du cookie de session du dashboard faisait `token === attendu`. Un
+`==`/`===` sur un secret **court-circuite au premier caractère différent** : le temps de réponse fuit
+alors la longueur du préfixe correct, permettant de deviner le secret octet par octet (attaque par
+timing). Corrigé côté Python avec `hmac.compare_digest`, et côté dashboard avec une comparaison hex à
+temps constant en JS pur (`timingSafeEqualHex`, pour rester valide sur le runtime edge du middleware,
+sans dépendre de `crypto.timingSafeEqual` de Node).
+
+### Ce qui est resté volontairement non fait (phases ultérieures, dit clairement)
+
+- **Identité par utilisateur (comptes/SSO).** Aujourd'hui : mots de passe partagés + champ « Validé
+  par » en texte libre. La traçabilité est donc sur l'honneur — dit tel quel. Un vrai système
+  d'identité est une fonctionnalité à part entière (territoire US-33), pas un correctif.
+- **Isolation renforcée au niveau base pour les 5 stores SQLite locaux.** Le modèle réel est « un
+  déploiement = un tenant » ; le filtrage `org_id` applicatif y suffit (contrairement à la table
+  pgvector partagée, elle protégée par la RLS Postgres, déjà vérifiée en direct le 2026-07-21).
+- **Backend de rate limiting multi-process (Redis).** La fenêtre en mémoire est exacte à l'échelle
+  mono-process d'un prototype ; un déploiement multi-worker demanderait un store partagé.
+
+### Comment on sait que ça marche
+
+**191 tests, hors ligne, ~4,5 s** (contre 175 avant : +16 tests sécurité). Une nouvelle annexe
+« Security posture » a aussi été ajoutée au document de présentation (`docs/ACA_presentation_source.md`,
+Annexe C) : un tableau des contrôles en place, la mitigation architecturale de l'injection de prompt
+(le gate humain + le scanner de risques déterministe font que le pire cas est un brouillon trompeur
+qu'un humain rejette, jamais une action autonome nuisible), et la liste honnête des trois éléments
+reportés. Le message clé : la sécurité ici n'est pas « verrouillé comme une banque » mais « chaque
+surface que touche une entrée non fiable est soit échappée, soit signée, soit limitée en débit, soit
+derrière un humain — et les trois choses non faites sont reportées exprès, avec leur état intermédiaire
+dit franchement ».

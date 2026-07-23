@@ -39,6 +39,26 @@ EMBEDDING_MODEL = "gemini-embedding-001"
 # pour éviter un appel Gemini par ligne à chaque e-mail traité.
 _faq_embedding_cache = {"signature": None, "pairs": [], "vectors": []}
 
+# --- Sécurité : neutralisation de l'injection de formule (CSV / Google Sheets injection) ---
+# Une valeur issue d'un e-mail entrant (nom, besoin, brouillon, contenu web de la veille…) est du
+# texte NON fiable. Si elle commence par =, +, -, @ (ou une tabulation / un retour chariot), Google
+# Sheets l'interprète comme une FORMULE à l'ouverture par un humain — p.ex. `=IMPORTXML(url;...)`
+# exfiltre discrètement des données de la feuille, `=HYPERLINK(...)` piège un clic. On préfixe donc
+# tout déclencheur de formule d'une apostrophe, qui force Sheets à traiter la cellule comme du texte
+# (l'apostrophe elle-même reste invisible à l'affichage : "-5" reste affiché "-5"). Appliqué
+# UNIQUEMENT aux champs d'origine non fiable, jamais aux valeurs générées par le système (date,
+# catégorie — un `Literal` de notre propre code).
+_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _escape_formula(value) -> str:
+    """Préfixe une apostrophe si `value` commence par un déclencheur de formule Sheets/CSV."""
+    text = "" if value is None else str(value)
+    if text and text[0] in _FORMULA_TRIGGERS:
+        return "'" + text
+    return text
+
+
 def get_sheet():
     """
     Se connecte à l'API Google Sheets en utilisant le compte de service
@@ -343,7 +363,9 @@ def write_knowledge_rows(pairs: list, mode: str = "append", statut: str = "valid
         return 0
 
     try:
-        rows = [[q, r, statut] for q, r in clean]
+        # q/r peuvent provenir de la veille web (non fiable) → échappement anti-formule ; `statut`
+        # est une constante de notre code.
+        rows = [[_escape_formula(q), _escape_formula(r), statut] for q, r in clean]
         if mode == "replace":
             ws.clear()
             ws.update(range_name="A1", values=[["Question", "Réponse", "Statut"], *rows])
@@ -473,7 +495,13 @@ def cache_profile(domain: str, profile: str) -> None:
     if ws is None:
         return
     try:
-        ws.append_row([domain.strip().lower(), profile, datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+        # `profile` provient de Tavily/LLM (non fiable) → échappement anti-formule ; le domaine est
+        # normalisé (minuscules) mais échappé aussi par prudence (un `-` en tête suffirait).
+        ws.append_row([
+            _escape_formula(domain.strip().lower()),
+            _escape_formula(profile),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        ])
     except Exception as e:
         print(f"⚠️ Écriture du cache d'enrichissement échouée : {e}")
 
@@ -514,15 +542,17 @@ def append_lead(email_classification: str, extracted_info: dict, sender: str, dr
     urgence = extracted_info.get("urgence", "N/A")
     besoin = extracted_info.get("besoin_principal", "N/A")
     
+    # Champs d'origine non fiable (expéditeur + tout ce qui vient de l'e-mail / du LLM) échappés
+    # contre l'injection de formule ; Date et Catégorie sont générées par notre code (sûres).
     row_data = [
-        date_str,             # A: Date
-        sender,               # B: Expéditeur
-        entreprise,           # C: Entreprise
-        contact,              # D: Contact
-        urgence,              # E: Urgence
-        besoin,               # F: Besoin
-        email_classification, # G: Catégorie
-        draft                 # H: Brouillon
+        date_str,                        # A: Date (système)
+        _escape_formula(sender),         # B: Expéditeur
+        _escape_formula(entreprise),     # C: Entreprise
+        _escape_formula(contact),        # D: Contact
+        _escape_formula(urgence),        # E: Urgence
+        _escape_formula(besoin),         # F: Besoin
+        email_classification,            # G: Catégorie (Literal de notre code)
+        _escape_formula(draft),          # H: Brouillon
     ]
     
     print(f"\n📊 [Sheets] Ajout d'une ligne pour {sender} ({entreprise})...")

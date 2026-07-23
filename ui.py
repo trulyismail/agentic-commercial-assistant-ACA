@@ -1,3 +1,4 @@
+import hmac
 import os
 import time
 import uuid
@@ -46,7 +47,8 @@ def _check_auth() -> bool:
 
     pwd = st.text_input("Mot de passe", type="password")
     if st.button("Se connecter", type="primary"):
-        if pwd == required:
+        # Comparaison à temps constant : un `==` sur un secret fuit sa longueur/préfixe par timing.
+        if hmac.compare_digest(pwd.encode(), required.encode()):
             st.session_state.authed = True
             st.session_state.auth_failed_attempts = 0
             st.rerun()

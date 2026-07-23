@@ -600,6 +600,48 @@ Priorities in MoSCoW; estimates in story points (Fibonacci). Statuses reflect th
 
 ---
 
+## Appendix C — Security posture & hardening
+
+*Prepared for the "how secure is it?" question. The honest one-line answer: **security by
+architecture** — the worst case is a bad draft a human rejects, never an autonomous harmful action —
+plus concrete hardening of the surfaces that untrusted input actually reaches.*
+
+### Controls in place (verified)
+
+| Surface | Control | Note |
+|---|---|---|
+| CRM write | **Human validation gate** (`interrupt_before=["action"]`) | Nothing reaches Sheets/HubSpot/Gmail-send without a human click — the core promise, and the root security guarantee |
+| Slack approval endpoint | **HMAC-SHA256 signature**, constant-time compare, anti-replay, **fails closed** if `SLACK_SIGNING_SECRET` unset | The only place a click writes to CRM without the API key — and the best-guarded one ([slack_verify.py](../aca/core/slack_verify.py)) |
+| FastAPI (all routes) | Optional **`ACA_API_KEY`** gate + **rate limiting** (`ACA_RATE_LIMIT`, per-client sliding window, HTTP 429) | Blocks both unauthenticated access *and* abuse/brute-force by a client |
+| Streamlit / dashboard login | Password gate + **progressive lockout** (US-41) + **constant-time** secret comparison | Timing side-channel on the password/session token closed (`hmac.compare_digest` / pure-JS `timingSafeEqualHex`) |
+| Spreadsheet writes | **Formula-injection escaping** on every untrusted field (sender, need, draft, web-sourced FAQ) | A lead arriving as `=IMPORTXML(...)` can no longer execute when a human opens the sheet ([sheets.py](../aca/integrations/sheets.py) `_escape_formula`) |
+| Multi-tenant DB | **Row-Level Security** on `faq_embeddings` via a non-`BYPASSRLS` `aca_app` role | Live-verified: a bogus tenant sees 0 of 74 rows |
+| Data at rest | Secrets in gitignored `.env`/`credentials/`, read server-side via `os.getenv`, never in a client bundle | The §14 audit correctly dismissed "exposed keys" as a non-issue (no JS frontend to leak from) |
+| Personal data | GDPR retention sweep (`retention.py`) + published privacy policy (US-42) + per-validation audit log | |
+
+### Prompt injection (untrusted email → LLM)
+
+Every incoming email is attacker-controlled text fed to the classifier/extractor/stratège. The
+defense is **architectural, not a filter**: (1) the human-in-the-loop gate means a manipulated draft
+still hits a human before any CRM write or send; (2) the contractual **risk scan is deterministic
+RegEx**, not an LLM, so it can't be "talked out of" flagging a clause. Residual risk = a *misleading
+draft*, which the validation gate catches. This is a mitigation worth stating proudly, not a gap to hide.
+
+### Deliberately deferred (phase-gaps, not quick fixes — named honestly)
+
+| Item | Why deferred | Interim state |
+|---|---|---|
+| **Real per-user identity** (SSO/accounts) | A half-built auth system that *looks* real but isn't is a liability; real identity is a genuine feature (US-33 territory) | Shared-password gates + free-text "Validé par" — accountability is honor-system today, and said so |
+| **DB-enforced isolation on the 5 local SQLite stores** | Real model is one-deployment-per-tenant; app-level `org_id` scoping is sufficient there (unlike the shared pgvector table, which *is* RLS-enforced) | Application-level `org_id` filter on every query |
+| **Multi-process rate-limit backend** (Redis) | In-memory sliding window is exact at single-process prototype scale | Correct for one uvicorn worker; needs a shared store before horizontal scaling |
+
+> **Key talking points:** the security story is not "it's locked down like a bank" — it's *"every
+> surface untrusted input touches is either escaped, signed, rate-limited, or gated behind a human,
+> and the three things that aren't done are deferred on purpose, with the interim state stated
+> plainly."* That honesty is itself the security-maturity signal.
+
+---
+
 *End of presentation source document. To export as PDF: open this file in VS Code with a
 Markdown-PDF extension, or `pandoc docs/ACA_presentation_source.md -o ACA_presentation.pdf`
 (mermaid/plantuml blocks render best via the PlantUML server or the VS Code Mermaid preview).*

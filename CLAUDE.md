@@ -602,7 +602,11 @@ requires turning on Interactivity in the Slack app and pointing its Request URL 
 `/slack/interactions`, which needs the API reachable — a public host or a tunnel like ngrok in
 local dev), `ACA_API_KEY` (optional shared key gating every `aca/api.py` route except `/metrics`
 and `/slack/interactions`; absent = no gate, dev mode — must match the dashboard's server-side
-`ACA_API_KEY`), `ACA_UI_PASSWORD` (optional password gate for [ui.py](ui.py); absent = no gate), `ACA_ANALYTICS_DB`
+`ACA_API_KEY`), optionally `ACA_RATE_LIMIT` (per-client rate limit on every `aca/api.py` route
+except `/metrics` — a sliding window keyed by `X-API-Key` or source IP; absent/≤0 = disabled, dev
+mode, same graceful contract; over-limit ⇒ HTTP 429 + `Retry-After`) with `ACA_RATE_WINDOW_SECONDS`
+(default `60`) — both read dynamically per request, not frozen at import; in-memory (single-process,
+exact at prototype scale — a multi-worker deploy would need a shared Redis backend), `ACA_UI_PASSWORD` (optional password gate for [ui.py](ui.py); absent = no gate), `ACA_ANALYTICS_DB`
 (default `data/analytics.sqlite`, dashboard event log), `ACA_AUDIT_DB`
 (default `data/audit.sqlite`), `RETENTION_DAYS` for [retention.py](aca/core/retention.py) (default `365`),
 `ACA_FOLLOWUP_DB` (default `data/followup.sqlite`) / `RELANCE_DAYS` (default `4`) for

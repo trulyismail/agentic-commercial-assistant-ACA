@@ -333,3 +333,51 @@ def test_slack_reject_skips_action(monkeypatch):
     assert "rejeté par bob" in resp.json()["text"]
     # Jamais résolu vers action_node : action_status reste vide.
     assert client.get(f"/threads/{thread_id}").json()["action_status"] is None
+
+
+# ── Limitation de débit (rate limiting, durcissement sécurité) ────────────────────────────────
+def _clear_rate_buckets():
+    from aca import api as api_module
+    with api_module._rate_lock:
+        api_module._rate_buckets.clear()
+
+
+def test_rate_limit_disabled_by_default(monkeypatch):
+    # ACA_RATE_LIMIT absente → aucune limite (contrat gracieux, comportement historique inchangé).
+    monkeypatch.delenv("ACA_RATE_LIMIT", raising=False)
+    _clear_rate_buckets()
+    for _ in range(12):
+        assert client.get("/threads/pending").status_code == 200
+
+
+def test_rate_limit_blocks_after_threshold(monkeypatch):
+    monkeypatch.setenv("ACA_RATE_LIMIT", "3")
+    monkeypatch.setenv("ACA_RATE_WINDOW_SECONDS", "60")
+    _clear_rate_buckets()
+    for _ in range(3):
+        assert client.get("/threads/pending").status_code == 200
+    blocked = client.get("/threads/pending")
+    assert blocked.status_code == 429
+    assert "retry-after" in {k.lower() for k in blocked.headers}
+    _clear_rate_buckets()
+
+
+def test_rate_limit_exempts_metrics(monkeypatch):
+    # /metrics reste scrapable même sous une limite de 1 (Prometheus n'est pas un vecteur d'abus).
+    monkeypatch.setenv("ACA_RATE_LIMIT", "1")
+    _clear_rate_buckets()
+    for _ in range(5):
+        assert client.get("/metrics").status_code == 200
+    _clear_rate_buckets()
+
+
+def test_rate_limit_scopes_per_client(monkeypatch):
+    # Chaque clé API a son propre quota : un client bruyant n'affame pas les autres.
+    monkeypatch.setenv("ACA_RATE_LIMIT", "2")
+    _clear_rate_buckets()
+    h1, h2 = {"X-API-Key": "client-1"}, {"X-API-Key": "client-2"}
+    assert client.get("/threads/pending", headers=h1).status_code == 200
+    assert client.get("/threads/pending", headers=h1).status_code == 200
+    assert client.get("/threads/pending", headers=h1).status_code == 429  # client-1 épuisé
+    assert client.get("/threads/pending", headers=h2).status_code == 200  # client-2 intact
+    _clear_rate_buckets()

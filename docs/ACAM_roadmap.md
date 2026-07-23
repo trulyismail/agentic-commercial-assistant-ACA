@@ -835,3 +835,89 @@ applicable ». Point de vigilance méthodologique (même qu'aux §12/§13) : une
 l'architecture effective (ici : Streamlit n'est pas un frontend JS, et Postgres n'est jamais
 exposé via PostgREST/anon key) — l'auditer contre le code évite d'ajouter une tâche qui ne
 protégerait contre rien, ou d'en manquer une vraie.
+
+---
+
+## 15. Checklist « production-ready » complète — durcissement final avant déploiement commercial (demandée 2026-07-23)
+
+Source : une checklist de mise en production fournie par l'utilisateur (sécurité, tests, résilience,
+conformité). **Décision de séquencement explicite de l'utilisateur : cette phase est la DERNIÈRE.**
+Elle ne démarre qu'**après** la dette technique cœur (§11.6) *et* les items de commercialisation
+retenus (§12). Rien ici n'est implémenté à ce stade — c'est le plan.
+
+⚠️ **Statuts = auto-audit de premier passage (2026-07-23), à re-vérifier contre le code au moment de
+l'implémentation** (comme demandé : « you can check all these after you finish what's in the plan
+first »). Légende : ✅ acquis · 🟡 partiel (base présente, à compléter/durcir) · ❌ à faire.
+Beaucoup de ✅ ci-dessous ne sont pas de nouvelles tâches — ils recensent ce qui existe déjà, pour
+que la checklist soit honnête et qu'on ne « re-fasse » pas l'existant.
+
+### 15.1 Accès, authentification & injection
+
+| # | Item | Statut | Note (état réel / reste à faire) |
+|---|---|---|---|
+| 15.1.1 | Clés API & secrets côté serveur uniquement | ✅ | `os.getenv()` partout, aucun secret dans un bundle client (cf. §14.1) |
+| 15.1.2 | `.env` jamais commité | ✅ | gitignoré, vérifié §14 ; idem `credentials/` |
+| 15.1.3 | Rate limiting & prévention d'abus | ✅ | `ACA_RATE_LIMIT` (middleware fenêtre glissante, 429+Retry-After, 2026-07-22) + verrou progressif du gate UI (US-41) |
+| 15.1.4 | Validation & sanitisation des entrées, prévention d'injection | 🟡 | Sortie structurée Pydantic (pas de parse JSON manuel) ; échappement anti-formule Sheets (2026-07-22). **Reste** : validation stricte des payloads API au-delà du typage Pydantic, et pas de filtre d'injection de prompt (mitigé *architecturalement* par le gate humain — cf. Annexe C présentation) |
+| 15.1.5 | Authentification sur les routes protégées | 🟡 | `ACA_API_KEY` sur toutes les routes API (sauf `/metrics`+`/slack`) ; Slack HMAC fail-closed ; cookie session dashboard. **Reste** : la garde est *optionnelle* (absente = ouverte) et à *secret partagé*, pas une vraie auth |
+| 15.1.6 | Autorisation, rôles & permissions | ❌ | Aucun rôle en dur : mot de passe partagé unique. La séparation client/admin (§12bis) est *conçue* mais pas *appliquée*. Prérequis : identité par utilisateur (territoire US-33/§12 item 3) |
+| 15.1.7 | Gestion de session & expiration des tokens | 🟡 | Cookie HMAC dashboard existe ; **à vérifier/ajouter** : TTL/expiration explicite + invalidation, throttle déjà présent côté UI (US-41) |
+| 15.1.8 | Gestion des secrets (coffre, rotation) | 🟡 | `.env` serveur ; **reste** : coffre (Vault/Doppler/Secrets Manager) + rotation, pertinent seulement en phase hébergée |
+| 15.1.9 | HTTPS / TLS & rotation de certificats | ❌ | Rien d'hébergé aujourd'hui → concern de déploiement (reverse-proxy/Caddy/hébergeur gère TLS + renouvellement auto). À câbler au moment du 1er déploiement public |
+
+### 15.2 Données, multi-tenant & conformité
+
+| # | Item | Statut | Note |
+|---|---|---|---|
+| 15.2.1 | RLS sur *chaque* table | 🟡 | `faq_embeddings` : RLS Postgres vérifiée en direct (§14.3). Tables checkpoint LangGraph : politique permissive volontaire (isolation par `thread_id` interne). 5 stores SQLite locaux : cloisonnement `org_id` *applicatif*, pas au niveau base. **Reste** : décider si les stores locaux passent à un backend supportant la RLS en multi-client réel |
+| 15.2.2 | Aucune table laissée totalement publique | 🟡 | **À vérifier** : balayage final Supabase confirmant que toute table `public` a au moins une politique (les tables checkpoint ont reçu une politique permissive manuelle) — 0 table sans politique |
+| 15.2.3 | Multi-tenant & isolation des données | 🟡 | Fondation `org_id` (5 stores + pgvector) posée (§12 item 3). **Reste** : onboarding/provisioning tenant, aujourd'hui « 1 déploiement = 1 tenant » |
+| 15.2.4 | Gestion des données personnelles (PII) | 🟡 | Purge `retention.py` + politique de confidentialité. **Reste** : minimisation/chiffrement au niveau champ si exigé (PII dans checkpoints/Sheets) |
+| 15.2.5 | Politique de rétention & suppression | ✅ | `retention.py` (RETENTION_DAYS, purge Leads+checkpoints+queue) + [PRIVACY_POLICY.md](PRIVACY_POLICY.md) (§14.4) |
+| 15.2.6 | Conformité réglementaire (RGPD) | 🟡 | Forme RGPD : rétention, politique, audit. **Reste** : champs `[À COMPLÉTER]` (responsable de traitement), DPA client, DPIA formelle si volume réel |
+| 15.2.7 | Journaux d'audit & logs infalsifiables (tamper-evident) | 🟡 | `audit_log.py` enregistre chaque validation (qui/quoi/quand). **Reste** : garantie d'inviolabilité (chaînage de hash / append-only) — aujourd'hui une simple table SQLite modifiable |
+
+### 15.3 Observabilité & robustesse d'exécution
+
+| # | Item | Statut | Note |
+|---|---|---|---|
+| 15.3.1 | Logging | 🟡 | `print` + `analytics_store` + `audit_log` + tracing LangSmith. **Reste** : logging structuré/centralisé (niveaux, JSON, corrélation par `thread_id`) |
+| 15.3.2 | Messages d'erreur ne fuitant pas de stack trace à l'utilisateur | 🟡 | **À vérifier** : confirmer que FastAPI tourne sans `debug=True` en prod (500 générique, pas de trace) et que l'UI n'affiche pas d'exception brute ; la dégradation gracieuse en absorbe déjà beaucoup |
+| 15.3.3 | Endpoints admin/debug coupés ou verrouillés | 🟡 | **À vérifier/durcir** : pas d'endpoint debug custom ; mais le Swagger `/docs` + `/openapi.json` de FastAPI et `/metrics` sont exposés par défaut — à protéger/désactiver en prod |
+| 15.3.4 | Gestion d'erreurs | ✅ | Dégradation gracieuse partout (chaque service optionnel absent = feature ignorée, jamais un crash) |
+| 15.3.5 | Dégradation gracieuse | ✅ | Motif cœur du projet (notify/enrichment/veille/hubspot/billing…) |
+| 15.3.6 | Retry avec back-off & idempotence | ✅ | `RETRY_POLICY` (3 essais, +429) sur chaque nœud à appel externe ; `sqlite_retry` hors graphe ; idempotence poller (`en_cours` avant `invoke`) |
+| 15.3.7 | Circuit breakers & comportement de repli | 🟡 | Replis présents (Gemini→mots-clés, Tavily→"", Postgres→SQLite/mémoire). **Reste** : vrai disjoncteur (ouverture après N échecs pour cesser d'appeler un service mort) — non nécessaire au volume actuel |
+| 15.3.8 | Scan de dépendances & patch de vulnérabilités | ❌ | `requirements.txt` épinglé, mais aucun `pip-audit`/Dependabot/Snyk. **À ajouter** : scan CI + politique de mise à jour |
+
+### 15.4 Tests & qualité
+
+| # | Item | Statut | Note |
+|---|---|---|---|
+| 15.4.1 | Tests unitaires | ✅ | 191 tests hors ligne (~4,5 s) |
+| 15.4.2 | Tests d'intégration | ✅ | Tests graphe complet (`test_graph_integration.py`, `test_api.py` via TestClient) |
+| 15.4.3 | Tests end-to-end | 🟡 | Intégrations vérifiées *manuellement* en direct (Gmail/Sheets/Slack/Tavily/HubSpot/Supabase). **Reste** : E2E navigateur automatisé (UI Streamlit + dashboard) |
+| 15.4.4 | Tests de régression | ✅ | La suite hors ligne + le jeu d'éval 50 e-mails jouent ce rôle |
+| 15.4.5 | Tests de charge & stress | ❌ | Aucun. À ajouter (locust/k6) avant volume commercial — les quotas gratuits Groq/Gemini seront la 1re limite |
+| 15.4.6 | Chaos engineering & tests de résilience | 🟡 | `RETRY_POLICY` vérifiée avec un 429 simulé ; pas d'injection de fautes systématique |
+| 15.4.7 | Couverture, seuils & CI gates | ❌ | Pas de pipeline CI, pas de seuil de couverture bloquant. **À ajouter** : GitHub Actions (pytest + couverture + `pip-audit`) sur chaque push |
+| 15.4.8 | Processus de revue de code & standards | ❌ | Projet solo, pas de revue par PR. À formaliser si l'équipe grandit (CODEOWNERS, PR obligatoire, linter en CI) |
+
+### 15.5 Séquencement & priorisation
+
+Ordre d'attaque proposé quand cette phase démarrera (après §11.6 et §12), du plus au moins
+bloquant pour un vrai déploiement multi-client :
+
+1. **Bloc « exposition publique »** (indispensable dès le 1er hébergement) : 15.1.9 HTTPS/TLS,
+   15.3.2 pas de stack trace, 15.3.3 verrouiller `/docs`+`/metrics`, rendre 15.1.5 l'auth API
+   *obligatoire* (pas optionnelle) en prod.
+2. **Bloc « multi-client »** (dépend du multi-tenant §12) : 15.1.6 rôles/permissions, 15.1.7
+   expiration de session, 15.2.1/15.2.2/15.2.3 RLS complète + isolation, 15.2.7 audit infalsifiable.
+3. **Bloc « exploitation »** : 15.3.1 logging structuré, 15.1.8 coffre de secrets, 15.3.7 disjoncteurs,
+   15.3.8 scan de dépendances.
+4. **Bloc « qualité industrielle »** : 15.4.7 CI + couverture, 15.4.5 charge, 15.4.3 E2E, 15.4.8 revue.
+
+**Déjà acquis avant même de démarrer cette phase** (à ne pas re-faire) : 15.1.1/15.1.2/15.1.3,
+15.2.5, 15.3.4/15.3.5/15.3.6, 15.4.1/15.4.2/15.4.4. Autrement dit, une partie notable d'une
+checklist « production-ready » standard est déjà couverte par l'architecture défensive existante —
+le reste est un travail de durcissement ciblé, pas une reconstruction.

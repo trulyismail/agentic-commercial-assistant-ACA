@@ -7,6 +7,7 @@ import pytest
 
 from aca.integrations.sheets import (
     _cosine_similarity,
+    _escape_formula,
     _keyword_candidates,
     _row_qr,
     _rrf_fuse,
@@ -96,3 +97,35 @@ def test_cosine_orthogonal_vectors():
 
 def test_cosine_zero_vector_is_safe():
     assert _cosine_similarity([0.0, 0.0], [1.0, 1.0]) == 0.0
+
+
+# ── _escape_formula (anti-injection de formule CSV / Sheets) ──────────────────────────────────
+@pytest.mark.parametrize("payload", [
+    "=IMPORTXML(\"http://evil\",\"//x\")",
+    "+cmd|'/c calc'!A1",
+    "-2+3",
+    "@SUM(A1:A9)",
+    "\t=1",
+    "\r=1",
+])
+def test_escape_formula_neutralizes_triggers(payload):
+    escaped = _escape_formula(payload)
+    assert escaped.startswith("'"), "un déclencheur de formule doit être préfixé d'une apostrophe"
+    assert escaped == "'" + payload
+
+
+@pytest.mark.parametrize("safe", [
+    "Doctolib SAS",
+    "besoin d'une démo la semaine prochaine",
+    "contact@example.com n'est PAS un déclencheur (le @ n'est pas en tête)",
+    "99.9% de SLA",
+    "",
+])
+def test_escape_formula_leaves_safe_text_untouched(safe):
+    assert _escape_formula(safe) == safe
+
+
+def test_escape_formula_handles_non_string():
+    # append_lead peut recevoir un None / un nombre via extracted_info.get(...) — pas d'exception.
+    assert _escape_formula(None) == ""
+    assert _escape_formula(42) == "42"

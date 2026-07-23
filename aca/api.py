@@ -23,11 +23,15 @@ Grafana) sans imposer d'infrastructure supplémentaire tant que personne ne le s
 """
 import json
 import os
+import threading
+import time
 import uuid
+from collections import defaultdict, deque
 from typing import Optional
 from urllib.parse import parse_qs
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from langchain_core.callbacks import UsageMetadataCallbackHandler
 from langgraph.types import Command
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
@@ -58,6 +62,54 @@ def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
     required = os.getenv("ACA_API_KEY")
     if required and x_api_key != required:
         raise HTTPException(401, "Clé API manquante ou invalide (en-tête X-API-Key).")
+
+
+# ── Limitation de débit (rate limiting) ───────────────────────────────────────────────────────
+# `require_api_key` empêche l'accès NON authentifié, mais pas l'abus par un client authentifié (ou
+# non, si la garde est en mode dev) : rafales de requêtes, brute-force du gate, déni de service. On
+# ajoute une fenêtre glissante en mémoire par client (clé API si présente, sinon IP source). Même
+# contrat gracieux que le reste du projet : `ACA_RATE_LIMIT` absente ou ≤ 0 = désactivé (défaut —
+# usage local/n8n et suite de tests inchangés) ; réglée à N = au plus N requêtes par
+# `ACA_RATE_WINDOW_SECONDS` (défaut 60 s), au-delà → HTTP 429 + en-tête `Retry-After`. Les deux
+# variables sont lues DYNAMIQUEMENT à chaque requête (jamais gelées à l'import — même leçon que
+# `DATABASE_URL`/`ACA_ORG_ID` ailleurs dans le projet), donc testables via monkeypatch/setenv.
+# In-memory volontairement : à l'échelle prototype/mono-process c'est exact et sans dépendance ;
+# une bascule multi-process (plusieurs workers uvicorn) demanderait un backend partagé (Redis) —
+# noté comme dette de phase commerciale, pas un besoin actuel.
+_rate_buckets: "defaultdict[str, deque]" = defaultdict(deque)
+_rate_lock = threading.Lock()
+
+
+def _rate_identity(request: Request) -> str:
+    """Identité du client pour le compteur : clé API si fournie, sinon IP source."""
+    api_key = request.headers.get("x-api-key")
+    if api_key:
+        return f"key:{api_key}"
+    client = request.client
+    return f"ip:{client.host if client else 'unknown'}"
+
+
+@api.middleware("http")
+async def _rate_limit_middleware(request: Request, call_next):
+    limit = int(os.getenv("ACA_RATE_LIMIT", "0") or "0")
+    # `/metrics` est exempté (scrape Prometheus fréquent et légitime, jamais un vecteur d'abus CRM).
+    if limit > 0 and request.url.path != "/metrics":
+        window = int(os.getenv("ACA_RATE_WINDOW_SECONDS", "60") or "60")
+        now = time.monotonic()
+        key = _rate_identity(request)
+        with _rate_lock:
+            bucket = _rate_buckets[key]
+            while bucket and now - bucket[0] > window:
+                bucket.popleft()
+            if len(bucket) >= limit:
+                retry_after = int(window - (now - bucket[0])) + 1
+                return JSONResponse(
+                    {"detail": "Trop de requêtes — réessayez plus tard."},
+                    status_code=429,
+                    headers={"Retry-After": str(retry_after)},
+                )
+            bucket.append(now)
+    return await call_next(request)
 
 
 EMAILS_CLASSIFIED = Counter(
