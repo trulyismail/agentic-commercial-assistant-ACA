@@ -8,6 +8,8 @@ from langgraph.types import Command
 from langchain_core.callbacks import UsageMetadataCallbackHandler
 from aca.storage import analytics_store, audit_log, config_store, followup_store, queue_store, user_store
 from aca.core import app as aca_graph
+from aca.core import demo
+from aca.core import graph_topology
 from aca.core import prod_check
 from aca.core import session as aca_session
 from aca.core.auth_lockout import lockout_remaining_seconds, next_lockout_seconds
@@ -170,7 +172,14 @@ if _can(user_store.PERM_MANAGE_USERS):
                 st.markdown(f"- {_problem}")
 
 st.title("Assistant commercial agentique (ACA)")
-st.caption("Pré-lecture et qualification des e-mails entrants — validation humaine avant écriture CRM.")
+_subtitle = (
+    "Pré-lecture et qualification des e-mails entrants — validation humaine avant écriture CRM."
+)
+if demo.is_enabled():
+    # Badge permanent, pas seulement dans l'onglet : pendant une démonstration, l'écran est parfois
+    # projeté ou partagé et il ne doit jamais y avoir d'ambiguïté sur le fait que rien n'est réel.
+    _subtitle += "  ·  🧪 **MODE DÉMONSTRATION** (modèle simulé, écritures CRM bloquées)"
+st.caption(_subtitle)
 
 # Valeurs par défaut du formulaire (peuvent être écrasées par un import Gmail)
 st.session_state.setdefault("email_sender", "client@entreprise.com")
@@ -205,65 +214,27 @@ CATEGORY_STYLE = {
 }
 
 # Graphe visuel (§12 item 5) : rendu via st.graphviz_chart (viz.js côté navigateur, aucune
-# dépendance système Graphviz requise). Reflète la topologie réelle du StateGraph (app.py,
-# workflow.add_edge/add_conditional_edges) — à tenir synchronisé si le graphe évolue.
-GRAPH_LABELS = {
-    "ingestion": "Ingestion", "classifier": "Classifieur", "memory_lookup": "Mémoire",
-    "risk_scan": "Risques", "extractor": "Extracteur", "clarification": "Clarification",
-    "supervisor": "Superviseur", "enrichissement": "Enrichissement", "connaissance": "Connaissance",
-    "veille": "Veille", "stratege": "Stratège", "reflection": "Réflexion", "routing": "Routage",
-    "notification": "Notification", "action": "Action",
-}
-GRAPH_EDGES = [
-    ("START", "ingestion"), ("ingestion", "classifier"), ("classifier", "memory_lookup"),
-    ("memory_lookup", "risk_scan"), ("risk_scan", "extractor"), ("extractor", "clarification"),
-    ("clarification", "supervisor"),
-    ("supervisor", "enrichissement"), ("enrichissement", "supervisor"),
-    ("supervisor", "connaissance"), ("connaissance", "supervisor"),
-    ("supervisor", "veille"), ("veille", "supervisor"),
-    ("supervisor", "stratege"), ("stratege", "reflection"),
-    ("reflection", "stratege"), ("reflection", "routing"),
-    ("routing", "notification"), ("notification", "action"), ("action", "END"),
-]
-# Nœuds toujours traversés une fois la pause de validation atteinte (§13/§14 audits) — seuls les
-# workers (enrichissement/connaissance/veille/stratege/reflection) sont conditionnels, cf.
-# `_completed_graph_nodes` ci-dessous et `supervisor`'s `add_conditional_edges` dans app.py.
-GRAPH_FIXED_NODES = {
-    "ingestion", "classifier", "memory_lookup", "risk_scan", "extractor", "clarification",
-    "supervisor", "routing", "notification",
-}
+# dépendance système Graphviz requise).
+#
+# §16.1.6 — la topologie n'est plus recopiée ici : elle est DÉRIVÉE du graphe compilé par
+# [graph_topology.py](aca/core/graph_topology.py). La copie manuelle qui vivait à cet endroit avait
+# déjà divergé du vrai graphe (il lui manquait l'arête `supervisor → routing`, le chemin FINISH du
+# superviseur), exactement le risque signalé au §12bis : le schéma affiché montrait un superviseur
+# sans issue vers la suite du pipeline. Ajouter un nœud dans `app.py` suffit désormais à le voir
+# apparaître ici, sans rien resynchroniser.
+GRAPH_FIXED_NODES = graph_topology.FIXED_NODES
 
 
 def _build_graph_dot(current: str = None, done: set = frozenset()) -> str:
     """Construit le graphe LangGraph en DOT, nœud actif en surbrillance, nœuds déjà passés en vert."""
-    lines = [
-        "digraph G {", 'rankdir=LR; bgcolor="transparent"; splines=true;',
-        'node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11, margin="0.15,0.08"];',
-        'edge [color="#9e9e9e"];',
-        '"START" [shape=ellipse, style=filled, fillcolor="#616161", fontcolor=white, label="START"];',
-        '"END" [shape=ellipse, style=filled, fillcolor="#616161", fontcolor=white, label="END"];',
-    ]
-    for node, label in GRAPH_LABELS.items():
-        if node == current:
-            fill = "#FFB300"
-        elif node in done:
-            fill = "#43A047"
-        else:
-            fill = "#E0E0E0"
-        fontcolor = "white" if node in done and node != current else "black"
-        lines.append(f'"{node}" [label="{label}", fillcolor="{fill}", fontcolor="{fontcolor}"];')
-    for a, b in GRAPH_EDGES:
-        style = ' [style=dashed, label="rewrite"]' if (a, b) == ("reflection", "stratege") else ""
-        lines.append(f'"{a}" -> "{b}"{style};')
-    lines.append("}")
-    return "\n".join(lines)
+    return graph_topology.to_dot(current=current, done=done)
 
 
 def _completed_graph_nodes(res: dict) -> set:
     """Nœuds déjà traversés pour l'état courant (post-pause) — pipeline fixe + workers effectivement appelés."""
     done = set(GRAPH_FIXED_NODES)
     completed_agents = res.get("completed_agents") or []
-    done.update(a for a in completed_agents if a in GRAPH_LABELS)
+    done.update(a for a in completed_agents if a in graph_topology.NODE_LABELS)
     if "stratege" in completed_agents:
         done.add("reflection")
     return done
@@ -465,6 +436,32 @@ tab_email, tab_dashboard, tab_history, tab_settings = st.tabs(
 )
 
 with tab_email:
+    # §16.3 — mode démonstration : jeu d'e-mails prêts à l'emploi, aucune clé d'API requise.
+    # Sans ça, évaluer le produit imposait cinq comptes externes (Groq, Gemini, Tavily, compte de
+    # service Google, OAuth Gmail) : on pouvait lire le code, pas l'essayer.
+    if demo.is_enabled():
+        st.info(
+            "**Mode démonstration** — modèle simulé, aucune clé d'API utilisée. "
+            "Le graphe, lui, est le vrai (mêmes agents, même pause de validation). "
+            "Toute écriture CRM est **matériellement bloquée**.",
+            icon=":material/science:",
+        )
+        demo_choice = st.selectbox(
+            "Charger un e-mail de démonstration",
+            options=range(len(demo.DEMO_EMAILS)),
+            format_func=lambda i: demo.DEMO_EMAILS[i]["label"],
+            index=None,
+            placeholder="Choisir un exemple (démo, devis, spam, support, clause à risque…)",
+        )
+        if demo_choice is not None and st.button(
+            "Charger cet exemple", icon=":material/download:",
+        ):
+            example = demo.DEMO_EMAILS[demo_choice]
+            st.session_state.email_sender = example["sender"]
+            st.session_state.email_subject = example["subject"]
+            st.session_state.email_body = example["body"]
+            st.rerun()
+
     # Interface principale pour simuler/entrer la réception d'un e-mail
     with st.container(border=True):
         st.subheader("Nouvel e-mail entrant", anchor=False)

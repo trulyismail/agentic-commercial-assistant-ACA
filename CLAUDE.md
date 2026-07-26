@@ -183,7 +183,12 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   per-model token counts — consumed by `ui.py`/`poller.py`/`aca/api.py`), `_calendly_url()`/
   `_routing_destinations()` (§12 item 7 — read `config_store` first, falling back to the
   `CALENDLY_URL`/`SUPPORT_EMAIL`/etc. `.env` defaults, so the Streamlit "Réglages" panel takes
-  effect without a restart), the `SqliteSaver`/`PostgresSaver`/`interrupt_before` compile, and a
+  effect without a restart), `snapshot_from_state(state, thread_id)` (§16.1.2 — the single "client
+  view" of a graph state, shared by `api._snapshot()` and the outbound webhooks so a REST client and
+  a webhook subscriber can never see two different shapes of the same lead; pure, so it is callable
+  from inside a node, and it deliberately includes `risk_flags`/`injection_flags` — precisely what a
+  human must see before validating, including when validating from n8n or Slack), the demo-mode
+  substitution in the three LLM factories (§16.3) and `demo.guard_write()` in `action_node`, and a
   `__main__` block with 6 mock emails (incl. `AUTRE`, `SUPPORT`, and one with a contractual risk
   clause + an out-of-FAQ question to exercise `risk_flags`/`knowledge_gap`) that run through the
   interrupt without a CRM write (`python -m aca.core.app`).
@@ -218,6 +223,65 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   (`interrupt_before=["action"]`) remains the actual protection; this only makes it informed, since
   an instruction buried on page 14 of an RFP previously surfaced in the draft as one more plausible
   sentence. No LLM (asking a model to detect model-manipulation exposes it to that manipulation).
+- [demo.py](aca/core/demo.py) — §16.3: `ACA_DEMO_MODE=1` runs the whole project **with no API key at
+  all**. Trying ACA used to require five external accounts (Groq, Gemini, Tavily, a Google service
+  account, a Gmail OAuth client), so an evaluating company could read the code but never run it.
+  `DemoLLM` (deterministic, same `invoke`/`with_structured_output` interface as `ChatGroq`) is
+  substituted in `app.py`'s three factories — one switch point, so a node added later inherits it
+  for free — and **the graph stays the real one**: same nodes, same supervisor, same self-critique,
+  same validation pause. Only the billable call is simulated. `guard_write()` is the deliberate
+  exception to the project's graceful degradation: it **raises** in `action_node` rather than
+  no-op'ing, because "absent = skipped" is the right default for an optional feature and the wrong
+  one for a safety barrier — writing a fake lead into a prospect's CRM during a demo is an
+  incident, a loud failure isn't. Also ships `DEMO_EMAILS` (the 6 cases from `app.py`'s `__main__`,
+  now reachable from the UI) and `DEMO_FAQ_CONTEXT`. Distinct from `tests/conftest.py`'s `FakeLLM`,
+  which lives in the test tree and is excluded from the Docker image.
+- [scheduler.py](aca/core/scheduler.py) — §16.0: the one **real** gap the Solo-tier audit found.
+  `relance.py`, `retention.py` and `billing.py` were each written, tested and documented "schedule
+  this periodically" — but **nothing scheduled them**: no scheduling dependency in
+  `requirements.txt`, and a Windows dev machine with no `cron`. In practice the GDPR purge and the
+  sales follow-ups only ran if a human remembered the command, i.e. never. Declarative `JOBS` table
+  (adding a periodic job = one entry, same spirit as `ROUTING_DESTINATIONS`), per-job interval env
+  var where `0` **disables** the job, and no new dependency — a `time.sleep` loop over persisted
+  timestamps is ample for four jobs whose most frequent runs hourly. `run_job()` never raises
+  toward the loop (same contract as `poller.run_forever()`). `is_due(job, now)` takes `now`
+  injected, so it is pure w.r.t. time and testable without touching the clock. CLI: bare (service
+  loop), `--once` (cron/n8n), `--job … --force`, `--status`, and `--prime` — which marks never-run
+  jobs as just-run **without executing them**, because a never-run job is "due" by construction
+  (else a fresh install would never purge), so a first boot would otherwise fire all four at once
+  including `relance`, which writes real Gmail drafts.
+- [schedule_store.py](aca/storage/schedule_store.py) — §16.0: when each periodic job last ran
+  (`data/schedule.sqlite`, `ACA_SCHEDULE_DB`). Without it `scheduler.py` would replay every job on
+  each process restart — a retention purge and a burst of Gmail follow-up drafts on every
+  `docker compose up`. Same shape as `config_store.py`: org-scoped, `sqlite_retry`-wrapped (the
+  scheduler writes outside the graph, hence outside `RETRY_POLICY`). Not to be confused with
+  `config_store.py`, which stores what a human **set**; this stores what the machine **did**. The
+  timestamp is stored twice on purpose: `last_run_epoch` (REAL) for the due-date arithmetic, no
+  timezone or format question; `last_run_at` (TEXT) purely so a human inspecting the DB can see
+  why a job didn't fire. `record_run()` records failures too — otherwise a durably broken service
+  (Gmail unreachable, quota exhausted) would be retried every tick, turning an outage into a
+  hammering.
+- [graph_topology.py](aca/core/graph_topology.py) — §16.1.6: **single source** for the agent graph's
+  topology, derived from the compiled graph itself (`app.get_graph()`). §12bis had flagged the
+  hand-copied edge lists in `app.py`/`ui.py`/`dashboard/lib/graph-topology.ts` as a drift risk —
+  and **the drift had already happened**: `ui.py` was missing the `supervisor → routing` edge (the
+  supervisor's FINISH path), so the diagram shown to the user depicted a supervisor with no exit to
+  the rest of the pipeline, and nothing could catch it because nothing compared the two lists.
+  Adding a node in `app.py` now surfaces it everywhere; only its French label in `NODE_LABELS` is
+  hand-maintained (and a test fails if it's forgotten). Exposes `nodes()`/`edges()`/`to_dot()`
+  (consumed by `ui.py`'s live `st.graphviz_chart`) and `to_dict()` (consumed by
+  `scripts/export_graph.py`). No Streamlit import in `aca/core/`.
+- [console.py](aca/core/console.py) — UTF-8-tolerant console output (2026-07-26). The project logs
+  heavily with emoji (68 `print()` calls across 13 modules); on this Windows box `sys.stdout` is
+  **cp1252** as soon as output is redirected (service, log file, backgrounded `uvicorn`), so a bare
+  `print("⚡ …")` raises `UnicodeEncodeError`. Not cosmetic: those prints happen **inside graph
+  nodes**, all wrapped by `RETRY_POLICY`, so a decorative log line could trigger up to 3 node
+  re-executions and — for a writing node — a double CRM write. Exactly the `hubspot.py` incident of
+  2026-07-12, whose local two-`print()` try/except fix doesn't scale to 68 calls. Fixed at the
+  **process boundary** instead: `enable_utf8_console()` reconfigures `stdout`/`stderr` once with
+  `errors="replace"` (no character can ever make a `print()` raise again — worst case it renders
+  `?`), is idempotent, and never raises if the stream can't be reconfigured (pytest capture,
+  `StringIO`). Called from `aca/__init__.py`, so every entry point inherits it.
 - [tenant.py](aca/core/tenant.py) — `current_org_id()`: the single source of tenant identity for the
   multi-tenant foundation (§12 item 3, audited §14.3) — reads `ACA_ORG_ID` (default `"default"`)
   dynamically (never frozen at import, same reasoning as `DATABASE_URL` in `vector_store.py`). One
@@ -358,6 +422,26 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   to a buttonless e-mail if Slack is absent. (Live approval requires a Slack **app** with
   interactivity enabled pointing at `/slack/interactions` — the incoming webhook alone posts the
   message but can't receive clicks; see `SLACK_SIGNING_SECRET` below.)
+- [webhook.py](aca/integrations/webhook.py) — §16.1.2: **outbound** events, the piece that makes the
+  n8n port idiomatic. Before it, the API only offered routes to *poll* (`GET /threads/pending`), so
+  an n8n workflow would have run a **Schedule** node polling in a loop — i.e. reimplementing
+  `poller.py` inside n8n, exactly what the port is meant to replace. ACA now **pushes** 5 events
+  (`analysis.paused`, `analysis.clarification`, `analysis.routed`, `lead.validated`,
+  `lead.rejected`, named `object.action` so an n8n filter can route on them), the workflow becomes
+  event-driven, and latency drops from "up to one poll interval" to immediate. Envelope is
+  `{event, org_id, timestamp, data}` — `org_id` included so one n8n endpoint serves several tenants
+  without a per-client URL, and `data` comes from `app.snapshot_from_state()`, **shared with**
+  `api._snapshot()` so a REST client and a webhook subscriber see the identical lead (asserted by
+  `test_webhook_payload_matches_api_snapshot_shape`, not merely hoped for). Optional HMAC-SHA256
+  signature (`ACA_WEBHOOK_SECRET` → `X-ACA-Signature`/`X-ACA-Timestamp`, timestamp folded *into* the
+  signature as an anti-replay window — the outbound mirror of `slack_verify.py`); unlike
+  `/slack/interactions` a missing secret does **not** fail the send, since an outbound webhook
+  triggers no CRM write on our side. Same graceful-degradation contract as `notify.py`
+  (`ACA_WEBHOOK_URL` absent = silent no-op) and — critically — **never raises**: `emit()` is called
+  from graph nodes under `RETRY_POLICY`, where an exception would cause up to 3 node re-executions
+  and, for `action_node`, a double CRM write (the real 2026-07-12 HubSpot bug). Not to be confused
+  with `notify.py`, which addresses a **human** (Slack prose, Valider/Rejeter buttons); this
+  addresses a **machine**. `python -m aca.integrations.webhook` sends a test event.
 - [ingest.py](aca/ingestion/ingest.py) — knowledge ingestion: `ingest_document(source, mode)` extracts text (PDF via
   `pdf_reader`, or `.md`/`.txt`), asks Groq to split it into Q/R pairs, and writes them to the
   Knowledge_Base tab via `sheets.write_knowledge_rows`. CLI (`python -m aca.ingestion.ingest <path> [append|replace]`)
@@ -559,6 +643,41 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   `thread_id` inside LangGraph's own queries) are reported as expected rather than flagged — a
   noisy report stops being read. Run live 2026-07-26: **5 tables, 0 without a policy, connecting as
   the restricted `aca_app`**. Absent `DATABASE_URL` = says so and exits 0.
+- [run_solo.py](scripts/run_solo.py) — §16.0: one-command launcher for the **Solo** tier (no n8n) —
+  starts `uvicorn aca.api:api`, `streamlit run ui.py`, `python -m aca.core.poller` and
+  `python -m aca.core.scheduler` together, streaming each child's output with a prefix, and stops
+  them all cleanly on Ctrl+C. Without it you needed four terminals and four commands to remember,
+  which in practice is enough for the poller and scheduler to **never** be started — hence for the
+  product to *look* manual when it isn't. Deliberately imports no `aca.*` and no third-party
+  package: it lives outside the package and runs as a direct script (which doesn't put the repo
+  root on `sys.path`, same constraint as `setup_faq.py`); children are spawned with `cwd` = repo
+  root so their own `aca.*` imports resolve. Flags: `--only api,ui`, `--without ui`, `--api-port`.
+- [export_graph.py](scripts/export_graph.py) / [export_openapi.py](scripts/export_openapi.py) —
+  §16.1.5/§16.1.6: regenerate `docs/assets/graph.dot` + `graph.json` (from the **compiled** graph
+  via `graph_topology`, plus `architecture.svg` only if a `dot` binary exists — Graphviz is not a
+  project dependency, the UI renders DOT browser-side via viz.js) and `docs/openapi.json`. Both are
+  idempotent and are re-run in CI to prove the committed artifacts haven't drifted from the code.
+  `openapi.json` is committed on purpose: a schema generated on demand can't be imported by someone
+  who hasn't yet got the project running.
+- [Dockerfile](Dockerfile) / [docker-compose.yml](docker-compose.yml) — §16.1.5: one image for all
+  four services, and two compose profiles — `solo` (api + ui + poller + scheduler, 4 services) and
+  `enterprise` (the same **plus n8n**, 5). Validated by counting the services each profile resolves
+  to; the image itself has never been built (Docker isn't installed on this machine).
+- [n8n/](n8n/) — §16.1.5: `aca_workflow.json` (importable workflow) + `README.md` (setup, the 5
+  outbound events, envelope shape, HMAC verification, useful endpoints). Never exercised against a
+  real n8n instance — none exists for this project; n8n would simply be an HTTP client of `api.py`.
+- [.github/workflows/ci.yml](.github/workflows/ci.yml) — §16.4, closes §15.4.7 (there was no
+  `.github/` at all). Three jobs: the test suite on Python 3.11 (the README's stated floor) and 3.14
+  (the actual dev version), `pip-audit`, and a check that the derived artifacts above haven't
+  drifted. Possible at all only because the suite is **fully offline** — `conftest.py` blanks every
+  key before any `aca.*` import and redirects all 8 SQLite paths to a temp dir — so it runs on a
+  public runner with **no secrets**. Won't execute until the first push to a remote.
+- [docs/landing/index.html](docs/landing/index.html) — §16.5: self-contained pitch one-pager (no
+  remote font, stylesheet or script — a pitch page that depends on a CDN doesn't open on a train or
+  behind a corporate proxy, which is exactly where it gets shown). Fluent palette matching `ui.py`,
+  dark-mode aware, printable to PDF via a `@media print` block. Carries the same "verified live vs.
+  not" section as the README — putting that on the sales page rather than burying it is a choice.
+  Not hosted anywhere (same reason as §15.1.9's TLS).
 - [DEPLOYMENT_HARDENING.md](docs/DEPLOYMENT_HARDENING.md) — §15.1.8/§15.1.9: the operator runbook
   for a first public deployment — Caddy/Nginx TLS configs (incl. the Streamlit WebSocket headers
   whose absence leaves the UI stuck on "Connecting…"), security headers, loopback-only binding,
@@ -595,11 +714,34 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   this Slack path (one source of truth for the CRM-write + post-validation bookkeeping). Slack's
   3-second response budget is usually met by `action_node` at prototype volume; a production
   high-load version would ack immediately then update via `response_url` (noted as a known limit,
-  not built). Covered by [test_api.py](tests/test_api.py) (22 tests) via
-  `fastapi.testclient.TestClient` with the same fake-LLM pattern as `test_graph_integration.py` —
-  the Slack tests build genuinely HMAC-signed requests and cover approve/reject/bad-signature/
-  unconfigured. Not exercised against a real n8n instance or a real Slack app (neither exists for
-  this project; both would simply be HTTP clients of this API).
+  not built). **n8n enablement (§16.1, 2026-07-26)** — the API existed but n8n could not have driven
+  it properly; five obstacles, two of them blocking: (1) **§16.1.1 attachments** — `POST /threads`
+  hard-coded `attachments_raw: []`, which made multimodal analysis (the project's *first* innovation
+  pillar) unreachable from the API, hence from n8n, even though `ingestion_node` had handled it all
+  along; base64 `attachments` are now accepted and bounded (10 files, 20 MB decoded total), rejected
+  with a 422 **before** anything is decoded into memory and before the LLM, same principle as
+  §15.1.4's payload bounds. (2) **§16.1.2 outbound webhooks** — see
+  [webhook.py](aca/integrations/webhook.py); `_emit_if_clarification()` sends
+  `analysis.clarification` from `_run_analysis` rather than from `clarification_node`, because
+  `interrupt()` **replays the node from its start** on resume, so an in-node send would fire twice
+  for one question; it is the only branch where the graph stops without reaching
+  `notification_node`, so without it an `?mode=async` caller went silent on an ambiguous email.
+  (3) **§16.1.3 `GET /health`** — deliberately outside `require_api_key` (an orchestrator must be
+  able to probe without holding the key that writes to the CRM), strictly boolean (never a secret
+  value — a test locks this) and making **no external call** (probed every 10s by Docker, it must
+  neither burn quota nor fail because an optional third party is down). (4) **§16.1.4 idempotence +
+  async** — n8n's HTTP node retries by default, and without a guard a mere network retry re-ran a
+  full analysis (two 70B calls, Tavily/Gemini quota) **and re-notified** the team; a known
+  `thread_id` now returns the existing snapshot with `already_exists: true` (the API-side counterpart
+  of the idempotence `poller.py` already gets by marking "en_cours" before `invoke()`), and
+  `?mode=async` returns 202 immediately, signalling completion via the webhook — sync stays the
+  default so no existing client changes. (5) **§16.1.5** — `docs/openapi.json` is exported and
+  committed. Covered by [test_api.py](tests/test_api.py) (36 tests) and
+  [test_api_n8n.py](tests/test_api_n8n.py) (§16.1) via `fastapi.testclient.TestClient` with the same
+  fake-LLM pattern as `test_graph_integration.py` — the Slack tests build genuinely HMAC-signed
+  requests and cover approve/reject/bad-signature/unconfigured. Not exercised against a real n8n
+  instance or a real Slack app (neither exists for this project; both would simply be HTTP clients
+  of this API).
 - [dashboard/](dashboard/) — the dedicated Next.js client dashboard (§12 item 8), **built
   2026-07-21 at the user's explicit request** — previously deliberately deferred as a product/
   hosting decision, not a code gap. Next.js 16 (App Router, TypeScript, Tailwind v4). **Product
@@ -666,7 +808,20 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   detection with a zero-false-positive set of realistic sales emails, and `prod_check`'s
   development-vs-production behaviour). `test_storage.py` also covers §15.2.7's audit chain
   (detecting an edited row, a *deleted* row, HMAC keying, per-tenant chains, legacy rows) and
-  §15.2.4's per-subject erasure. **261 tests total**, offline, ~12s. Run via
+  §15.2.4's per-subject erasure. **§16 adds five files**:
+  [test_scheduler.py](tests/test_scheduler.py) (18 tests — due-date arithmetic on an injected
+  `now`, `0` disabling a job, a **failed** run still being recorded so a dead service isn't
+  hammered every tick, `--prime` idempotence),
+  [test_demo_mode.py](tests/test_demo_mode.py) (30 tests — incl. the whole graph running end-to-end
+  with **no API key at all**, and `guard_write()` raising rather than degrading),
+  [test_api_n8n.py](tests/test_api_n8n.py) (§16.1 — attachments incl. invalid base64 and the size
+  cap rejected *before* the LLM, `/health` leaking no secret and making no external call, retry
+  idempotence, `?mode=async`, and each of the 5 webhook events fired at the right moment),
+  [test_webhook.py](tests/test_webhook.py) (the two properties that matter most first: **never
+  raises** — network error, HTTP error, unserialisable payload — and no-op without config; plus
+  HMAC verifiability by the receiver and signature-over-the-exact-bytes-sent), and
+  [test_graph_topology.py](tests/test_graph_topology.py) (topology genuinely derived from the
+  compiled graph, every node labelled). **352 tests total**, offline, ~13s. Run via
   `python -m pytest tests/` (pytest pinned in requirements.txt).
 
 ## Stack
@@ -744,7 +899,19 @@ see [tenant.py](aca/core/tenant.py)), `ACA_CONFIG_DB` (default `data/config.sqli
 [billing.py](aca/integrations/billing.py); absent = token stats still computed locally, no Stripe
 call, graceful no-op like everything else — ⚠️ not live-verified, no Stripe test account exists for
 this project), and `RELANCE_MAX_ROUNDS` (default `3`, overridable via the settings panel — cf.
-[followup_store.py](aca/storage/followup_store.py)'s multi-round cadence, §11.6 item 5).
+[followup_store.py](aca/storage/followup_store.py)'s multi-round cadence, §11.6 item 5). §16 adds:
+`ACA_DEMO_MODE` (§16.3 — set to `1`/`true`/`yes`/`oui` to run the whole graph with **no API key**,
+simulated LLM and CRM writes hard-blocked; absent = normal operation, and it is read dynamically so
+it can never freeze on at import), `ACA_SCHEDULE_DB` (default `data/schedule.sqlite`) plus the
+per-job cadences `ACA_SCHEDULE_MAINTENANCE_HOURS` / `ACA_SCHEDULE_RELANCE_HOURS` /
+`ACA_SCHEDULE_RETENTION_HOURS` / `ACA_SCHEDULE_BILLING_HOURS` (defaults `1` / `24` / `168` / `720`;
+`0` or negative **disables** that job — same "absent/zero = feature skipped" contract as everything
+else) and `ACA_SCHEDULE_TICK_SECONDS` (default `60` — how often the loop *looks* for a due job, not
+how often jobs run), and `ACA_WEBHOOK_URL` / `ACA_WEBHOOK_SECRET` (§16.1.2 — outbound events to
+n8n; URL absent = silent no-op, secret absent = unsigned but still sent, unlike
+`SLACK_SIGNING_SECRET` which fails closed, since an outbound webhook triggers no CRM write on our
+side). All 54 variables are documented one by one in [.env.example](.env.example) (§16.2.2), which
+is the file to read first — this section is the reference, that one is the checklist.
 
 `credentials/` (gitignored) holds `service_account.json` (Sheets) and `gmail_credentials.json` (Gmail
 OAuth client secret, "installed app" type). `gmail_token.json` is created there on first Gmail auth.
@@ -913,6 +1080,35 @@ afterward.
   not applied* (nothing is hosted), the secrets vault is an hosting decision (no code change will
   be needed — every module reads `os.getenv()` dynamically), local-store RLS is a product call, and
   DPA/DPIA documents belong to the using company.
+- ✅ **Fixed (2026-07-26, same day)** — §16 "Solo tier, workable n8n port, first impression". Started
+  from a narrow user question ("can I use pgvector alongside Google Sheets, and which flow suits my
+  n8n workflow?") which was answered by auditing the code rather than from memory — and the audit
+  found something else, which is the real result of the pass: **the product was already autonomous
+  but didn't look it, and n8n could not have driven it properly.** Two problems long conflated into
+  one ("you need n8n for this to be automatic"), both false for opposite reasons. Delivered: a
+  scheduler + its store (§16.0 — the one genuine gap), `run_solo.py`, API attachments/webhooks/
+  `/health`/idempotence/async (§16.1), `graph_topology.py` (§16.1.6), Docker + compose profiles +
+  n8n workflow + committed `openapi.json` (§16.1.5), README/`.env.example`/`.gitignore` (§16.2),
+  `ACA_DEMO_MODE` (§16.3), CI (§16.4, closing §15.4.7), and the one-pager + these docs (§16.5).
+  Suite: 261 → **352 tests**. Six things the pass *found* rather than merely built: (1) **nothing
+  scheduled `relance.py`/`retention.py`** — both documented "schedule this periodically", no
+  scheduling mechanism anywhere, on a machine without `cron`, so the GDPR purge in practice never
+  ran; (2) **the graph diagram shown in the UI was wrong** — `ui.py`'s hand-copied edge list was
+  missing `supervisor → routing`, the drift §12bis had predicted, invisible because nothing compared
+  the two lists; (3) **multimodal analysis was unreachable from the API** (`attachments_raw` wired to
+  `[]`) — the project's first innovation pillar, invisible from its own HTTP interface; (4) the
+  webhook payload **lagged the REST snapshot by one `reasoning_log` line**, since
+  `notification_node` emitted before LangGraph merged the entry the node was about to return —
+  fixed at source, not in the test; (5) **`analysis.clarification` was declared, documented in
+  `n8n/README.md`, and never emitted** — the only branch where the graph stops without signalling
+  anything, so an `?mode=async` caller stayed silent forever on an ambiguous email; (6) a
+  `.gitignore` trap where the new `.env.*` rule would have excluded the `.env.example` written the
+  same day. Still open after this pass, none of it missing code: the n8n workflow was never imported
+  (no instance exists), the webhooks never received by a real n8n, the Docker image never built
+  (Docker isn't installed here — only `compose config` was validated per profile), CI won't run
+  until the first push to a remote, and the one-pager isn't hosted (same reason as TLS). A
+  correction to my own plan, recorded for honesty: it claimed `ui.py` had a duplicated `st.title`;
+  on inspection those are two mutually exclusive screens (auth gate vs. app), so nothing was touched.
 
 ## Status vs. the 8-week roadmap
 

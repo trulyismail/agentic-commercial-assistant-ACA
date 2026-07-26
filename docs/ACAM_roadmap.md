@@ -997,3 +997,276 @@ exploitation, pas sécurité.
 | 15.2.3 provisioning tenant | 🟡 | « 1 déploiement = 1 tenant » reste le modèle ; l'onboarding multi-client est un sujet produit |
 | 15.2.6 DPA/DPIA | 🟡 | Documents juridiques propres à l'entreprise utilisatrice, non devinables depuis le code |
 | 15.3.1, 15.3.7, tout §15.4 | Inchangés | Hors du périmètre « sécurité » demandé pour cette passe |
+
+---
+
+## 16. Autonomie « Solo », port n8n praticable et première impression (2026-07-26)
+
+**Origine de la passe.** Une question de l'utilisateur — *« puis-je utiliser pgvector en même temps
+que Google Sheets, et quel flux est le meilleur pour mon workflow n8n ? »* — a déclenché un audit du
+code réel plutôt qu'une réponse de principe. Cet audit a trouvé autre chose que ce qu'on cherchait,
+et c'est le vrai résultat de la passe :
+
+> **Le produit était déjà autonome, mais ne le paraissait pas, et n8n ne pouvait pas s'y brancher
+> correctement.** Deux problèmes distincts, longtemps confondus en un seul (« il faut n8n pour que ce
+> soit automatique »), et tous deux faux pour des raisons opposées.
+
+Ce malentendu a une conséquence commerciale directe : présenté ainsi, ACA passait pour un outil
+« à boutons » exigeant qu'un humain lance les traitements, alors que `poller.py` exécute le graphe
+24/7 interface fermée depuis le §11.4. D'où le découpage de cette section : **§16.0** rend
+l'autonomie complète *et* visible, **§16.1** rend n8n réellement branchable, **§16.2–16.5** règlent
+tout ce qui décide de la première impression.
+
+**Positionnement retenu, et il tient en une phrase :** *n8n n'apporte pas l'automatisation — il
+apporte l'orchestration inter-systèmes.* Les deux paliers exécutent la même image et le même code
+métier ; on retire n8n en changeant un mot sur la ligne `docker compose`.
+
+| Palier | Composants | Pour qui |
+|---|---|---|
+| **Solo** | API + interface + poller + planificateur | Consultant seul, PME, démonstration. Automatisé de bout en bout, **sans n8n** |
+| **Enterprise** | idem **+ n8n** | Orchestration avec les autres outils du client (CRM, ERP, ticketing) |
+
+---
+
+### 16.0 Le palier Solo — un seul manque réel, et il était structurel
+
+L'audit a listé les cinq capacités qu'un produit « autonome » doit avoir, puis est allé vérifier
+chacune dans le code plutôt que dans la documentation. Quatre existaient. Une n'existait pas du tout.
+
+| # | Capacité autonome | État avant la passe | Traitement |
+|---|---|---|---|
+| 16.0.1 | Ingestion des e-mails | ✅ `poller.py` depuis le §11.4 | Inchangé |
+| 16.0.2 | Traitement passif 24/7 | ✅ `poller.py` | Inchangé |
+| 16.0.3 | Relances commerciales | ❌ **`relance.py` existait, rien ne l'appelait** | `scheduler.py` |
+| 16.0.4 | Purge RGPD | ❌ **`retention.py` existait, rien ne l'appelait** | `scheduler.py` |
+| 16.0.5 | Maintenance de la file | 🟡 seulement si le poller tourne | `scheduler.py` |
+
+**Le manque, dit précisément.** `relance.py`, `retention.py` et `billing.py` étaient écrits, testés,
+et chacun documenté « à planifier périodiquement (ex. une fois par jour) ». Mais **aucun
+planificateur n'existait** : pas de dépendance de planification dans `requirements.txt`, et une
+machine de développement Windows qui n'a même pas de `cron`. En pratique, la purge RGPD et les
+relances ne partaient que si un humain pensait à lancer la commande à la main — c'est-à-dire jamais.
+Une conformité RGPD qui dépend de la mémoire d'un opérateur n'est pas une conformité.
+
+**Livré :**
+
+- **[scheduler.py](../aca/core/scheduler.py)** — cadence les quatre travaux périodiques. Table
+  déclarative `JOBS` (ajouter un travail = une entrée, même esprit que `ROUTING_DESTINATIONS`),
+  intervalle réglable par variable d'environnement, `0` **désactive** le travail (dégradation
+  gracieuse habituelle). Aucune dépendance nouvelle : une boucle `time.sleep` sur des horodatages
+  persistés suffit très largement pour quatre travaux dont le plus fréquent tourne à l'heure —
+  APScheduler ou Celery auraient été une dépendance de plus pour un besoin qui ne la justifie pas,
+  contre la contrainte 0 €. `run_job()` **ne lève jamais** vers la boucle (même contrat que
+  `poller.run_forever()`).
+- **[schedule_store.py](../aca/storage/schedule_store.py)** — persiste le dernier passage de chaque
+  travail. Sans lui, tous les travaux rejoueraient à chaque redémarrage du process : une purge de
+  rétention et une rafale de brouillons de relance Gmail **à chaque `docker compose up`**. Scopé par
+  `org_id` et enveloppé de `with_sqlite_retry`, comme les autres registres locaux.
+- **`--prime`** — le détail qui n'apparaît qu'en y pensant jusqu'au bout : un travail jamais exécuté
+  étant « échu » par construction (sinon une purge n'aurait jamais lieu sur une installation neuve),
+  le tout premier démarrage déclencherait les quatre travaux d'un coup, dont `relance`, qui écrit de
+  vrais brouillons dans Gmail. Défendable, mais surprenant le jour de la mise en service — et
+  reproductible à chaque perte de `schedule.sqlite`. `--prime` décale proprement tout d'un intervalle
+  sans rien exécuter. Également `--once` (usage cron/n8n), `--job … --force`, `--status`.
+- **[scripts/run_solo.py](../scripts/run_solo.py)** — lance les quatre processus d'une commande.
+  Sans lui il fallait quatre terminaux et quatre commandes à retenir, ce qui suffit en pratique à ce
+  que le poller et le planificateur ne soient **jamais** lancés — donc à ce que le produit paraisse
+  manuel alors qu'il ne l'est pas. C'est très exactement le malentendu que ce §16.0 corrige.
+
+**18 tests** ([test_scheduler.py](../tests/test_scheduler.py)), dont l'échéance calculée sur un
+`now` injecté (fonction pure vis-à-vis du temps, donc testable sans attendre ni manipuler
+l'horloge), la désactivation par intervalle nul, l'enregistrement d'un passage **en échec** (sans
+quoi un service mort serait martelé toutes les 60 s), et l'idempotence de `--prime`.
+
+---
+
+### 16.1 Rendre le port n8n réellement praticable
+
+`aca/api.py` existait depuis le §12 item 6 et exposait déjà le graphe en HTTP. Mais brancher n8n
+dessus se serait heurté à cinq obstacles concrets, dont deux rédhibitoires.
+
+| # | Obstacle | Gravité | Correctif |
+|---|---|---|---|
+| 16.1.1 | `POST /threads` codait `attachments_raw: []` **en dur** | 🔴 rédhibitoire | Pièces jointes base64 acceptées et bornées |
+| 16.1.2 | Aucun événement sortant — n8n aurait dû **sonder** | 🔴 rédhibitoire | [webhook.py](../aca/integrations/webhook.py), 5 événements signés |
+| 16.1.3 | Pas de sonde de disponibilité | 🟠 | `GET /health` |
+| 16.1.4 | Un réessai HTTP relançait une analyse complète | 🟠 | Idempotence + `?mode=async` |
+| 16.1.5 | Rien à déployer, aucun schéma à importer | 🟠 | Docker, profils compose, `openapi.json`, workflow n8n |
+| 16.1.6 | Topologie du graphe **recopiée à la main en 3 endroits** | 🟠 | [graph_topology.py](../aca/core/graph_topology.py) |
+
+**16.1.1 — Pièces jointes.** Le champ était littéralement câblé à la liste vide, ce qui rendait
+l'**analyse multimodale — le pilier d'innovation n° 1 du projet (§2)** — inatteignable depuis
+l'API, donc depuis n8n. Le graphe savait pourtant déjà les traiter (`ingestion_node` →
+`attachment_reader`) : il ne manquait que le champ. Bornes fermes mais larges (10 fichiers, 20 Mo
+décodés au total), et surtout **refusées en 422 avant tout décodage en mémoire et avant le LLM** —
+même principe que les bornes de payload du §15.1.4.
+
+**16.1.2 — Webhooks sortants, la pièce qui change la nature du port.** Sans eux, un workflow n8n
+aurait tourné sur un nœud *Schedule* interrogeant `GET /threads/pending` en boucle : c'est-à-dire
+**réimplémenter `poller.py` à l'intérieur de n8n**, exactement ce que le port est censé remplacer.
+ACA pousse désormais 5 événements (`analysis.paused`, `analysis.clarification`, `analysis.routed`,
+`lead.validated`, `lead.rejected`), nommés `objet.action` pour qu'un filtre n8n puisse router
+dessus sans deviner. Signature HMAC-SHA256 optionnelle avec l'horodatage **dans** la signature
+(miroir sortant de `slack_verify.py`), et **ne lève jamais** — `emit()` est appelé depuis des nœuds
+sous `RETRY_POLICY`, où une exception provoquerait jusqu'à 3 réexécutions du nœud, donc pour
+`action_node` une double écriture CRM (le bug HubSpot réellement survenu le 2026-07-12).
+
+À ne pas confondre avec `notify.py`, qui s'adresse à un **humain** (prose Slack, boutons
+Valider/Rejeter) ; celui-ci s'adresse à une **machine** (enveloppe JSON structurée et signée). Les
+deux coexistent et sont complémentaires.
+
+**16.1.3 — `GET /health`.** Volontairement **hors** de `require_api_key` (un orchestrateur doit
+pouvoir sonder sans détenir la clé qui écrit dans le CRM), **strictement booléenne** (jamais une
+valeur de secret : un test le verrouille) et **sans aucun appel externe** — une sonde interrogée
+toutes les 10 s par Docker ne doit ni consommer de quota ni tomber en panne pour cause de panne d'un
+tiers optionnel, alors que tout le projet est bâti sur « service absent = fonctionnalité ignorée ».
+
+**16.1.4 — Idempotence et mode asynchrone.** Le nœud HTTP de n8n réessaie par défaut : sans garde,
+un simple réessai réseau relançait une analyse complète (deux appels 70B, du quota Tavily/Gemini) et
+**renotifiait** l'équipe pour le même e-mail. Un `thread_id` déjà connu renvoie désormais
+l'instantané existant avec `already_exists: true` — pendant, côté API, de l'idempotence que
+`poller.py` obtient déjà en marquant « en_cours » avant `invoke()`. `?mode=async` renvoie un 202
+immédiat et signale la fin par le webhook ; le mode synchrone reste le défaut (aucun client existant
+n'est affecté) mais retient la requête 30 à 90 s, ce qui devient fragile dès que les réessais de n8n
+se combinent au backoff 429 du palier gratuit de Groq.
+
+**16.1.5 — De quoi déployer et importer.** [Dockerfile](../Dockerfile) (image unique pour les
+quatre services), [docker-compose.yml](../docker-compose.yml) avec profils `solo` (4 services) et
+`enterprise` (5, n8n compris) — validé en comptant les services résolus par profil —,
+[n8n/aca_workflow.json](../n8n/aca_workflow.json) + [n8n/README.md](../n8n/README.md), et
+`docs/openapi.json` **commité** (un schéma généré à la demande ne peut pas être importé par
+quelqu'un qui n'a pas encore réussi à faire tourner le projet).
+
+**16.1.6 — Une seule source pour la topologie, et une dérive déjà réalisée.** Le §12bis signalait le
+risque : la liste des arêtes était recopiée à la main dans `app.py` (le vrai graphe), `ui.py` et
+`dashboard/lib/graph-topology.ts`. **Le risque s'était déjà matérialisé sans que personne puisse le
+voir** : `ui.py` ignorait l'arête `supervisor → routing` (le chemin FINISH du superviseur), si bien
+que le schéma affiché à l'utilisateur montrait un superviseur sans issue vers la suite du pipeline.
+La topologie est désormais **dérivée du graphe compilé** (`app.get_graph()`) : juste par
+construction, et un nœud ajouté dans `app.py` apparaît partout sans resynchronisation.
+
+---
+
+### 16.2 Hygiène du dépôt — ce qui décide de la première impression
+
+Un dépôt se juge en trente secondes, et ces trente secondes se jouent sur des fichiers qui ne
+contiennent aucune logique.
+
+- **16.2.1 — README réécrit.** Il avait environ **cinq versions de retard** : il décrivait encore un
+  graphe linéaire sans superviseur, et ignorait la sécurité du §15, les deux paliers et le mode
+  démonstration. Un README faux est pire qu'un README court — il fait douter du reste.
+- **16.2.2 — [.env.example](../.env.example)**, 54 variables documentées une par une, groupées en 9
+  sections, avec le minimum vital distingué de l'optionnel. Le projet n'en avait aucun : il fallait
+  lire `CLAUDE.md` (~700 lignes) pour découvrir quoi configurer. (Le compte annoncé était d'abord
+  « 46 » : la vérification finale, en comptant réellement les clés du fichier, en a trouvé 53 — plus
+  `ACA_DEMO_MODE`, qui manquait alors qu'il s'agit du drapeau vedette du §16.3, celui-là même que le
+  one-pager donne en exemple.)
+- **16.2.3 — Six fichiers parasites supprimés** (avec accord explicite) : trois pages HTML
+  sauvegardées depuis un navigateur et trois charges utiles de démonstration accumulées à la racine,
+  qu'aucun code ne référençait. `.gitignore` durci pour que le cas ne se reproduise pas
+  (`/*.html`, `/seed_*.json`, `data/`, `node_modules/`), **et** `!.env.example` — sans cette
+  exception, la règle `.env.*` ajoutée au même moment aurait exclu le modèle qu'on venait d'écrire.
+
+---
+
+### 16.3 Mode démonstration — pouvoir *essayer*, pas seulement *lire*
+
+Jusqu'ici, essayer ce projet exigeait **cinq comptes externes** (Groq, Gemini, Tavily, un compte de
+service Google, un client OAuth Gmail). Une entreprise qui l'évalue pouvait donc lire le code,
+jamais l'exécuter — la différence entre « dépôt intéressant » et « je viens de le faire tourner ».
+
+`ACA_DEMO_MODE=1` substitue un modèle factice déterministe aux trois fabriques de LLM, en **un seul
+point** (`fast_llm`/`smart_llm`/`creative_llm`), si bien qu'un nœud ajouté demain en hérite
+gratuitement. **Le graphe reste le vrai** : mêmes nœuds, même superviseur, même auto-critique, même
+pause de validation. Six e-mails de démonstration couvrent tout l'éventail, dont un cas piégeux
+porteur d'une clause de responsabilité illimitée et d'une question hors FAQ.
+
+⚠️ **Limite du mode démonstration, constatée en l'exécutant** : ce 6e cas déclenche bien
+`risk_flags`, mais **pas** `knowledge_gap`. C'est structurel — `connaissance_node` renvoie en démo
+un `DEMO_FAQ_CONTEXT` jamais vide, donc le garde-fou déterministe n'appelle jamais `veille_node`,
+seul endroit où `knowledge_gap` est posé. Avec de vraies clés, la question sur le mainframe COBOL le
+déclenche. Simuler le drapeau aurait été pire que de ne pas l'avoir : une démonstration doit montrer
+ce que le système fait, pas ce qu'on aimerait qu'il montre.
+
+⚠️ **La seule exception assumée à la dégradation gracieuse de tout le projet.** `guard_write()`
+**lève** au lieu de dégrader, sur le seul point du graphe qui écrit réellement (`action_node`).
+« Absent = ignoré » est le bon défaut pour une fonctionnalité optionnelle, jamais pour une barrière
+de sécurité : écrire un faux lead dans le CRM d'un prospect pendant une démonstration serait un
+incident, un échec bruyant n'en est pas un. **30 tests**
+([test_demo_mode.py](../tests/test_demo_mode.py)), dont la vérification que le graphe complet tourne
+réellement de bout en bout **sans aucune clé d'API**.
+
+---
+
+### 16.4 Intégration continue — solde le §15.4.7
+
+Il n'y avait **aucun répertoire `.github/`**. [ci.yml](../.github/workflows/ci.yml) ajoute trois
+travaux : la suite de tests sur Python 3.11 (plancher annoncé au README) et 3.14 (version de
+développement réelle), `pip-audit`, et une vérification que les **artefacts dérivés**
+(`docs/openapi.json`, `docs/assets/graph.json`) n'ont pas dérivé du code.
+
+Deux points rendent cette CI possible et utile, dans cet ordre : (1) la suite est **entièrement hors
+ligne** — `conftest.py` vide toutes les clés avant tout import `aca.*` et redirige les 8 bases
+SQLite vers un répertoire temporaire — donc elle tourne sur un runner public **sans le moindre
+secret** ; (2) `pip-audit` avait trouvé 17 vulnérabilités dont 11 dans des paquets transitifs
+(§15.3.8), et un scan manuel, par nature, ne se refait pas.
+
+---
+
+### 16.5 Documentation et présentation
+
+- **[docs/landing/index.html](landing/index.html)** — one-pager de pitch, entièrement autonome
+  (aucune police, feuille de style ni script distant : une page de présentation qui dépend d'un CDN
+  ne s'ouvre pas dans un train ni derrière le proxy d'un grand compte, or c'est exactement là qu'on
+  la montre). Palette reprise du thème Fluent de l'interface, thème sombre géré, imprimable en PDF
+  sans retouche. Il reprend la section « ce qui est vérifié / ce qui ne l'est pas » : la mettre en
+  page de vente plutôt que de l'enfouir dans le dépôt est un choix, pas un oubli.
+- **Cette section §16**, l'entrée du 2026-07-26 dans [PROJECT_JOURNAL.md](PROJECT_JOURNAL.md), et la
+  mise à jour de `CLAUDE.md` (nouveaux modules, variables d'environnement, nombre de tests).
+
+---
+
+### 16.6 Ce que la passe a trouvé, au-delà du plan
+
+Comme au §15.6, ce sont ces points-là qui justifient d'auditer le code plutôt que la documentation.
+
+1. **Aucun planificateur n'existait.** Trois modules documentés « à planifier périodiquement », zéro
+   mécanisme de planification, sur une machine sans `cron`. La purge RGPD ne partait jamais.
+2. **Le schéma du graphe affiché dans l'interface était faux** — arête `supervisor → routing`
+   manquante. La dérive que le §12bis annonçait comme un *risque* s'était déjà produite, et rien ne
+   pouvait la signaler puisque rien ne comparait les deux listes.
+3. **L'analyse multimodale était inatteignable depuis l'API** : `attachments_raw` câblé à `[]`. Le
+   pilier d'innovation n° 1 du projet, invisible depuis sa propre interface HTTP.
+4. **Le webhook livrait un `reasoning_log` en retard d'une ligne** sur le même lead lu via
+   `GET /threads/{id}` : `notification_node` émettait *avant* que LangGraph n'ait fusionné l'entrée
+   que le nœud s'apprêtait à renvoyer. Corrigé à la source (recollement explicite) plutôt que dans le
+   test, et verrouillé par `test_webhook_payload_matches_api_snapshot_shape`.
+5. **`analysis.clarification` était déclaré, documenté… et jamais émis.** Trouvé en rédigeant ce
+   §16.5 : la constante existait, `n8n/README.md` la présentait comme émise, aucun appelant. C'était
+   la **seule branche où le graphe s'arrête sans rien émettre** — un workflow lancé en `?mode=async`
+   restait donc muet sur un e-mail ambigu, attendant un `analysis.paused` qui n'arrive jamais tant
+   que la question est sans réponse. Émis depuis `api._run_analysis` et non depuis
+   `clarification_node`, parce qu'`interrupt()` **rejoue le nœud depuis son début** à la reprise :
+   un envoi placé dans le nœud partirait deux fois pour une seule question.
+6. **Le README avait cinq versions de retard**, et un détail de `.gitignore` : ajouter `.env.*`
+   sans `!.env.example` aurait exclu le modèle de configuration écrit le même jour.
+
+**Une correction au plan initial, notée pour l'honnêteté du journal :** le plan affirmait que
+`ui.py` contenait un `st.title` dupliqué. Vérification faite, ce sont deux écrans mutuellement
+exclusifs (le gate d'authentification et l'application) — aucun doublon, rien n'a été touché.
+
+---
+
+### 16.7 Ce qui reste ouvert après cette passe
+
+| Point | État | Raison |
+|---|---|---|
+| Workflow n8n | Écrit, jamais importé | Aucune instance n8n n'existe pour ce projet ; les `typeVersion` des nœuds peuvent demander un ajustement à l'import |
+| Webhooks sortants | Testés hors ligne, jamais reçus par un vrai n8n | Même raison ; le contrat (enveloppe, signature) est verrouillé par les tests |
+| Image Docker | Écrite, `compose config` validé par profil | Jamais construite ni exécutée — Docker n'est pas installé sur la machine de développement |
+| CI GitHub Actions | Écrite | Ne s'exécutera qu'au premier push sur un dépôt distant |
+| One-pager | Écrit | Non hébergé (même raison que le TLS du §15.1.9) |
+| Tout le §15.4 hors 15.4.7 | Inchangé | Tests de charge, E2E navigateur, processus de revue — hors périmètre |
+
+Aucun de ces points n'est une pièce de code manquante : ce sont, à chaque fois, un compte, une
+instance ou un hébergement qui n'existe pas encore.

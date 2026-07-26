@@ -1207,3 +1207,146 @@ Vérifications en direct, pas seulement en test : le balayage RLS sur le vrai Su
 0 sans politique, connexion via le rôle restreint `aca_app`), la détection de falsification du
 journal d'audit, le scan de dépendances, et les commandes en ligne de commande (création de comptes,
 contrôle de configuration de production, vérification du journal).
+
+---
+
+## 2026-07-26 (suite) — Le produit était déjà automatique, il ne le montrait pas ; et n8n ne pouvait pas s'y brancher
+
+### Le problème de départ
+
+Le point de départ était une simple question : *« puis-je utiliser pgvector en même temps que Google
+Sheets, et quel flux est le meilleur pour mon workflow n8n ? »* Plutôt que d'y répondre de mémoire,
+je suis allé relire le code. La réponse à la question posée était courte (oui, les deux coexistent
+déjà : Google Sheets reste l'endroit où les commerciaux écrivent, pgvector n'est que le moteur de
+recherche). Mais l'inspection a mis au jour deux problèmes autrement plus importants, longtemps
+confondus en un seul.
+
+**Le premier : ACA passait pour un outil « à boutons ».** Il ne l'est pas — `poller.py` lit la boîte
+Gmail et exécute le graphe en continu, interface fermée, depuis des semaines. Le malentendu venait de
+la présentation, pas du produit. Et il coûtait cher : quelqu'un qui croit devoir cliquer pour lancer
+chaque traitement n'achète pas un assistant autonome.
+
+**Le second, à l'inverse, était bien réel :** il manquait une brique d'automatisation, et pas la plus
+anodine. `relance.py` (les relances commerciales) et `retention.py` (la purge RGPD) étaient écrits,
+testés, et chacun documenté « à planifier périodiquement, par exemple une fois par jour ». Sauf que
+**rien ne les planifiait**. Aucun mécanisme de planification n'existait dans le projet, et la machine
+de développement tourne sous Windows, qui n'a même pas l'équivalent d'un `cron`. En clair : la purge
+des données personnelles ne partait que si un humain pensait à taper la commande à la main —
+c'est-à-dire jamais. Une conformité RGPD qui repose sur la mémoire d'un opérateur n'est pas une
+conformité.
+
+**Et un troisième, découvert dans la foulée :** l'API existait bien, mais n8n n'aurait pas pu s'en
+servir correctement. Deux blocages rédhibitoires, décrits plus bas.
+
+### Ce qui a été fait
+
+**1. Un planificateur, sans nouvelle dépendance.** `aca/core/scheduler.py` cadence désormais quatre
+travaux : relances, purge RGPD, maintenance de la file d'attente, remontée de consommation. Il ne
+réécrit aucune logique métier — il ne fait qu'appeler, à heure dite, des fonctions qui existaient
+déjà. Pas d'APScheduler ni de Celery : une boucle qui regarde toutes les minutes si un travail est
+échu suffit très largement pour quatre tâches dont la plus fréquente tourne une fois par heure, et
+cela reste cohérent avec la contrainte « 0 € et le moins de dépendances possible ».
+
+Un petit registre (`schedule_store.py`) mémorise quand chaque travail est passé pour la dernière
+fois. Sans lui, **tous les travaux se relanceraient à chaque redémarrage** — donc une purge et une
+rafale de brouillons de relance Gmail à chaque redéploiement.
+
+Le détail qui ne se voit qu'en poussant le raisonnement jusqu'au bout : un travail jamais exécuté est
+considéré comme « en retard » (sinon, sur une installation neuve, la purge n'aurait jamais lieu). Au
+tout premier démarrage, les quatre partiraient donc d'un coup — dont les relances, qui écrivent de
+vrais brouillons dans Gmail. C'est défendable, mais surprenant le jour de la mise en service. D'où
+une commande `--prime` qui décale proprement tout d'un intervalle sans rien exécuter.
+
+**2. Une commande pour tout lancer.** `python scripts/run_solo.py` démarre les quatre processus
+ensemble. Avant, il fallait quatre terminaux et quatre commandes à retenir — ce qui suffit, en
+pratique, à ce que le poller et le planificateur ne soient jamais lancés, et donc à ce que le produit
+*paraisse* manuel. Exactement le malentendu de départ.
+
+**3. Deux paliers de déploiement clairement nommés.** « Solo » (sans n8n, automatisé de bout en
+bout) et « Enterprise » (avec n8n). On passe de l'un à l'autre en changeant un mot. La phrase qui
+résume la position, et qui manquait : **n8n n'apporte pas l'automatisation, il apporte
+l'orchestration avec vos autres outils.**
+
+**4. Ce qui bloquait vraiment n8n.** Deux choses, dont aucune n'était évidente avant de regarder :
+
+- **Les pièces jointes ne passaient pas par l'API.** Le champ était littéralement écrit « liste
+  vide » dans le code. L'analyse conjointe e-mail + document — le premier des trois piliers
+  d'innovation du projet — était donc inatteignable depuis l'interface HTTP, alors que le graphe
+  savait parfaitement la faire depuis l'interface Streamlit.
+- **ACA n'émettait aucun événement.** n8n aurait dû interroger l'API en boucle pour savoir s'il
+  s'était passé quelque chose : c'est-à-dire réécrire le poller *à l'intérieur* de n8n, exactement ce
+  que ce port est censé remplacer. ACA **pousse** désormais cinq événements (analyse en attente,
+  question posée, e-mail routé, lead validé, lead rejeté), signés, et dont l'envoi ne peut jamais
+  faire échouer une analyse.
+
+S'y ajoutent une sonde de disponibilité (`/health`), une protection contre les réessais (un même
+e-mail renvoyé deux fois ne relance plus une analyse complète et ne renotifie plus l'équipe), un mode
+asynchrone, une image Docker avec les deux paliers, et un workflow n8n prêt à importer.
+
+**5. Un mode démonstration, sans aucune clé.** Jusqu'ici, essayer ce projet demandait **cinq comptes
+externes**. On pouvait lire le code, pas l'exécuter — la différence entre « dépôt intéressant » et
+« je viens de le faire tourner ». `ACA_DEMO_MODE=1` remplace les modèles de langage par une doublure
+déterministe : le graphe reste le vrai, seuls les appels facturables sont simulés. Point important :
+en mode démonstration, **toute écriture réelle échoue bruyamment** au lieu d'être silencieusement
+ignorée. C'est le seul endroit du projet qui ne « dégrade pas gracieusement », et c'est voulu —
+écrire un faux lead dans le CRM d'un prospect pendant une démonstration serait un incident.
+
+**6. La première impression.** README réécrit (il avait environ cinq versions de retard : il
+décrivait encore un graphe sans superviseur), un fichier `.env.example` documentant les 54 variables
+une par une (il n'en existait aucun : il fallait lire 700 lignes de documentation technique pour
+savoir quoi configurer), six fichiers parasites supprimés à la racine, une intégration continue — il
+n'y avait aucun dossier `.github/` — et un one-pager de présentation autonome.
+
+### Ce que la vérification a trouvé, une fois encore
+
+Comme lors de la phase sécurité, la partie la plus utile n'est pas ce que le plan prévoyait, mais ce
+que la relecture du code a révélé :
+
+1. **Le schéma du graphe affiché dans l'interface était faux.** La liste des étapes y était recopiée
+   à la main, et il lui manquait une flèche : celle qui relie le superviseur à la suite du pipeline.
+   L'utilisateur voyait donc un superviseur sans issue. Personne ne pouvait s'en apercevoir, puisque
+   rien ne comparait ce schéma au vrai graphe. Le schéma est désormais **déduit du graphe lui-même**,
+   donc juste par construction.
+2. **Le webhook envoyait un journal de raisonnement en retard d'une ligne** par rapport à ce que la
+   même analyse affichait via l'API. Corrigé à la source, pas dans le test.
+3. **Un événement était déclaré, documenté… et jamais envoyé.** Trouvé en rédigeant cette entrée de
+   journal : `analysis.clarification` figurait dans le code et dans la documentation n8n, mais aucun
+   appelant ne l'émettait. Or c'est la **seule situation où le graphe s'arrête sans rien signaler** —
+   un workflow automatique lancé sur un e-mail ambigu serait resté muet indéfiniment, à attendre un
+   signal qui n'arrive qu'après la réponse humaine. Émis désormais au bon endroit : à l'extérieur du
+   nœud concerné, car une pause de clarification fait **rejouer ce nœud depuis son début** à la
+   reprise — l'envoi serait donc parti deux fois pour une seule question.
+4. Un piège dans le fichier `.gitignore` : la règle ajoutée pour exclure les variantes de `.env`
+   aurait aussi exclu le modèle `.env.example` qu'on venait d'écrire.
+
+**Et une erreur de ma part, notée telle quelle :** mon plan affirmait que l'interface affichait deux
+fois son titre. Vérification faite, ce sont deux écrans mutuellement exclusifs — l'écran de connexion
+et l'application. Il n'y avait pas de doublon ; je n'ai rien touché.
+
+### Ce qui reste volontairement non fait
+
+- **Le workflow n8n n'a jamais été importé dans un vrai n8n**, et les webhooks n'ont jamais été reçus
+  par une vraie instance : aucune n'existe pour ce projet.
+- **L'image Docker n'a jamais été construite** — Docker n'est pas installé sur la machine de
+  développement. Seule la configuration a été validée (le bon nombre de services par palier).
+- **L'intégration continue ne s'exécutera qu'au premier envoi vers un dépôt distant.**
+- **Le one-pager n'est hébergé nulle part**, pour la même raison que le HTTPS de la phase précédente :
+  il n'y a ni serveur ni domaine.
+
+Aucun de ces points n'est du code manquant. À chaque fois, c'est un compte, une instance ou un
+hébergement qui n'existe pas encore.
+
+### Comment on sait que ça marche
+
+**352 tests, hors ligne, ~13 s** (contre 261 à la fin de la phase sécurité : +91), dont 18 pour le
+planificateur, 30 pour le mode démonstration, et le reste pour les nouvelles capacités de l'API et
+les webhooks. Les tests portent sur ce qui pourrait réellement mal tourner : un travail périodique en
+échec est enregistré comme tel plutôt que réessayé toutes les minutes ; le graphe complet tourne
+**sans aucune clé d'API** ; un e-mail renvoyé deux fois ne déclenche qu'une seule analyse ; une pièce
+jointe surdimensionnée est refusée **avant** que le modèle ne soit appelé ; la sonde `/health` ne
+laisse fuir aucune valeur de secret ; et un test compare la charge utile du webhook à la réponse de
+l'API pour interdire toute dérive future entre les deux.
+
+Vérifié aussi hors tests : le graphe complet sur les six e-mails de démonstration sans aucune clé, la
+configuration Docker résolue par palier, et les exports (schéma OpenAPI, topologie du graphe)
+régénérés à l'identique.

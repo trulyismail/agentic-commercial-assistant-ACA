@@ -52,6 +52,7 @@ _ENV_OVERRIDES = {
     "ACA_AUDIT_DB": os.path.join(_TMP_DIR, "audit.sqlite"),
     "ACA_FOLLOWUP_DB": os.path.join(_TMP_DIR, "followup.sqlite"),
     "ACA_CONFIG_DB": os.path.join(_TMP_DIR, "config.sqlite"),
+    "ACA_SCHEDULE_DB": os.path.join(_TMP_DIR, "schedule.sqlite"),
 }
 os.environ.update(_ENV_OVERRIDES)
 

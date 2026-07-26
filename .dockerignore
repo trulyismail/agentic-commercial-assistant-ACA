@@ -1,0 +1,45 @@
+# Contexte de build Docker (§16.1.5).
+#
+# Docker N'UTILISE PAS .gitignore : sans ce fichier, `docker build` enverrait au démon le dépôt
+# entier — dont `venv/`, `dashboard/node_modules/` (des centaines de Mo, pour une image qui ne
+# contient pas le dashboard) et surtout `.env` et `credentials/`. Le Dockerfile ne les copie pas,
+# mais un secret présent dans le CONTEXTE reste lisible par quiconque peut lancer un build, et une
+# copie large (`COPY . .`) ajoutée un jour par mégarde le graverait dans une couche d'image.
+
+# Secrets — ne doivent jamais entrer dans le contexte de build
+.env
+.env.*
+!.env.example
+credentials/
+
+# Environnements et dépendances (réinstallés dans l'image depuis requirements.txt)
+venv/
+.venv/
+
+# Bases locales : le conteneur utilise un volume nommé, pas les données de la machine hôte
+data/
+*.sqlite
+*.sqlite-journal
+
+# Caches et artefacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.log
+*.tmp
+
+# Historique et outils de développement, inutiles à l'exécution
+.git/
+.github/
+.claude/
+.agents/
+.vscode/
+.idea/
+
+# Le dashboard Next.js est parqué (§12bis) et n'est pas servi par cette image
+dashboard/
+
+# Documentation et tests : n'ont pas à alourdir une image d'exécution
+docs/
+tests/
+*.md

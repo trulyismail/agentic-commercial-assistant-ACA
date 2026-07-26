@@ -21,6 +21,8 @@ uniquement sous vraie charge multi-clients » ; LangSmith (déjà branché, cf. 
 suffisant au volume prototype. Cet endpoint est donc prêt pour ce cas futur (scrape Prometheus/
 Grafana) sans imposer d'infrastructure supplémentaire tant que personne ne le scrape.
 """
+import base64
+import binascii
 import hmac
 import json
 import logging
@@ -32,16 +34,17 @@ from collections import defaultdict, deque
 from typing import Optional
 from urllib.parse import parse_qs
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from langchain_core.callbacks import UsageMetadataCallbackHandler
 from langgraph.types import Command
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from aca.core import app as aca_graph, prod_check
 from aca.core.slack_verify import verify_slack_signature
 from aca.core.tenant import current_org_id
+from aca.integrations import webhook
 from aca.storage import analytics_store, audit_log, config_store, queue_store
 
 # §15.1.5 : en `ACA_ENV=production`, refuse de démarrer si une protection requise manque (clé API,
@@ -192,12 +195,68 @@ MAX_NAME = 200
 # vers les couches en aval (clés de checkpoint, libellés Slack, lignes de journal).
 THREAD_ID_PATTERN = r"^[A-Za-z0-9_.:-]{1,128}$"
 
+# ── Pièces jointes (§16.1.1) ──────────────────────────────────────────────────────────────────
+# Bornes larges mais fermes, dans le même esprit que celles ci-dessus : elles écartent l'absurde,
+# pas le légitime. Un vrai appel d'offres arrive avec 3 à 5 documents, pas 200 ; et le texte
+# réellement transmis au LLM est de toute façon plafonné à `pdf_reader.MAX_CHARS` (15 000) par
+# `attachment_reader`. Refuser ici, c'est refuser AVANT de décoder 200 Mo en mémoire.
+MAX_ATTACHMENTS = 10
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024   # 20 Mo décodés, tous fichiers confondus
+MAX_FILENAME = 255
+
+
+class AttachmentIn(BaseModel):
+    """
+    Une pièce jointe transmise en base64 — la forme que produit nativement un nœud n8n
+    (Gmail Trigger → données binaires) comme n'importe quel client HTTP.
+    """
+    filename: str = Field(min_length=1, max_length=MAX_FILENAME)
+    content_b64: str = Field(min_length=1)
+
 
 class EmailIn(BaseModel):
     sender: str = Field(min_length=1, max_length=MAX_SENDER)
     subject: str = Field(max_length=MAX_SUBJECT)
     body: str = Field(max_length=MAX_BODY)
     thread_id: Optional[str] = Field(default=None, pattern=THREAD_ID_PATTERN)
+    # §16.1.1 : jusqu'ici `POST /threads` codait en dur `attachments_raw: []`, ce qui rendait
+    # l'analyse multimodale — le pilier d'innovation n°1 du projet — **inatteignable depuis
+    # l'API**, donc depuis n8n. Le graphe, lui, savait déjà les traiter (`ingestion_node` →
+    # `attachment_reader.extract_text_from_attachments`) : il ne manquait que ce champ.
+    attachments: list[AttachmentIn] = Field(default_factory=list, max_length=MAX_ATTACHMENTS)
+
+    @field_validator("attachments")
+    @classmethod
+    def _decodable_and_bounded(cls, value: list) -> list:
+        """
+        Refuse en 422 un base64 invalide ou un volume total déraisonnable, **avant** que quoi que
+        ce soit n'atteigne le graphe ou le LLM (même principe que les bornes de `body`, §15.1.4).
+        """
+        total = 0
+        for attachment in value:
+            try:
+                raw = base64.b64decode(attachment.content_b64, validate=True)
+            except (binascii.Error, ValueError) as e:
+                raise ValueError(f"Pièce jointe « {attachment.filename} » : base64 invalide.") from e
+            total += len(raw)
+            if total > MAX_ATTACHMENT_BYTES:
+                raise ValueError(
+                    f"Pièces jointes trop volumineuses (> {MAX_ATTACHMENT_BYTES // (1024 * 1024)} Mo "
+                    "au total une fois décodées)."
+                )
+        return value
+
+
+def _decoded_attachments(payload: EmailIn) -> list:
+    """
+    `[(nom_de_fichier, octets), ...]` — exactement la forme attendue par `attachments_raw` dans
+    l'état du graphe, donc par `ingestion_node`. La validité du base64 est déjà garantie par le
+    validateur ci-dessus, ce décodage-ci ne peut donc plus échouer.
+    """
+    return [
+        (attachment.filename, base64.b64decode(attachment.content_b64, validate=True))
+        for attachment in payload.attachments
+    ]
 
 
 class ClarificationIn(BaseModel):
@@ -229,28 +288,15 @@ def _snapshot(thread_id: str) -> dict:
     si `snapshot.next` n'est pas vide).
     """
     snapshot = aca_graph.app.get_state(_config(thread_id))
-    state = snapshot.values
     pending_clarification = snapshot.interrupts[0].value if snapshot.interrupts else None
+    # §16.1.2 : les champs communs viennent de `aca_graph.snapshot_from_state()`, partagé avec les
+    # webhooks sortants — un client REST et un abonné webhook voient ainsi exactement le même lead.
+    # (Y compris `injection_flags`, §15.1.4 : sans lui, la personne qui valide depuis n8n, Slack ou
+    # le dashboard ignorerait que l'e-mail entrant tente de piloter le modèle.) Seuls les trois
+    # champs ci-dessous sont propres à cette API : ils décrivent la PAUSE, information que seul le
+    # `StateSnapshot` de LangGraph détient et qui n'existe pas dans l'état du graphe lui-même.
     return {
-        "thread_id": thread_id,
-        "classification": state.get("classification"),
-        "classification_confidence": state.get("classification_confidence"),
-        "extracted_info": state.get("extracted_info"),
-        "company_profile": state.get("company_profile"),
-        "risk_flags": state.get("risk_flags"),
-        # §15.1.4 : exposé au même titre que `risk_flags`. Sans cette clé, le drapeau d'injection
-        # de prompt existait dans l'état du graphe et s'affichait dans Streamlit et l'alerte Slack,
-        # mais restait invisible à tout client de cette API (dashboard, futur n8n) — la personne
-        # qui valide depuis le dashboard n'aurait donc pas su que l'e-mail entrant tentait de
-        # piloter le modèle, ce qui est exactement l'information que ce drapeau doit porter.
-        "injection_flags": state.get("injection_flags"),
-        "knowledge_gap": state.get("knowledge_gap"),
-        "draft_response": state.get("draft_response"),
-        "reasoning_log": state.get("reasoning_log"),
-        "completed_agents": state.get("completed_agents"),
-        "action_status": state.get("action_status"),
-        "sender": state.get("email_raw", {}).get("sender"),
-        "subject": state.get("email_raw", {}).get("subject"),
+        **aca_graph.snapshot_from_state(snapshot.values, thread_id),
         "pending_clarification": pending_clarification,
         "awaiting_validation": not pending_clarification and bool(snapshot.next),
         "done": not snapshot.next,
@@ -272,25 +318,117 @@ def _invoke_with_metrics(graph_input, config: dict) -> None:
         TOKENS_PER_ANALYSIS.observe(tokens_in + tokens_out)
 
 
-@api.post("/threads", dependencies=[Depends(require_api_key)])
-def create_thread(payload: EmailIn) -> dict:
+def _thread_exists(thread_id: str) -> bool:
+    """Un état de graphe existe-t-il déjà pour ce `thread_id` ? (idempotence, cf. `create_thread`)"""
+    return bool(aca_graph.app.get_state(_config(thread_id)).created_at)
+
+
+def _emit_if_clarification(snapshot: dict) -> None:
     """
-    Démarre une nouvelle analyse — équivalent HTTP du formulaire manuel/import Gmail de `ui.py`.
-    Pas de pièces jointes dans cette première version de l'API (`attachments_raw` vide) : un futur
-    nœud n8n Gmail Trigger les transmettrait en base64, décodées avant cet appel.
+    §16.1.2 — émet `analysis.clarification` quand le graphe s'arrête sur une question à l'humain.
+
+    Émis ici et non dans `clarification_node`, contrairement à `analysis.paused` (émis, lui, depuis
+    `notification_node`) : `interrupt()` fait **rejouer le nœud depuis son début** à la reprise, si
+    bien qu'un envoi placé à l'intérieur du nœud partirait deux fois pour une seule question. Ce
+    point-ci est traversé exactement une fois par exécution du graphe.
+
+    Sans cet événement, un workflow n8n lancé en `?mode=async` restait muet sur un e-mail ambigu :
+    il avait reçu son 202 et n'attendait plus qu'`analysis.paused`, lequel n'arrive jamais tant que
+    la clarification est sans réponse — la seule branche où le graphe s'arrête sans rien émettre.
     """
-    thread_id = payload.thread_id or str(uuid.uuid4())
+    if snapshot.get("pending_clarification"):
+        webhook.emit(webhook.EVENT_CLARIFICATION, snapshot)
+
+
+def _run_analysis(payload: EmailIn, thread_id: str) -> None:
+    """Exécution du graphe jusqu'à la pause — partagée par le mode synchrone et le mode asynchrone."""
     _invoke_with_metrics(
         {
             "email_raw": {"sender": payload.sender, "subject": payload.subject, "body": payload.body},
-            "attachments_raw": [],
+            "attachments_raw": _decoded_attachments(payload),
         },
         config=_config(thread_id),
     )
     snapshot = _snapshot(thread_id)
     if snapshot["classification"]:
-        EMAILS_CLASSIFIED.labels(classification=snapshot["classification"], org_id=current_org_id()).inc()
-    return snapshot
+        EMAILS_CLASSIFIED.labels(
+            classification=snapshot["classification"], org_id=current_org_id(),
+        ).inc()
+    _emit_if_clarification(snapshot)
+
+
+@api.post("/threads", dependencies=[Depends(require_api_key)])
+def create_thread(payload: EmailIn, background: BackgroundTasks, mode: str = "sync") -> dict:
+    """
+    Démarre une nouvelle analyse — équivalent HTTP du formulaire manuel/import Gmail de `ui.py`.
+
+    §16.1.1 : les pièces jointes (PDF/Word/Excel, transmises en base64) sont désormais acceptées et
+    transmises brutes au graphe, où `ingestion_node` en extrait le texte. Auparavant ce champ était
+    codé en dur à `[]`, ce qui privait tout client de l'API — donc n8n — de l'analyse multimodale,
+    pourtant le pilier d'innovation n°1 du projet.
+
+    §16.1.4 — **idempotence** : si un `thread_id` fourni possède déjà un état, l'analyse n'est PAS
+    rejouée et l'instantané existant est renvoyé avec `already_exists: true`. Le nœud HTTP de n8n
+    réessaie par défaut en cas d'échec réseau ; sans cette garde, un simple réessai relançait une
+    analyse complète (deux appels 70B, du quota Tavily/Gemini) **et renotifiait** l'équipe pour le
+    même e-mail. C'est le pendant, côté API, de l'idempotence que `poller.py` obtient déjà en
+    marquant « en_cours » avant `invoke()`.
+
+    §16.1.4 — **mode asynchrone** (`?mode=async`) : renvoie `202` immédiatement et exécute le
+    graphe en tâche de fond ; la fin est signalée par le webhook `analysis.paused` (§16.1.2). Le
+    mode synchrone reste le défaut (aucun client existant n'est affecté), mais il retient la requête
+    30 à 90 s — deux appels 70B, Tavily, embeddings, réflexion — ce qui devient fragile dès que les
+    réessais de n8n se combinent au backoff 429 du palier gratuit de Groq.
+    """
+    thread_id = payload.thread_id or str(uuid.uuid4())
+
+    if payload.thread_id and _thread_exists(thread_id):
+        return {**_snapshot(thread_id), "already_exists": True}
+
+    if mode == "async":
+        background.add_task(_run_analysis, payload, thread_id)
+        return JSONResponse(
+            {"thread_id": thread_id, "status": "running", "already_exists": False},
+            status_code=202,
+        )
+
+    _run_analysis(payload, thread_id)
+    return {**_snapshot(thread_id), "already_exists": False}
+
+
+@api.get("/health")
+def health() -> dict:
+    """
+    Sonde de disponibilité (§16.1.3) — healthcheck Docker, branche d'erreur n8n, supervision.
+
+    **N'appelle aucun service externe** : elle rapporte ce qui est *configuré*, pas ce qui répond.
+    Une sonde qui interrogerait Groq, Sheets et Supabase serait lente, consommerait du quota à
+    chaque passage (toutes les 10 s pour Docker) et tomberait en panne pour cause de panne d'un
+    tiers optionnel — alors que tout le projet est bâti sur « service absent = fonctionnalité
+    ignorée ».
+
+    Volontairement hors de `require_api_key` (un orchestrateur doit pouvoir sonder sans détenir la
+    clé qui écrit dans le CRM) et volontairement **strictement booléenne** : jamais une valeur de
+    secret, seulement « configuré ou non ».
+    """
+    return {
+        "status": "ok",
+        "version": api.version,
+        "org_id": current_org_id(),
+        "environment": "production" if prod_check.is_production() else "development",
+        "checkpointer": "postgres" if os.getenv("DATABASE_URL") else "sqlite",
+        "integrations": {
+            "groq": bool(os.getenv("GROQ_API_KEY")),
+            "gemini": bool(os.getenv("GOOGLE_API_KEY")),
+            "sheets": bool(os.getenv("GOOGLE_SHEETS_ID")),
+            "tavily": bool(os.getenv("TAVILY_API_KEY")),
+            "hubspot": bool(os.getenv("HUBSPOT_ACCESS_TOKEN")),
+            "slack": bool(os.getenv("SLACK_WEBHOOK_URL")),
+            "slack_interactivity": bool(os.getenv("SLACK_SIGNING_SECRET")),
+            "outbound_webhook": webhook.is_enabled(),
+            "stripe": bool(os.getenv("STRIPE_API_KEY")),
+        },
+    }
 
 
 @api.get("/threads/pending", dependencies=[Depends(require_api_key)])
@@ -351,6 +489,12 @@ def _do_validate(thread_id: str, validated_by: Optional[str] = None,
         thread_id, validated_by, state_snapshot["classification"], state_snapshot["sender"],
     )
     analytics_store.record_validation(thread_id)
+    # §16.1.2 : émis APRÈS l'écriture CRM et la comptabilité — un abonné n8n qui déclenche une
+    # suite (facture, tâche, message d'équipe) doit pouvoir considérer le lead comme réellement
+    # enregistré. `validated_by` est joint : c'est l'information qu'un workflow d'entreprise veut.
+    webhook.emit(
+        webhook.EVENT_VALIDATED, {**state_snapshot, "validated_by": validated_by},
+    )
     return state_snapshot
 
 
@@ -365,7 +509,9 @@ def _do_reject(thread_id: str) -> dict:
     if snapshot.interrupts or not snapshot.next:
         raise HTTPException(400, "Ce thread n'est pas en attente de validation.")
     queue_store.mark_rejected(thread_id)
-    return {**_snapshot(thread_id), "rejected": True}
+    rejected = {**_snapshot(thread_id), "rejected": True}
+    webhook.emit(webhook.EVENT_REJECTED, rejected)
+    return rejected
 
 
 @api.post("/threads/{thread_id}/valider", dependencies=[Depends(require_api_key)])

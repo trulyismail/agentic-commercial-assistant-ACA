@@ -1,0 +1,186 @@
+{
+  "nodes": [
+    {
+      "id": "ingestion",
+      "label": "Ingestion",
+      "always_traversed": true
+    },
+    {
+      "id": "classifier",
+      "label": "Classifieur",
+      "always_traversed": true
+    },
+    {
+      "id": "memory_lookup",
+      "label": "Mémoire",
+      "always_traversed": true
+    },
+    {
+      "id": "risk_scan",
+      "label": "Risques",
+      "always_traversed": true
+    },
+    {
+      "id": "extractor",
+      "label": "Extracteur",
+      "always_traversed": true
+    },
+    {
+      "id": "clarification",
+      "label": "Clarification",
+      "always_traversed": true
+    },
+    {
+      "id": "supervisor",
+      "label": "Superviseur",
+      "always_traversed": true
+    },
+    {
+      "id": "enrichissement",
+      "label": "Enrichissement",
+      "always_traversed": false
+    },
+    {
+      "id": "connaissance",
+      "label": "Connaissance",
+      "always_traversed": false
+    },
+    {
+      "id": "veille",
+      "label": "Veille",
+      "always_traversed": false
+    },
+    {
+      "id": "stratege",
+      "label": "Stratège",
+      "always_traversed": false
+    },
+    {
+      "id": "reflection",
+      "label": "Réflexion",
+      "always_traversed": false
+    },
+    {
+      "id": "routing",
+      "label": "Routage",
+      "always_traversed": true
+    },
+    {
+      "id": "notification",
+      "label": "Notification",
+      "always_traversed": true
+    },
+    {
+      "id": "action",
+      "label": "Action",
+      "always_traversed": false
+    }
+  ],
+  "edges": [
+    {
+      "source": "START",
+      "target": "ingestion",
+      "label": null
+    },
+    {
+      "source": "clarification",
+      "target": "supervisor",
+      "label": null
+    },
+    {
+      "source": "classifier",
+      "target": "memory_lookup",
+      "label": null
+    },
+    {
+      "source": "connaissance",
+      "target": "supervisor",
+      "label": null
+    },
+    {
+      "source": "enrichissement",
+      "target": "supervisor",
+      "label": null
+    },
+    {
+      "source": "extractor",
+      "target": "clarification",
+      "label": null
+    },
+    {
+      "source": "ingestion",
+      "target": "classifier",
+      "label": null
+    },
+    {
+      "source": "memory_lookup",
+      "target": "risk_scan",
+      "label": null
+    },
+    {
+      "source": "notification",
+      "target": "action",
+      "label": null
+    },
+    {
+      "source": "reflection",
+      "target": "routing",
+      "label": "ok"
+    },
+    {
+      "source": "reflection",
+      "target": "stratege",
+      "label": "rewrite"
+    },
+    {
+      "source": "risk_scan",
+      "target": "extractor",
+      "label": null
+    },
+    {
+      "source": "routing",
+      "target": "notification",
+      "label": null
+    },
+    {
+      "source": "stratege",
+      "target": "reflection",
+      "label": null
+    },
+    {
+      "source": "supervisor",
+      "target": "connaissance",
+      "label": null
+    },
+    {
+      "source": "supervisor",
+      "target": "enrichissement",
+      "label": null
+    },
+    {
+      "source": "supervisor",
+      "target": "routing",
+      "label": "FINISH"
+    },
+    {
+      "source": "supervisor",
+      "target": "stratege",
+      "label": null
+    },
+    {
+      "source": "supervisor",
+      "target": "veille",
+      "label": null
+    },
+    {
+      "source": "veille",
+      "target": "supervisor",
+      "label": null
+    },
+    {
+      "source": "action",
+      "target": "END",
+      "label": null
+    }
+  ]
+}

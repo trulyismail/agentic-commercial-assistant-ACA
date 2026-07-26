@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACA — Assistant Commercial Agentique</title>
+<meta name="description" content="Vos e-mails commerciaux sont lus, qualifiés, enrichis et une réponse est rédigée pendant votre absence. À votre connexion, il ne reste qu'à cliquer « Valider ».">
+<style>
+/*
+  One-pager de présentation (§16.5 de docs/ACAM_roadmap.md).
+
+  Entièrement autonome : aucune police, feuille de style ni script distant. Une page de pitch qui
+  dépend d'un CDN ne s'ouvre pas dans un train, ni derrière le proxy d'un grand compte — or c'est
+  exactement dans ces conditions qu'on la montre. Palette reprise du thème Fluent de l'interface
+  Streamlit (.streamlit/config.toml) pour que la démonstration qui suit la page n'ait pas l'air
+  d'un autre produit. Un bloc `@media print` la rend imprimable en PDF sans retouche.
+*/
+:root{
+  --bg:#ffffff; --bg-alt:#f7f9fb; --card:#ffffff; --border:#e3e6ea;
+  --text:#1a1a1a; --muted:#5c6470; --faint:#8b93a0;
+  --brand:#0078d4; --brand-deep:#004e8c; --brand-soft:#eaf4fd;
+  --green:#107c10; --green-soft:#eaf5ea;
+  --amber:#b57c00; --amber-soft:#fdf5e2;
+  --violet:#8764b8;
+  --shadow:0 1px 2px rgba(16,24,40,.05), 0 8px 24px -12px rgba(16,24,40,.14);
+  --radius:10px;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#12161c; --bg-alt:#161b23; --card:#1a2029; --border:#2a323d;
+    --text:#e9edf3; --muted:#a3adbb; --faint:#7b8595;
+    --brand:#4cabf5; --brand-deep:#9ccdf8; --brand-soft:#12283b;
+    --green:#5dbb5d; --green-soft:#14261a;
+    --amber:#e0a92b; --amber-soft:#2a2213;
+    --violet:#b39ae0;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 28px -14px rgba(0,0,0,.7);
+  }
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0; background:var(--bg); color:var(--text);
+  font-family:"Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+  font-size:16px; line-height:1.62; letter-spacing:-.003em;
+}
+.wrap{max-width:1040px; margin:0 auto; padding:0 24px}
+section{padding:64px 0; border-top:1px solid var(--border)}
+h1,h2,h3{line-height:1.22; letter-spacing:-.021em; margin:0}
+h2{font-size:clamp(1.4rem,2.6vw,1.85rem); font-weight:640; margin-bottom:8px}
+h3{font-size:1rem; font-weight:640; margin-bottom:6px}
+p{margin:0 0 16px}
+a{color:var(--brand); text-decoration:none}
+a:hover{text-decoration:underline}
+code,kbd{font-family:"Cascadia Code","Fira Code",ui-monospace,SFMono-Regular,Consolas,monospace; font-size:.86em}
+.lede{font-size:1.05rem; color:var(--muted); max-width:66ch; margin-bottom:32px}
+.eyebrow{
+  font-size:.72rem; font-weight:680; letter-spacing:.1em; text-transform:uppercase;
+  color:var(--brand); margin:0 0 10px;
+}
+
+/* ── Hero ───────────────────────────────────────────────────────────────── */
+.hero{
+  padding:88px 0 72px;
+  background:
+    radial-gradient(900px 420px at 12% -8%, var(--brand-soft), transparent 62%),
+    linear-gradient(var(--bg), var(--bg-alt));
+}
+.hero h1{font-size:clamp(2rem,5.2vw,3.05rem); font-weight:680; max-width:19ch}
+.hero .claim{
+  font-size:clamp(1.05rem,2.1vw,1.24rem); color:var(--text); font-weight:520;
+  max-width:60ch; margin:20px 0 14px;
+}
+.hero .sub{color:var(--muted); max-width:64ch; margin-bottom:28px}
+.badges{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:30px}
+.badge{
+  display:inline-flex; align-items:center; gap:6px; padding:5px 11px;
+  background:var(--card); border:1px solid var(--border); border-radius:999px;
+  font-size:.79rem; color:var(--muted); box-shadow:var(--shadow);
+}
+.badge b{color:var(--text); font-weight:640}
+.cta{display:flex; flex-wrap:wrap; gap:10px; align-items:center}
+.btn{
+  display:inline-block; padding:10px 18px; border-radius:6px; font-size:.9rem; font-weight:600;
+  border:1px solid var(--brand); background:var(--brand); color:#fff;
+}
+.btn:hover{background:var(--brand-deep); border-color:var(--brand-deep); text-decoration:none}
+.btn.ghost{background:transparent; color:var(--brand)}
+.btn.ghost:hover{background:var(--brand-soft); color:var(--brand)}
+
+/* ── Grilles & cartes ───────────────────────────────────────────────────── */
+.grid{display:grid; gap:16px}
+.g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.g3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.g4{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:860px){ .g3,.g4{grid-template-columns:repeat(2,minmax(0,1fr))} }
+@media (max-width:600px){ .g2,.g3,.g4{grid-template-columns:1fr} }
+.card{
+  background:var(--card); border:1px solid var(--border); border-radius:var(--radius);
+  padding:20px; box-shadow:var(--shadow);
+}
+.card p{margin:0; color:var(--muted); font-size:.92rem}
+.card .num{
+  font-size:1.9rem; font-weight:680; letter-spacing:-.03em; color:var(--brand);
+  line-height:1.1; display:block; margin-bottom:2px;
+}
+.card .num.ok{color:var(--green)}
+.pill{
+  display:inline-block; width:28px; height:26px; line-height:26px; text-align:center;
+  border-radius:7px; background:var(--brand-soft); color:var(--brand);
+  font-size:.78rem; font-weight:700; margin-bottom:10px;
+}
+
+/* ── Pipeline ───────────────────────────────────────────────────────────── */
+.flowbox{overflow-x:auto; padding:4px 0 12px; -webkit-overflow-scrolling:touch}
+.flow{display:flex; align-items:center; gap:7px; min-width:max-content; padding:8px 2px}
+.node{
+  padding:8px 13px; border-radius:7px; font-size:.83rem; font-weight:560; white-space:nowrap;
+  background:var(--card); border:1px solid var(--border); color:var(--text);
+}
+.node.b{background:var(--brand-soft); border-color:var(--brand); color:var(--brand-deep); font-weight:660}
+.node.g{background:var(--green-soft); border-color:var(--green); color:var(--green); font-weight:660}
+.node.a{background:var(--amber-soft); border-color:var(--amber); color:var(--amber); font-weight:660}
+.node.term{border-radius:999px; background:var(--bg-alt); color:var(--faint); font-weight:640}
+.arrow{color:var(--faint); font-size:.95rem; flex:none}
+.workers{
+  margin-top:14px; display:flex; flex-wrap:wrap; gap:8px;
+  padding:16px; border:1px dashed var(--border); border-radius:var(--radius); background:var(--bg-alt);
+}
+.worker{
+  flex:1 1 190px; background:var(--card); border:1px solid var(--border);
+  border-left:3px solid var(--violet); border-radius:7px; padding:11px 13px;
+}
+.worker b{display:block; font-size:.87rem; margin-bottom:2px}
+.worker span{font-size:.8rem; color:var(--muted)}
+.pausebar{
+  margin-top:18px; padding:15px 18px; border-radius:var(--radius);
+  background:var(--amber-soft); border:1px solid var(--amber);
+  display:flex; gap:13px; align-items:flex-start;
+}
+.pausebar .ico{font-size:1.25rem; line-height:1.35; flex:none}
+.pausebar p{margin:0; font-size:.9rem; color:var(--text)}
+.pausebar b{color:var(--amber)}
+
+/* ── Tableaux ───────────────────────────────────────────────────────────── */
+.tablebox{overflow-x:auto; border:1px solid var(--border); border-radius:var(--radius); background:var(--card)}
+table{border-collapse:collapse; width:100%; min-width:520px; font-size:.9rem}
+th,td{text-align:left; padding:11px 15px; border-bottom:1px solid var(--border); vertical-align:top}
+thead th{
+  background:var(--bg-alt); font-size:.74rem; text-transform:uppercase; letter-spacing:.06em;
+  color:var(--muted); font-weight:660;
+}
+tbody tr:last-child td{border-bottom:none}
+td b{font-weight:620}
+
+/* ── Listes de preuve ───────────────────────────────────────────────────── */
+ul.check{list-style:none; padding:0; margin:0; display:grid; gap:8px}
+ul.check li{padding-left:26px; position:relative; font-size:.92rem; color:var(--muted)}
+ul.check li::before{content:"✓"; position:absolute; left:0; top:-1px; color:var(--green); font-weight:700}
+ul.check.warn li::before{content:"○"; color:var(--amber); font-weight:700}
+ul.check li b{color:var(--text); font-weight:620}
+
+pre{
+  background:var(--bg-alt); border:1px solid var(--border); border-radius:var(--radius);
+  padding:16px 18px; overflow-x:auto; margin:0; font-size:.85rem; line-height:1.7;
+}
+pre .c{color:var(--faint)}
+pre .p{color:var(--brand)}
+
+.note{
+  border-left:3px solid var(--brand); background:var(--bg-alt);
+  padding:14px 18px; border-radius:0 var(--radius) var(--radius) 0; margin:0;
+}
+.note p{margin:0; font-size:.9rem; color:var(--muted)}
+
+footer{
+  padding:40px 0 56px; border-top:1px solid var(--border);
+  color:var(--faint); font-size:.85rem; background:var(--bg-alt);
+}
+footer a{color:var(--muted)}
+footer .links{display:flex; flex-wrap:wrap; gap:6px 18px; margin-bottom:14px}
+
+@media print{
+  .hero{padding:36px 0; background:none}
+  section{padding:26px 0; break-inside:avoid}
+  .btn{display:none}
+  body{font-size:11.5pt}
+}
+</style>
+</head>
+<body>
+
+<!-- ── Hero ───────────────────────────────────────────────────────────────── -->
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">Assistant Commercial Agentique · prototype de stage</p>
+    <h1>Le travail est déjà fait quand vous ouvrez votre boîte mail.</h1>
+    <p class="claim">
+      ACA lit les e-mails commerciaux entrants et leurs pièces jointes, qualifie le lead, interroge
+      votre base de connaissances, enrichit le profil de l'entreprise, rédige la réponse — puis
+      <strong>s'arrête</strong>.
+    </p>
+    <p class="sub">
+      À votre connexion, il ne reste qu'à relire et cliquer « Valider ». Aucune ligne n'entre dans
+      le CRM, aucun e-mail ne part avant ce clic. C'est un rédacteur, pas un agent lâché sur votre CRM.
+    </p>
+    <div class="badges">
+      <span class="badge">🧩 <b>15 nœuds</b> LangGraph</span>
+      <span class="badge">⏸️ <b>2 pauses</b> humaines natives</span>
+      <span class="badge">🧪 <b>352 tests</b> hors ligne</span>
+      <span class="badge">🎯 <b>100 %</b> de classification (50 e-mails labellisés)</span>
+      <span class="badge">💶 <b>0 €</b> d'infrastructure</span>
+    </div>
+    <div class="cta">
+      <a class="btn" href="#demarrer">Essayer en 30 secondes</a>
+      <a class="btn ghost" href="#preuves">Ce qui est vérifié — et ce qui ne l'est pas</a>
+    </div>
+  </div>
+</header>
+
+<!-- ── Problème ───────────────────────────────────────────────────────────── -->
+<section>
+  <div class="wrap">
+    <p class="eyebrow">Le problème</p>
+    <h2>Un cahier des charges de 40 pages arrive un vendredi à 18 h.</h2>
+    <p class="lede">
+      Le prospect attend une réponse lundi. Entre-temps il faut lire le document, retrouver vos
+      tarifs, vérifier qui est ce client, savoir si on lui a déjà parlé, et rédiger quelque chose de
+      présentable. Le goulot d'étranglement n'est pas la décision commerciale — elle prend deux
+      minutes. C'est <em>tout ce qu'il faut rassembler avant</em> de pouvoir la prendre.
+    </p>
+    <div class="grid g3">
+      <div class="card">
+        <span class="pill">1</span>
+        <h3>Le tri manuel coûte cher</h3>
+        <p>Chaque e-mail est ouvert, lu et classé à la main — y compris les spams, les candidatures
+        et les tickets de support, qui n'ont rien à faire dans un pipeline commercial.</p>
+      </div>
+      <div class="card">
+        <span class="pill">2</span>
+        <h3>Le contexte est éparpillé</h3>
+        <p>Les tarifs sont dans un tableur, l'historique dans le CRM, le profil du prospect sur le
+        web. Personne ne consolide les trois avant de répondre.</p>
+      </div>
+      <div class="card">
+        <span class="pill">3</span>
+        <h3>Automatiser fait peur — à raison</h3>
+        <p>Un agent qui écrit tout seul dans le CRM et envoie des e-mails à de vrais prospects,
+        c'est un incident qui attend son heure.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Pipeline ───────────────────────────────────────────────────────────── -->
+<section style="background:var(--bg-alt)">
+  <div class="wrap">
+    <p class="eyebrow">Comment ça marche</p>
+    <h2>Une équipe d'agents, un superviseur, et un frein à main.</h2>
+    <p class="lede">
+      Un graphe d'états LangGraph, pas une chaîne de prompts. Un superviseur oriente dynamiquement
+      quatre agents spécialisés, et le graphe sait <em>s'interrompre</em> — puis reprendre exactement
+      là où il s'était arrêté, même après un redémarrage.
+    </p>
+
+    <div class="flowbox">
+      <div class="flow">
+        <span class="node term">START</span><span class="arrow">→</span>
+        <span class="node">Ingestion PJ</span><span class="arrow">→</span>
+        <span class="node b">Classifieur</span><span class="arrow">→</span>
+        <span class="node">Mémoire CRM</span><span class="arrow">→</span>
+        <span class="node a">Scan de risques</span><span class="arrow">→</span>
+        <span class="node b">Extracteur</span><span class="arrow">→</span>
+        <span class="node a">Clarification ❓</span><span class="arrow">→</span>
+        <span class="node b">Superviseur</span>
+      </div>
+    </div>
+
+    <div class="workers">
+      <div class="worker"><b>Enrichissement</b><span>Profil de l'entreprise depuis le domaine de l'expéditeur, mis en cache.</span></div>
+      <div class="worker"><b>Connaissance</b><span>RAG hybride dense + mots-clés sur votre FAQ, fusion RRF.</span></div>
+      <div class="worker"><b>Veille</b><span>Repli web quand la FAQ ne sait pas — et elle s'enrichit au passage.</span></div>
+      <div class="worker"><b>Stratège → Réflexion</b><span>Rédige la proposition, puis se relit et se corrige une fois.</span></div>
+    </div>
+
+    <div class="flowbox">
+      <div class="flow">
+        <span class="node b">Superviseur</span><span class="arrow">— FINISH →</span>
+        <span class="node">Routage</span><span class="arrow">→</span>
+        <span class="node">Notification</span><span class="arrow">→</span>
+        <span class="node a">⏸️ PAUSE</span><span class="arrow">→</span>
+        <span class="node g">Action : écriture CRM</span><span class="arrow">→</span>
+        <span class="node term">END</span>
+      </div>
+    </div>
+
+    <div class="pausebar">
+      <span class="ico">⏸️</span>
+      <p>
+        <b>Le frein à main est structurel, pas conventionnel.</b> Le nœud d'écriture est compilé
+        derrière <code>interrupt_before=["action"]</code> : le graphe ne <em>peut pas</em> l'atteindre
+        sans reprise explicite. La règle tient donc sur <em>toutes</em> les surfaces — interface,
+        API, Slack, n8n — parce qu'elle est dans le graphe, pas dans le bouton.
+      </p>
+    </div>
+
+    <p style="margin-top:20px; font-size:.88rem; color:var(--muted)">
+      Deuxième pause, plus rare : quand le besoin du prospect est ambigu, le graphe <b>pose une
+      question</b> plutôt que d'inventer une réponse, et attend.
+    </p>
+  </div>
+</section>
+
+<!-- ── Piliers ────────────────────────────────────────────────────────────── -->
+<section>
+  <div class="wrap">
+    <p class="eyebrow">Ce qui distingue le projet</p>
+    <h2>Trois partis pris techniques.</h2>
+    <div class="grid g3">
+      <div class="card">
+        <span class="pill">01</span>
+        <h3>Multimodal dès l'entrée</h3>
+        <p>PDF, Word et Excel joints sont extraits et analysés <em>avec</em> le corps du message —
+        un appel d'offres arrive rarement en texte brut. Le texte combiné est plafonné une seule
+        fois, pour que dix pièces jointes ne fassent pas exploser le contexte.</p>
+      </div>
+      <div class="card">
+        <span class="pill">02</span>
+        <h3>RAG « sans base de données »</h3>
+        <p>La base de connaissances vit dans un Google Sheets que vos commerciaux éditent
+        eux-mêmes. Recherche hybride : embeddings sémantiques <em>et</em> correspondance exacte,
+        fusionnées par RRF — parce qu'une référence produit ou un SLA « 99,9 % » échappe aux
+        embeddings seuls. pgvector prend le relais si le volume l'exige.</p>
+      </div>
+      <div class="card">
+        <span class="pill">03</span>
+        <h3>Mémoire hybride</h3>
+        <p>Court terme : le checkpointer LangGraph, qui survit aux pauses, aux redémarrages et au
+        passage d'un processus à l'autre. Long terme : le CRM et la FAQ, relus <em>avant</em>
+        traitement — client récurrent et doublon détectés d'entrée.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Paliers ────────────────────────────────────────────────────────────── -->
+<section style="background:var(--bg-alt)">
+  <div class="wrap">
+    <p class="eyebrow">Déploiement</p>
+    <h2>Autonome sans n8n. Orchestrable avec.</h2>
+    <p class="lede">
+      Le palier Solo n'est pas un mode dégradé « à boutons » : il tourne 24/7, interface fermée.
+      n8n n'apporte pas l'automatisation — il apporte l'orchestration avec vos autres outils.
+      Les deux paliers font tourner la même image et la même API.
+    </p>
+    <div class="tablebox">
+      <table>
+        <thead>
+          <tr><th>Capacité autonome</th><th>Palier Solo</th><th>Palier Enterprise</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><b>Ingestion des e-mails</b></td><td><code>poller.py</code></td><td>nœud Gmail Trigger</td></tr>
+          <tr><td><b>Traitement passif 24/7</b></td><td><code>poller.py</code></td><td>workflow déclenché par webhook</td></tr>
+          <tr><td><b>Relances commerciales</b></td><td><code>scheduler.py</code></td><td>nœud Schedule</td></tr>
+          <tr><td><b>Purge RGPD</b></td><td><code>scheduler.py</code></td><td>nœud Schedule</td></tr>
+          <tr><td><b>Maintenance de la file</b></td><td><code>scheduler.py</code></td><td>nœud Schedule</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="margin-top:16px; font-size:.9rem; color:var(--muted)">
+      On passe de l'un à l'autre en changeant un mot :
+      <code>docker compose --profile solo up</code> · <code>--profile enterprise up</code>
+    </p>
+  </div>
+</section>
+
+<!-- ── Preuves ────────────────────────────────────────────────────────────── -->
+<section id="preuves">
+  <div class="wrap">
+    <p class="eyebrow">Honnêteté</p>
+    <h2>Ce qui est vérifié en direct — et ce qui ne l'est pas.</h2>
+    <p class="lede">
+      Cette section existe parce qu'un prototype qui prétend tout avoir vérifié n'est pas crédible.
+      La distinction est faite ici, pas enfouie dans un dépôt.
+    </p>
+
+    <div class="grid g4" style="margin-bottom:32px">
+      <div class="card"><span class="num">352</span><p>tests automatisés, hors ligne, ~13 s</p></div>
+      <div class="card"><span class="num ok">100 %</span><p>de classification sur 50 e-mails labellisés</p></div>
+      <div class="card"><span class="num">74</span><p>paires Q/R de FAQ, seuils du RAG calibrés dessus</p></div>
+      <div class="card"><span class="num">0 €</span><p>d'infrastructure — paliers gratuits uniquement</p></div>
+    </div>
+
+    <div class="grid g2">
+      <div class="card">
+        <h3 style="color:var(--green)">Vérifié contre les vrais services</h3>
+        <ul class="check" style="margin-top:12px">
+          <li><b>Gmail</b> — lecture, marquage, brouillons en fil</li>
+          <li><b>Google Sheets</b> — CRM, FAQ et cache d'enrichissement</li>
+          <li><b>Groq · Gemini · Tavily</b> — classification, embeddings, veille</li>
+          <li><b>HubSpot</b> — contact, deal et note créés, puis supprimés</li>
+          <li><b>Supabase</b> — pgvector, checkpointer partagé, RLS multi-tenant</li>
+          <li><b>Slack</b> — alertes et routage support/RH</li>
+          <li><b>RGPD</b> — purge par ancienneté et droit à l'effacement</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3 style="color:var(--amber)">Codé et testé, jamais exercé en réel</h3>
+        <ul class="check warn" style="margin-top:12px">
+          <li><b>Le workflow n8n</b> — aucune instance n8n n'existe pour ce projet</li>
+          <li><b>La facturation Stripe</b> — aucun compte de test</li>
+          <li><b>Les boutons d'approbation Slack</b> — demandent une app Slack et une URL publique</li>
+          <li><b>TLS</b> — la procédure est écrite, rien n'est hébergé</li>
+        </ul>
+        <p style="margin-top:14px; font-size:.86rem; color:var(--faint)">
+          Chacun de ces quatre points est un compte ou un hébergement manquant, pas une pièce de
+          code absente.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Sécurité ───────────────────────────────────────────────────────────── -->
+<section style="background:var(--bg-alt)">
+  <div class="wrap">
+    <p class="eyebrow">Sécurité &amp; conformité</p>
+    <h2>Conçu pour qu'on puisse le brancher sur une vraie boîte mail.</h2>
+    <div class="grid g3">
+      <div class="card">
+        <h3>Validation humaine non contournable</h3>
+        <p>Garantie par la compilation du graphe, pas par un bouton — donc vraie sur les quatre
+        surfaces à la fois.</p>
+      </div>
+      <div class="card">
+        <h3>Journal d'audit chaîné</h3>
+        <p>Chaque ligne scelle la précédente : modifier <em>ou supprimer</em> une entrée casse la
+        chaîne, et la vérification localise la rupture. Tamper-<em>evident</em>, dit sans exagérer.</p>
+      </div>
+      <div class="card">
+        <h3>Comptes nominatifs et rôles</h3>
+        <p>Mots de passe PBKDF2 salés, rôles <code>admin</code>/<code>operator</code>, verrou
+        progressif, sessions à TTL absolu et à inactivité.</p>
+      </div>
+      <div class="card">
+        <h3>RGPD de bout en bout</h3>
+        <p>Purge par ancienneté <em>et</em> droit à l'effacement immédiat d'une personne, sur les
+        quatre emplacements où ses données vivent réellement.</p>
+      </div>
+      <div class="card">
+        <h3>Injections de prompt signalées</h3>
+        <p>Détection déterministe, jamais bloquante : elle rend le gate humain <em>informé</em>.
+        Une consigne cachée page 14 d'un cahier des charges ne passe plus pour une phrase de plus.</p>
+      </div>
+      <div class="card">
+        <h3>Le mode production ferme les portes</h3>
+        <p><code>ACA_ENV=production</code> renverse le défaut : l'application <em>refuse de
+        démarrer</em> s'il manque une protection, au lieu de la sauter en silence.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Démarrage ──────────────────────────────────────────────────────────── -->
+<section id="demarrer">
+  <div class="wrap">
+    <p class="eyebrow">Essayer</p>
+    <h2>Sans compte, sans clé, sans configuration.</h2>
+    <p class="lede">
+      Le mode démonstration exécute <em>le vrai graphe</em> — mêmes agents, même superviseur, même
+      auto-critique, même pause de validation — avec un modèle simulé. Les écritures CRM y sont
+      matériellement bloquées : une démonstration qui pollue un vrai CRM serait pire que pas de
+      démonstration.
+    </p>
+<pre><span class="c"># Le graphe complet sur 6 e-mails de démonstration, zéro clé d'API</span>
+<span class="p">python</span> -m aca.core.app
+
+<span class="c"># Ou l'interface, en mode démonstration</span>
+<span class="p">ACA_DEMO_MODE</span>=1 streamlit run ui.py</pre>
+
+    <p style="margin:26px 0 16px; font-size:.95rem"><b>En conditions réelles</b>, le strict minimum
+    est une clé Groq et un Google&nbsp;Sheets. Tout le reste est optionnel — une variable absente
+    signifie « fonctionnalité ignorée », jamais un plantage.</p>
+<pre><span class="p">pip</span> install -r requirements.txt
+<span class="p">cp</span> .env.example .env              <span class="c"># puis GROQ_API_KEY + GOOGLE_SHEETS_ID</span>
+<span class="p">python</span> scripts/run_solo.py        <span class="c"># API + interface + poller + planificateur</span></pre>
+
+    <div class="note" style="margin-top:24px">
+      <p>
+        Interface sur <code>localhost:8501</code>, API sur <code>localhost:8000</code>
+        (sonde&nbsp;: <code>/health</code>). Les 54 variables d'environnement sont documentées une
+        par une dans <code>.env.example</code>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="links">
+      <a href="../../README.md">README</a>
+      <a href="../ACAM_roadmap.md">Feuille de route &amp; audits</a>
+      <a href="../PROJECT_JOURNAL.md">Journal de bord</a>
+      <a href="../DEPLOYMENT_HARDENING.md">Durcissement du déploiement</a>
+      <a href="../PRIVACY_POLICY.md">Politique de confidentialité</a>
+      <a href="../../n8n/README.md">Intégration n8n</a>
+    </div>
+    <p style="margin:0">
+      <b style="color:var(--muted)">ACA — Assistant Commercial Agentique.</b>
+      Prototype de stage (8 semaines) · LangGraph · Groq · Google Sheets · Streamlit ·
+      FastAPI. Stack intégralement en paliers gratuits.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,151 +1,204 @@
-# Assistant Commercial Agentique (ACA)
+# ACA — Assistant Commercial Agentique
 
-Prototype de stage (8 semaines) qui **pré-lit les e-mails commerciaux entrants** (et leurs pièces
-jointes PDF), en **extrait les informations de lead** via un LLM, puis **enregistre les leads qualifiés
-dans Google Sheets** — mais uniquement après qu'un humain a cliqué sur « Valider » dans une interface
-Streamlit. L'agent n'agit jamais seul sur le CRM : il rédige, puis attend la validation humaine.
+**Vos e-mails commerciaux sont lus, qualifiés, enrichis et une réponse est rédigée — pendant votre
+absence. À votre connexion, tout le travail est fait : il ne reste qu'à cliquer « Valider ».**
 
-> Construit sur **LangGraph** (graphe d'états à interruption native pour le *human-in-the-loop*),
-> **Groq** (Llama, gratuit) pour le texte, et **Google Sheets** comme CRM + base de connaissances.
+ACA pré-lit les e-mails entrants et leurs pièces jointes (PDF, Word, Excel), extrait les informations
+du lead, interroge votre base de connaissances, enrichit le profil de l'entreprise, rédige une
+proposition — puis **s'arrête**. Aucune ligne n'entre dans le CRM et aucun e-mail n'est envoyé avant
+qu'un humain ait validé. C'est un rédacteur, pas un agent autonome sur votre CRM.
+
+> Prototype de stage (8 semaines) construit sur **LangGraph** (graphe d'états à interruption native
+> pour le *human-in-the-loop*), **Groq** (Llama, gratuit) et **Google Sheets** comme CRM + base de
+> connaissances. Stack intégralement en paliers gratuits.
 
 ---
 
-## Fonctionnalités
+## Deux paliers de déploiement — n8n est optionnel
 
-- **Classification** de l'e-mail en 5 catégories (`DEMANDE_DEMO`, `DEVIS`, `SUPPORT`, `AUTRE`, `SPAM`).
-- **Analyse multimodale** : corps de l'e-mail + texte extrait des pièces jointes PDF.
-- **Mémoire hybride** :
-  - *court terme* — checkpointer LangGraph (`MemorySaver`) qui conserve l'état pendant la pause de
-    validation ;
-  - *long terme* — Google Sheets : historique client (détection de client récurrent / doublon) et base
-    de connaissances (FAQ).
-- **Architecture multi-agents à superviseur** : un superviseur oriente une équipe d'agents spécialisés
-  (Enrichissement, Connaissance, Stratège) avec garde-fous déterministes, et expose une trace de
-  raisonnement.
-- **RAG sémantique « database-less »** : embeddings (Gemini, gratuit) + similarité cosinus sur l'onglet
-  Knowledge_Base, avec repli automatique sur une recherche par mots-clés.
-- **Ingestion de connaissances** : un doc/PDF/Markdown est découpé en Q/R (Groq) et écrit dans Google
-  Sheets — le remplacement « sans base de données » d'un Vector DB (script `ingest.py` ou upload UI).
-- **Enrichissement web** : profil de l'entreprise de l'expéditeur via Tavily (gratuit), avec mémoire
-  long terme (cache Google Sheets par domaine).
-- **Raisonnement + clarification** : quand une info clé manque, l'agent met le graphe en pause et pose
-  une question à l'humain (interrupt dynamique), puis reprend.
-- **Validation humaine (human-in-the-loop)** : aucune écriture CRM avant le clic « Valider ».
-- **Ingestion Gmail réelle** : import des e-mails non lus, et marquage `ACA-Traite` après traitement.
-
-## Architecture (ACAM v2 — superviseur + équipe d'agents)
-
-Graphe LangGraph multi-agents, compilé avec `MemorySaver` + `interrupt_before=["action"]` :
-
-```
-START → classifier → memory_lookup → extractor → clarification (❓question à l'humain si besoin flou)
-      → SUPERVISEUR ⇄ workers ──FINISH── interrupt ── action → END
-                        ├─ enrichissement (Tavily + cache Sheets → profil entreprise)
-                        ├─ connaissance   (RAG sémantique → contexte FAQ)
-                        └─ stratege       (proposition + devis)
-
-  Ingestion (hors graphe) :  doc/PDF/Markdown ──(Groq → Q/R)──▶ onglet Knowledge_Base (Sheets)
-```
-
-Le superviseur (Llama-8B) oriente dynamiquement l'équipe ; deux interruptions humaines : *clarification*
-en cours de route (interrupt dynamique) et *validation* finale avant écriture CRM. Voir
-[docs/ACAM_roadmap.md](docs/ACAM_roadmap.md) pour les piliers d'innovation, la mémoire par agent et la conception
-« n8n-ready ».
-
-## Stack
-
-Python 3.14 · LangGraph · `langchain-groq` (Llama 3.1-8B / 3.3-70B, gratuit) · `google-genai` (embeddings
-Gemini, gratuit) · Streamlit · `gspread` + `google-auth` (Google Sheets) · `google-api-python-client` +
-`google-auth-oauthlib` (Gmail) · PyMuPDF · `python-dotenv`. Versions figées dans
-[requirements.txt](requirements.txt).
-
-## Prérequis
-
-- Python 3.11+ (développé sous 3.14).
-- Un tableur Google Sheets avec deux onglets : **`Leads`** (CRM) et **`FAQ`** (base de connaissances).
-- Un **compte de service** Google (accès Sheets) et un **client OAuth « installed app »** Google (accès
-  Gmail).
-- Des clés API gratuites : **Groq** (LLM), **Google AI / Gemini** (embeddings), et **Tavily**
-  (enrichissement web ; optionnelle — l'agent Enrichissement est ignoré sans elle).
-
-## Installation
+| Palier | Composants | Pour qui |
+|---|---|---|
+| **Solo** | API + interface + poller + planificateur | Consultant seul, PME, démo. **Automatisé de bout en bout, sans n8n.** |
+| **Enterprise** | idem **+ n8n** | Orchestration avec vos autres outils (CRM, ERP, ticketing) |
 
 ```bash
-python -m venv venv
-venv\Scripts\activate            # Windows (PowerShell/CMD)
+docker compose --profile solo up          # sans n8n
+docker compose --profile enterprise up    # avec n8n
+```
+
+Le palier Solo n'est **pas** un mode dégradé « à boutons » : `poller.py` ingère Gmail et exécute le
+graphe 24/7 même interface fermée, `scheduler.py` passe les relances et la purge RGPD à heure fixe.
+**n8n n'apporte pas l'automatisation — il apporte l'orchestration inter-systèmes.** Les deux paliers
+font tourner la même image et la même API : on retire n8n en changeant un mot.
+
+| Capacité autonome | Palier Solo | Palier Enterprise |
+|---|---|---|
+| Ingestion des e-mails | `poller.py` | nœud Gmail Trigger |
+| Traitement passif 24/7 | `poller.py` | workflow déclenché par webhook |
+| Purge RGPD automatique | `scheduler.py` | nœud Schedule |
+| Maintenance de la file | `scheduler.py` | nœud Schedule |
+| Relances commerciales | `scheduler.py` | nœud Schedule |
+
+Détails d'intégration : [n8n/README.md](n8n/README.md).
+
+---
+
+## Démarrage rapide
+
+```bash
+python -m venv venv && venv\Scripts\activate     # Windows ; source venv/bin/activate ailleurs
 pip install -r requirements.txt
+cp .env.example .env                             # puis remplir GROQ_API_KEY + GOOGLE_SHEETS_ID
+python scripts/setup_sheets.py                   # crée l'en-tête de l'onglet Leads (une fois)
+python scripts/setup_faq.py                      # seed la FAQ : 74 paires Q/R (une fois)
+python scripts/run_solo.py                       # API + interface + poller + planificateur
 ```
 
-Créer un fichier `.env` à la racine (gitignoré) :
+Interface sur <http://localhost:8501>, API sur <http://localhost:8000> (santé : `/health`).
 
-```env
-GROQ_API_KEY=...                 # LLM (Groq, gratuit)
-GOOGLE_API_KEY=...               # Embeddings Gemini (RAG sémantique ; repli mots-clés si absent)
-GOOGLE_SHEETS_ID=...             # ID du tableur Google
-GOOGLE_SERVICE_ACCOUNT_FILE=credentials/service_account.json
-TAVILY_API_KEY=...               # Agent Enrichissement (Tavily, gratuit ; enrichissement ignoré si absent)
-# Optionnel (valeurs par défaut ci-dessous) :
-# GMAIL_CREDENTIALS_FILE=credentials/gmail_credentials.json
-# GMAIL_TOKEN_FILE=credentials/gmail_token.json
-```
+Le **strict minimum** est `GROQ_API_KEY` + un Google Sheets. Tout le reste est optionnel : une
+variable absente signifie « fonctionnalité ignorée », jamais un plantage. Les 54 variables sont
+documentées une par une dans [.env.example](.env.example).
 
-Placer les secrets dans `credentials/` (gitignoré) :
-
-- `service_account.json` — compte de service (Google Sheets) ;
-- `gmail_credentials.json` — client OAuth « installed app » (Gmail).
-
-> Au premier accès Gmail, un navigateur s'ouvre pour l'autorisation (scope `gmail.modify`) ; le token est
-> ensuite mis en cache dans `credentials/gmail_token.json`. À faire une fois en local (non headless).
-
-## Initialisation des onglets (une seule fois)
-
-```bash
-python scripts/setup_sheets.py   # crée/formate l'en-tête de l'onglet Leads
-python scripts/setup_faq.py      # insère des Q/R d'exemple dans l'onglet FAQ
-```
-
-## Alimenter la base de connaissances depuis un document (optionnel)
-
-```bash
-python -m aca.ingestion.ingest chemin/vers/doc.pdf           # ajoute des Q/R extraites du doc à l'onglet Knowledge_Base
-python -m aca.ingestion.ingest chemin/vers/doc.md replace     # ou remplace tout le contenu existant
-```
-
-(Également possible via l'uploader dans la barre latérale de l'interface Streamlit.)
-
-## Lancement
-
-```bash
-streamlit run ui.py              # interface web (import Gmail ou saisie manuelle → analyse → Valider)
-```
-
-Test rapide en ligne de commande (exécute le graphe sur 4 faux e-mails, **s'arrête à l'interruption sans
-écrire au CRM**) :
+Essai sans rien configurer — exécute le graphe sur 6 e-mails de démonstration et s'arrête à la
+validation, **sans jamais écrire au CRM** :
 
 ```bash
 python -m aca.core.app
 ```
 
-## Structure du projet
+---
 
-| Fichier | Rôle |
+## Architecture
+
+Graphe multi-agents à superviseur, compilé avec `interrupt_before=["action"]` et une `RetryPolicy`
+sur chaque nœud à appel externe :
+
+```
+START → ingestion → classifier → memory_lookup → risk_scan → extractor → clarification (❓ question à l'humain)
+      → SUPERVISEUR ⇄ workers ──FINISH──→ routing → notification ──⏸ PAUSE── action → END
+           ├─ enrichissement   profil entreprise (Tavily + cache Sheets)
+           ├─ connaissance     RAG hybride dense+creux, fusion RRF (Gemini)
+           ├─ veille           repli web si la FAQ ne sait pas → enrichit la FAQ
+           └─ stratege ──→ reflection ──rewrite (1× max)──→ stratege
+                            (auto-critique du brouillon)
+```
+
+La topologie affichée dans l'interface est **dérivée du graphe compilé**, jamais recopiée
+([graph_topology.py](aca/core/graph_topology.py)). Export : `python scripts/export_graph.py` →
+[docs/assets/graph.json](docs/assets/graph.json).
+
+**Deux pauses humaines :** une *clarification* en cours de route (le graphe pose une question quand
+le besoin est ambigu) et la *validation* finale avant écriture CRM.
+
+**Mémoire hybride :** court terme = checkpointer LangGraph (survit aux pauses, aux redémarrages et
+au passage d'un processus à l'autre) ; long terme = Google Sheets (`Leads`, `FAQ`,
+`Enrichissement_Cache`).
+
+---
+
+## Ce qui est vérifié en direct, et ce qui ne l'est pas
+
+Cette section existe parce qu'un prototype qui prétend tout avoir vérifié n'est pas crédible.
+
+**Vérifié contre les vrais services :** Gmail (lecture, marquage, brouillons), Google Sheets (CRM +
+RAG), Groq, Gemini, Tavily (enrichissement + veille), Slack (alertes + routage), HubSpot (contact +
+deal + note, créés puis supprimés), Supabase (pgvector + checkpointer partagé + RLS multi-tenant),
+rétention RGPD, relances.
+
+**Codé et testé hors ligne, jamais exercé en réel** — faute de compte ou d'instance, dit sans détour :
+- le workflow n8n ([n8n/aca_workflow.json](n8n/aca_workflow.json)) — aucune instance n8n n'existe ;
+- la facturation Stripe ([billing.py](aca/integrations/billing.py)) — aucun compte de test ;
+- les boutons d'approbation Slack — nécessitent une app Slack avec Interactivité et une URL publique ;
+- TLS — la procédure est écrite ([docs/DEPLOYMENT_HARDENING.md](docs/DEPLOYMENT_HARDENING.md)), rien n'est hébergé.
+
+**Mesuré :** classification **100 %** (50/50) sur un jeu labellisé de 50 e-mails
+(`python -m aca.eval.eval_classifier`) · **352 tests** hors ligne en ~13 s · seuils du RAG calibrés
+empiriquement sur une FAQ de 74 lignes.
+
+---
+
+## Sécurité et conformité
+
+- **Human-in-the-loop non contournable** — `action_node` reste derrière `interrupt_before`. Aucune
+  écriture CRM, aucun e-mail envoyé sans clic humain, sur *toutes* les surfaces (interface, API, Slack, n8n).
+- **Comptes nominatifs**, mots de passe PBKDF2 salés, rôles `admin`/`operator`, verrou progressif,
+  sessions à TTL absolu + inactivité.
+- **Journal d'audit chaîné par hachage** — modifier ou supprimer une ligne casse la chaîne, et
+  `python -m aca.storage.audit_log` le détecte et localise la rupture.
+- **RGPD** — purge par ancienneté *et* droit à l'effacement (`--oublier <adresse>`), politique de
+  confidentialité, isolation multi-tenant (`org_id` + RLS Postgres vérifiée en direct).
+- **Injections de prompt** signalées (jamais bloquantes : le gate humain reste la protection) et
+  **risques contractuels** détectés par regex déterministe, tous deux remontés dans l'alerte.
+- `ACA_ENV=production` rend ces protections **obligatoires** : l'application refuse de démarrer si
+  une clé manque, au lieu du « absent = ouvert » du mode développement.
+
+Détail complet : §15 de [docs/ACAM_roadmap.md](docs/ACAM_roadmap.md) et
+[docs/DEPLOYMENT_HARDENING.md](docs/DEPLOYMENT_HARDENING.md).
+
+---
+
+## Les surfaces
+
+| Surface | Rôle | Statut |
+|---|---|---|
+| **Streamlit** ([ui.py](ui.py)) | console opérateur complète : intake, validation, édition, ingestion, KPI, réglages | colonne vertébrale opérationnelle |
+| **API FastAPI** ([aca/api.py](aca/api.py)) | le cerveau en HTTP — pilote le dashboard, Slack et n8n | active |
+| **Slack** | valider/rejeter un lead sans ouvrir aucune interface | active (app Slack à configurer) |
+| **n8n** | orchestration avec vos autres outils | optionnelle ([n8n/](n8n/)) |
+| **Dashboard Next.js** ([dashboard/](dashboard/)) | vitrine construite, sous-ensemble en lecture seule | **parqué** (§12bis) |
+
+---
+
+## Commandes utiles
+
+```bash
+python -m pytest tests/                         # 352 tests, hors ligne, ~13 s
+python -m aca.eval.eval_classifier              # précision du classifieur sur 50 e-mails labellisés
+python -m aca.core.scheduler --status           # dernier passage de chaque travail planifié
+python -m aca.core.retention --oublier a@b.fr   # RGPD : effacement complet d'une personne
+python -m aca.storage.audit_log                 # vérifie l'intégrité de la chaîne d'audit
+python -m aca.storage.user_store create x --role admin   # créer un compte
+python scripts/verify_rls.py                    # audit RLS Supabase (lecture seule)
+python scripts/export_openapi.py                # régénère docs/openapi.json
+```
+
+## Structure
+
+| Chemin | Rôle |
 |---|---|
-| [app.py](aca/core/app.py) | Graphe LangGraph multi-agents : `AgentState`, classifier/mémoire/extraction/clarification, superviseur + 3 agents workers, action, checkpointer + interruptions |
-| [ui.py](ui.py) | Interface Streamlit (thème Fluent) : formulaire/import Gmail, progression en direct, clarification interactive, raisonnement, validation, uploader base de connaissances |
-| [sheets.py](aca/integrations/sheets.py) | Google Sheets : CRM (`Leads`), base de connaissances (`FAQ`), cache d'enrichissement, RAG sémantique, écriture d'ingestion |
-| [ingest.py](aca/ingestion/ingest.py) | Ingestion doc/PDF/Markdown → Q/R (Groq) → onglet Knowledge_Base (remplace un Vector DB) |
-| [enrichment.py](aca/agents/enrichment.py) | Agent Enrichissement : profil entreprise via Tavily + cache Sheets (mémoire long terme) |
-| [gmail_reader.py](aca/integrations/gmail_reader.py) | API Gmail : lecture des non-lus, extraction PDF, marquage `ACA-Traite` |
-| [pdf_reader.py](aca/ingestion/pdf_reader.py) | Extraction de texte PDF (PyMuPDF) |
-| [setup_sheets.py](scripts/setup_sheets.py) / [setup_faq.py](scripts/setup_faq.py) | Scripts d'initialisation (one-off) des onglets |
-| [CLAUDE.md](CLAUDE.md) · [docs/ACAM_roadmap.md](docs/ACAM_roadmap.md) · [docs/ACA project description.md](docs/ACA%20project%20description.md) | Documentation projet |
+| [aca/core/](aca/core/) | graphe LangGraph, poller, planificateur, relances, rétention, sécurité |
+| [aca/integrations/](aca/integrations/) | Sheets, Gmail, HubSpot, Slack, webhook sortant, pgvector, Stripe |
+| [aca/storage/](aca/storage/) | 8 registres SQLite locaux (file, analytics, audit chaîné, comptes…) |
+| [aca/ingestion/](aca/ingestion/) | extraction PDF/Word/Excel, ingestion de connaissances |
+| [ui.py](ui.py) · [aca/api.py](aca/api.py) | interface Streamlit · microservice FastAPI |
+| [tests/](tests/) · [n8n/](n8n/) · [docs/](docs/) | suite de tests · intégration n8n · documentation |
 
 Onglets Google Sheets — **`Leads`** : `Date · Expéditeur · Entreprise · Contact · Urgence · Besoin ·
-Catégorie · Brouillon` · **`FAQ`** (Knowledge_Base) : `Question · Réponse` · **`Enrichissement_Cache`**
-(créé à la volée) : `Domaine · Profil · Date`.
+Catégorie · Brouillon` · **`FAQ`** : `Question · Réponse · Statut` · **`Enrichissement_Cache`** :
+`Domaine · Profil · Date`.
 
-## Statut
+## Prérequis
 
-**ACAM v2** (architecture multi-agents à superviseur, ingestion database-less, raisonnement +
-clarification interactive, mémoire hybride par agent) est implémenté et vérifié par phases. Détails,
-mémoire par agent et conception « n8n-ready » dans [docs/ACAM_roadmap.md](docs/ACAM_roadmap.md).
+Python 3.11+ (développé sous 3.14) · un tableur Google Sheets · un compte de service Google (Sheets)
+et un client OAuth « installed app » (Gmail) dans `credentials/` · des clés gratuites Groq et Gemini.
+
+> Au premier accès Gmail, un navigateur s'ouvre pour l'autorisation (scope `gmail.modify`) ; le jeton
+> est ensuite mis en cache. À faire une fois en local — impossible en headless.
+
+## Alimenter la base de connaissances
+
+```bash
+python -m aca.ingestion.ingest chemin/vers/doc.pdf           # ajoute les Q/R extraites à la FAQ
+python -m aca.ingestion.ingest chemin/vers/doc.md replace     # ou remplace tout le contenu
+```
+
+(Également possible via l'uploader de la barre latérale Streamlit.)
+
+## Documentation
+
+[docs/landing/index.html](docs/landing/index.html) (one-pager de présentation, à ouvrir dans un
+navigateur) · [docs/ACAM_roadmap.md](docs/ACAM_roadmap.md) (architecture, audits, décisions) ·
+[docs/PROJECT_JOURNAL.md](docs/PROJECT_JOURNAL.md) (journal de bord) ·
+[docs/DEPLOYMENT_HARDENING.md](docs/DEPLOYMENT_HARDENING.md) (TLS, secrets, rotation) ·
+[docs/PRIVACY_POLICY.md](docs/PRIVACY_POLICY.md) (RGPD) · [CLAUDE.md](CLAUDE.md) (référence technique).
