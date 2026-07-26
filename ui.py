@@ -1,12 +1,15 @@
 import hmac
 import os
 import time
+import traceback
 import uuid
 import streamlit as st
 from langgraph.types import Command
 from langchain_core.callbacks import UsageMetadataCallbackHandler
-from aca.storage import analytics_store, audit_log, config_store, followup_store, queue_store
+from aca.storage import analytics_store, audit_log, config_store, followup_store, queue_store, user_store
 from aca.core import app as aca_graph
+from aca.core import prod_check
+from aca.core import session as aca_session
 from aca.core.auth_lockout import lockout_remaining_seconds, next_lockout_seconds
 from aca.integrations import gmail_reader, sheets
 from aca.ingestion import ingest
@@ -18,18 +21,61 @@ st.set_page_config(
 )
 
 
+DEV_USERNAME = "(dev)"  # identité de repli quand aucun compte n'existe (mode développement)
+
+
+def _register_failure() -> None:
+    """Incrémente le compteur d'échecs et arme le verrou progressif (US-41) le cas échéant."""
+    st.session_state.auth_failed_attempts += 1
+    lockout = next_lockout_seconds(st.session_state.auth_failed_attempts)
+    if lockout > 0:
+        st.session_state.auth_locked_until = time.time() + lockout
+        st.error(
+            f"Identifiants incorrects. Trop de tentatives : verrouillé {int(lockout)} s.",
+            icon=":material/error:",
+        )
+    else:
+        st.error("Identifiants incorrects.", icon=":material/error:")
+
+
+def _open_session(username: str, role: str) -> None:
+    """Ouvre la session et rejoue le script (le reste de la page s'affiche alors authentifié)."""
+    st.session_state.session = aca_session.new_session(username, role, time.time())
+    st.session_state.auth_failed_attempts = 0
+    st.rerun()
+
+
 def _check_auth() -> bool:
     """
-    Gate mot de passe optionnel (`ACA_UI_PASSWORD`) : usage solo/petite équipe, pas un vrai système
-    multi-utilisateurs. Sans variable définie, l'UI reste ouverte comme avant (mode développement) —
-    même dégradation gracieuse que les autres options (Tavily, Gemini...).
+    Contrôle d'accès de l'UI, en trois modes selon ce qui est configuré :
 
-    §14 (audit sécurité 2026-07-21, US-41) : verrou progressif après plusieurs échecs
-    (`aca.core.auth_lockout`) — sans lui, un bot pouvait soumettre le mot de passe en boucle aussi
-    vite que Streamlit rejoue le script, sans aucun throttle.
+    1. **Comptes nominatifs** (`user_store.has_users()`) — identifiant + mot de passe haché, rôle
+       `admin`/`operator` (§15.1.6). C'est le mode recommandé : le journal d'audit devient
+       attribuable et les fonctions d'administration (réglages, curation de la base de
+       connaissances, comptes) sont réellement séparées de la validation quotidienne.
+    2. **Secret partagé** (`ACA_UI_PASSWORD`, aucun compte créé) — l'ancien gate, conservé pour ne
+       pas casser les déploiements existants ; il ouvre une session `admin` anonyme.
+    3. **Ouvert** (ni compte ni mot de passe) — mode développement, inchangé.
+
+    §14 (US-41) : verrou progressif après plusieurs échecs (`aca.core.auth_lockout`), sans lui un
+    bot pouvait tester des mots de passe aussi vite que Streamlit rejoue le script.
+    §15.1.7 : la session porte désormais un TTL absolu et un délai d'inactivité
+    (`aca.core.session`) — avant, `authed = True` restait vrai tant que l'onglet vivait.
     """
-    required = os.getenv("ACA_UI_PASSWORD")
-    if not required or st.session_state.get("authed"):
+    now = time.time()
+    current = st.session_state.get("session")
+    if current:
+        reason = aca_session.expiry_reason(current, now)
+        if reason is None:
+            aca_session.touch(current, now)
+            return True
+        st.session_state.session = None
+        st.session_state.expired_reason = reason
+
+    accounts_exist = user_store.has_users()
+    shared_password = os.getenv("ACA_UI_PASSWORD")
+    if not accounts_exist and not shared_password:
+        st.session_state.session = aca_session.new_session(DEV_USERNAME, user_store.ROLE_ADMIN, now)
         return True
 
     st.session_state.setdefault("auth_failed_attempts", 0)
@@ -37,7 +83,14 @@ def _check_auth() -> bool:
 
     st.title("Assistant commercial agentique (ACA)")
 
-    remaining = lockout_remaining_seconds(st.session_state.auth_locked_until, time.time())
+    expired = st.session_state.pop("expired_reason", None)
+    if expired == "idle":
+        st.info("Session fermée après une période d'inactivité. Reconnectez-vous.",
+                icon=":material/timer_off:")
+    elif expired == "absolute":
+        st.info("Session expirée. Reconnectez-vous.", icon=":material/timer_off:")
+
+    remaining = lockout_remaining_seconds(st.session_state.auth_locked_until, now)
     if remaining > 0:
         st.error(
             f"Trop de tentatives échouées. Réessayez dans {int(remaining) + 1} s.",
@@ -45,29 +98,76 @@ def _check_auth() -> bool:
         )
         return False
 
+    if accounts_exist:
+        username = st.text_input("Identifiant")
+        pwd = st.text_input("Mot de passe", type="password")
+        if st.button("Se connecter", type="primary"):
+            # `verify_credentials` compare en temps constant ET consomme le même temps de calcul
+            # sur un compte inexistant (cf. `_DUMMY_HASH`) : ni le mot de passe, ni la liste des
+            # identifiants valides ne fuient par chronométrage.
+            account = user_store.verify_credentials(username, pwd)
+            if account:
+                _open_session(account["username"], account["role"])
+            else:
+                _register_failure()
+        return False
+
     pwd = st.text_input("Mot de passe", type="password")
     if st.button("Se connecter", type="primary"):
         # Comparaison à temps constant : un `==` sur un secret fuit sa longueur/préfixe par timing.
-        if hmac.compare_digest(pwd.encode(), required.encode()):
-            st.session_state.authed = True
-            st.session_state.auth_failed_attempts = 0
-            st.rerun()
+        if hmac.compare_digest(pwd.encode(), shared_password.encode()):
+            _open_session(DEV_USERNAME, user_store.ROLE_ADMIN)
         else:
-            st.session_state.auth_failed_attempts += 1
-            lockout = next_lockout_seconds(st.session_state.auth_failed_attempts)
-            if lockout > 0:
-                st.session_state.auth_locked_until = time.time() + lockout
-                st.error(
-                    f"Mot de passe incorrect. Trop de tentatives : verrouillé {int(lockout)} s.",
-                    icon=":material/error:",
-                )
-            else:
-                st.error("Mot de passe incorrect.", icon=":material/error:")
+            _register_failure()
     return False
 
 
+def _current_user() -> dict:
+    """Session authentifiée courante (`username`, `role`, horodatages)."""
+    return st.session_state.get("session") or {}
+
+
+def _can(permission: str) -> bool:
+    """L'utilisateur connecté détient-il `permission` ? (cf. `user_store.ROLE_PERMISSIONS`)"""
+    return user_store.can(_current_user().get("role"), permission)
+
+
+def _safe_error(message: str, exc: Exception) -> None:
+    """
+    Affiche un message d'erreur générique et journalise le détail côté serveur (§15.3.2).
+
+    Interpoler `{exc}` dans l'UI, comme le faisait ce fichier, recopie à l'écran le texte brut de
+    l'exception — qui, pour une erreur d'API, contient régulièrement l'URL appelée, des en-têtes,
+    voire un fragment de clé. Le détail complet reste disponible dans la console qui a lancé
+    Streamlit ; l'utilisateur, lui, voit une phrase actionnable.
+    """
+    print(f"[ACA] {message}: {exc.__class__.__name__}: {exc}")
+    traceback.print_exc()
+    st.error(f"{message}. Détail technique consigné côté serveur.", icon=":material/error:")
+
+
+# §15.1.5 : en `ACA_ENV=production`, une configuration ouverte fait échouer le démarrage plutôt que
+# de servir une UI sans garde. En développement (défaut), no-op total.
+prod_check.enforce()
+
 if not _check_auth():
     st.stop()
+
+# Les faiblesses de configuration ne sont montrées qu'aux administrateurs : elles décrivent
+# précisément ce qui n'est PAS protégé, une information à ne pas afficher à tout venant.
+if _can(user_store.PERM_MANAGE_USERS):
+    _security_problems = prod_check.check()
+    if _security_problems:
+        with st.expander(
+            f"Sécurité : {len(_security_problems)} point(s) à corriger avant une mise en ligne",
+            icon=":material/shield:",
+        ):
+            st.caption(
+                "Sans conséquence en usage local (mode développement). À corriger avant toute "
+                "exposition publique — cf. `docs/DEPLOYMENT_HARDENING.md`."
+            )
+            for _problem in _security_problems:
+                st.markdown(f"- {_problem}")
 
 st.title("Assistant commercial agentique (ACA)")
 st.caption("Pré-lecture et qualification des e-mails entrants — validation humaine avant écriture CRM.")
@@ -234,10 +334,21 @@ def load_queued_thread(thread_id: str) -> None:
 
 
 with st.sidebar:
-    st.text_input(
-        "Validé par", key="validator_name", placeholder="Ton nom (traçabilité)",
-        help="Enregistré dans le journal d'audit local à chaque validation (audit_log.py).",
-    )
+    _user = _current_user()
+    if _user.get("username") == DEV_USERNAME:
+        # Mode développement / secret partagé : personne n'est identifié, on retombe donc sur
+        # l'ancien champ libre pour que le journal d'audit ne soit pas vide.
+        st.text_input(
+            "Validé par", key="validator_name", placeholder="Ton nom (traçabilité)",
+            help="Enregistré dans le journal d'audit local à chaque validation (audit_log.py). "
+                 "Créez des comptes (`python -m aca.storage.user_store create …`) pour que ce champ "
+                 "soit renseigné automatiquement et devienne réellement opposable.",
+        )
+    else:
+        st.caption(f":material/account_circle: **{_user.get('username')}** · rôle « {_user.get('role')} »")
+        if st.button("Se déconnecter", icon=":material/logout:"):
+            st.session_state.session = None
+            st.rerun()
     st.divider()
     pending_queue = queue_store.list_pending()
     st.subheader(f"File d'attente ({len(pending_queue)})", anchor=False)
@@ -263,7 +374,7 @@ with st.sidebar:
                 st.session_state.gmail_service = gmail_reader.get_gmail_service()
                 st.session_state.gmail_unread = gmail_reader.list_unread_emails(st.session_state.gmail_service)
             except Exception as e:
-                st.error(f"Erreur de connexion Gmail : {e}", icon=":material/error:")
+                _safe_error("Erreur de connexion Gmail", e)
 
     if st.session_state.get("gmail_unread"):
         options = {f"{m['subject']} — {m['sender']}": m["id"] for m in st.session_state.gmail_unread}
@@ -282,53 +393,58 @@ with st.sidebar:
                     # avant même de savoir si cet e-mail sera soumis à l'analyse.
                     st.session_state.gmail_attachments_raw = email["attachments"]
                 except Exception as e:
-                    st.error(f"Erreur lors du chargement de l'e-mail : {e}", icon=":material/error:")
+                    _safe_error("Erreur lors du chargement de l'e-mail", e)
                 else:
                     st.rerun()
 
-    st.divider()
-    st.subheader("Base de connaissances", anchor=False)
-    st.caption("Alimenter la base (onglet Knowledge_Base) depuis un document — remplace un Vector DB.")
-    kb_file = st.file_uploader(
-        "Document (PDF, Markdown, texte)",
-        type=["pdf", "md", "txt"],
-        label_visibility="collapsed",
-        key="kb_upload",
-    )
-    kb_replace = st.toggle("Remplacer le contenu existant", value=False)
-    if st.button("Ingérer dans la base", icon=":material/library_add:", disabled=kb_file is None):
-        with st.spinner("Découpage du document en Q/R et écriture dans Sheets..."):
-            try:
-                n = ingest.ingest_document(
-                    kb_file.getvalue(), mode="replace" if kb_replace else "append"
-                )
-            except Exception as e:
-                st.error(f"Erreur d'ingestion : {e}", icon=":material/error:")
-            else:
-                if n:
-                    st.success(f"{n} ligne(s) ajoutée(s) à la base de connaissances.",
-                               icon=":material/check_circle:")
+    # Curation de la base de connaissances (ingestion + validation des réponses trouvées par
+    # `veille`) : réservée au rôle `admin` (§15.1.6). Ce qui entre ici devient un contexte RAG que
+    # le Stratège citera dans de futures propositions commerciales — c'est une décision éditoriale,
+    # pas une tâche de traitement quotidien comme valider un lead.
+    if _can(user_store.PERM_CURATE_KNOWLEDGE):
+        st.divider()
+        st.subheader("Base de connaissances", anchor=False)
+        st.caption("Alimenter la base (onglet Knowledge_Base) depuis un document — remplace un Vector DB.")
+        kb_file = st.file_uploader(
+            "Document (PDF, Markdown, texte)",
+            type=["pdf", "md", "txt"],
+            label_visibility="collapsed",
+            key="kb_upload",
+        )
+        kb_replace = st.toggle("Remplacer le contenu existant", value=False)
+        if st.button("Ingérer dans la base", icon=":material/library_add:", disabled=kb_file is None):
+            with st.spinner("Découpage du document en Q/R et écriture dans Sheets..."):
+                try:
+                    n = ingest.ingest_document(
+                        kb_file.getvalue(), mode="replace" if kb_replace else "append"
+                    )
+                except Exception as e:
+                    _safe_error("Erreur d'ingestion", e)
                 else:
-                    st.warning("Aucune paire Q/R extraite du document.", icon=":material/warning:")
+                    if n:
+                        st.success(f"{n} ligne(s) ajoutée(s) à la base de connaissances.",
+                                   icon=":material/check_circle:")
+                    else:
+                        st.warning("Aucune paire Q/R extraite du document.", icon=":material/warning:")
 
-    st.divider()
-    pending_rows = sheets.get_pending_knowledge_rows()
-    st.subheader(f"FAQ en attente ({len(pending_rows)})", anchor=False)
-    st.caption(
-        "Réponses trouvées en ligne par l'agent Veille — invisibles du RAG jusqu'à validation "
-        "humaine (contenu web non vérifié, cf. CLAUDE.md)."
-    )
-    for row in pending_rows:
-        with st.container(border=True):
-            st.markdown(f"**Q :** {row['question']}")
-            st.caption(f"R : {row['reponse']}")
-            col_ok, col_ko = st.columns(2)
-            if col_ok.button("Valider", icon=":material/check:", key=f"approve_{row['row_index']}"):
-                sheets.approve_knowledge_row(row["row_index"])
-                st.rerun()
-            if col_ko.button("Rejeter", icon=":material/close:", key=f"reject_{row['row_index']}"):
-                sheets.reject_knowledge_row(row["row_index"])
-                st.rerun()
+        st.divider()
+        pending_rows = sheets.get_pending_knowledge_rows()
+        st.subheader(f"FAQ en attente ({len(pending_rows)})", anchor=False)
+        st.caption(
+            "Réponses trouvées en ligne par l'agent Veille — invisibles du RAG jusqu'à validation "
+            "humaine (contenu web non vérifié, cf. CLAUDE.md)."
+        )
+        for row in pending_rows:
+            with st.container(border=True):
+                st.markdown(f"**Q :** {row['question']}")
+                st.caption(f"R : {row['reponse']}")
+                col_ok, col_ko = st.columns(2)
+                if col_ok.button("Valider", icon=":material/check:", key=f"approve_{row['row_index']}"):
+                    sheets.approve_knowledge_row(row["row_index"])
+                    st.rerun()
+                if col_ko.button("Rejeter", icon=":material/close:", key=f"reject_{row['row_index']}"):
+                    sheets.reject_knowledge_row(row["row_index"])
+                    st.rerun()
 
     st.divider()
     with st.expander("Confidentialité des données", icon=":material/policy:"):
@@ -487,6 +603,18 @@ with tab_email:
                     "la proposition ci-dessous reste volontairement prudente. Relisez avant validation.",
                     icon=":material/help:",
                 )
+            # §15.1.4 : tentative d'injection de prompt (prompt_guard.py). Signalée, jamais
+            # bloquante — c'est la personne qui valide qui doit savoir que le message entrant
+            # essayait de piloter le modèle, sans quoi le brouillon lui paraît simplement plausible.
+            if res.get("injection_flags"):
+                st.error(
+                    "Tentative(s) de manipulation de l'IA détectée(s) dans le message entrant : "
+                    + ", ".join(res["injection_flags"])
+                    + ". Le contenu reçu essaie de donner des instructions à l'assistant — relisez "
+                    "la proposition avec méfiance et vérifiez qu'elle n'accorde aucune remise, "
+                    "exception ou engagement inhabituel.",
+                    icon=":material/security:",
+                )
 
             with st.container(border=True):
                 st.markdown("##### Fiche prospect")
@@ -530,7 +658,13 @@ with tab_email:
             st.subheader("Validation humaine", anchor=False)
             st.caption("Si la recommandation de l'IA est correcte, validez pour envoyer dans le CRM.")
 
-            if st.button("Valider et ajouter au CRM", type="primary", icon=":material/check_circle:"):
+            if not _can(user_store.PERM_VALIDATE_LEAD):
+                st.info(
+                    "Votre rôle ne permet pas de valider un lead (écriture CRM). Contactez un "
+                    "administrateur.",
+                    icon=":material/lock:",
+                )
+            elif st.button("Valider et ajouter au CRM", type="primary", icon=":material/check_circle:"):
                 with st.spinner("Reprise du graphe et écriture dans Google Sheets..."):
                     try:
                         graph_config = {"configurable": {"thread_id": st.session_state.thread_id}}
@@ -550,8 +684,17 @@ with tab_email:
                         # Retire l'entrée de la file d'attente si elle en venait (no-op sinon).
                         queue_store.mark_validated(st.session_state.thread_id)
                         # Traçabilité minimale : qui a validé, quoi, quand (audit_log.py).
+                        # §15.1.6 : l'identité vient de la session authentifiée, plus du champ
+                        # libre — un opérateur ne peut plus signer une validation au nom d'un
+                        # autre. Le champ libre ne subsiste qu'en mode développement/secret
+                        # partagé, où personne n'est identifié de toute façon.
+                        _session_user = _current_user().get("username")
+                        validated_by = (
+                            st.session_state.get("validator_name", "")
+                            if _session_user == DEV_USERNAME else _session_user
+                        )
                         audit_log.log_validation(
-                            st.session_state.thread_id, st.session_state.get("validator_name", ""),
+                            st.session_state.thread_id, validated_by,
                             res.get("classification", ""), res.get("email_raw", {}).get("sender", ""),
                         )
                         # Tableau de bord : ferme la mesure de temps de réponse pour ce thread.
@@ -569,7 +712,25 @@ with tab_email:
                         st.session_state.pending_clarification = None
                         del st.session_state.result
                     except Exception as e:
-                        st.error(f"Erreur technique lors de la validation : {e}", icon=":material/error:")
+                        _safe_error("Erreur technique lors de la validation", e)
+
+            # Rejet explicite : miroir de `_do_reject` de l'API (aca/api.py) — AUCUNE écriture CRM,
+            # on ne reprend PAS le graphe. On retire le lead de la file d'attente (no-op si saisie
+            # manuelle, non issue du poller) et on efface le résultat pour passer au suivant. Sans ce
+            # bouton, un lead ne pouvait qu'être validé ou abandonné silencieusement — jamais rejeté
+            # de façon traçable, alors que Streamlit est désormais la surface opérationnelle
+            # principale. (Comme l'API, on ne journalise pas le rejet dans audit_log ; auditer les
+            # rejets est un item §15 futur si besoin.)
+            if _can(user_store.PERM_REJECT_LEAD) and st.button(
+                "Rejeter (ne pas envoyer au CRM)", icon=":material/cancel:"
+            ):
+                queue_store.mark_rejected(st.session_state.thread_id)
+                st.session_state.gmail_attachments_raw = []
+                st.session_state.gmail_message_id = None
+                st.session_state.gmail_thread_id = None
+                st.session_state.pending_clarification = None
+                del st.session_state.result
+                st.info("Lead rejeté — non envoyé au CRM.", icon=":material/cancel:")
 
 with tab_dashboard:
     st.caption(
@@ -684,77 +845,172 @@ with tab_history:
         )
 
 with tab_settings:
-    st.caption(
-        "Réglages du tenant courant (§12 item 7) — éditables ici sans toucher au fichier `.env`. "
-        "Un champ laissé vide retombe sur la valeur `.env`/par défaut existante ; rien n'est perdu "
-        "en vidant un champ, l'ancien réglage est simplement effacé de cette surcouche."
-    )
-    current = config_store.get_all_settings()
+    # §15.1.6 : ces réglages pilotent où partent les alertes et ce que le Stratège promet
+    # (lien Calendly, adresses de routage, cadence de relance) — un opérateur peut les consulter,
+    # seul un administrateur les modifie.
+    if not _can(user_store.PERM_EDIT_SETTINGS):
+        st.info(
+            "Les réglages sont réservés au rôle « admin ». Vous pouvez consulter la configuration "
+            "courante ci-dessous, mais pas la modifier.",
+            icon=":material/lock:",
+        )
+        st.dataframe(
+            [{"Réglage": config_store.SETTINGS_SCHEMA.get(k, k), "Valeur": v}
+             for k, v in config_store.get_all_settings().items()] or [{"Réglage": "—", "Valeur": "—"}],
+            hide_index=True, width="stretch",
+        )
+    else:
+        st.caption(
+            "Réglages du tenant courant (§12 item 7) — éditables ici sans toucher au fichier `.env`. "
+            "Un champ laissé vide retombe sur la valeur `.env`/par défaut existante ; rien n'est perdu "
+            "en vidant un champ, l'ancien réglage est simplement effacé de cette surcouche."
+        )
+        current = config_store.get_all_settings()
 
-    with st.form("settings_form"):
-        st.markdown("**Lien de réservation**")
-        calendly_url = st.text_input(
-            "Lien Calendly (demandes de démo)",
-            value=current.get("CALENDLY_URL", ""),
-            placeholder=os.getenv("CALENDLY_URL", "(non configuré dans .env)"),
+        with st.form("settings_form"):
+            st.markdown("**Lien de réservation**")
+            calendly_url = st.text_input(
+                "Lien Calendly (demandes de démo)",
+                value=current.get("CALENDLY_URL", ""),
+                placeholder=os.getenv("CALENDLY_URL", "(non configuré dans .env)"),
+            )
+
+            st.markdown("**Routage SUPPORT / AUTRE (RH)**")
+            col_support, col_hr = st.columns(2)
+            with col_support:
+                support_email = st.text_input(
+                    "E-mail support", value=current.get("SUPPORT_EMAIL", ""),
+                    placeholder=os.getenv("SUPPORT_EMAIL", "(non configuré)"),
+                )
+                support_webhook = st.text_input(
+                    "Webhook Slack support", value=current.get("SUPPORT_SLACK_WEBHOOK_URL", ""),
+                    placeholder=os.getenv("SUPPORT_SLACK_WEBHOOK_URL", "(non configuré)"),
+                )
+            with col_hr:
+                hr_email = st.text_input(
+                    "E-mail RH", value=current.get("HR_EMAIL", ""),
+                    placeholder=os.getenv("HR_EMAIL", "(non configuré)"),
+                )
+                hr_webhook = st.text_input(
+                    "Webhook Slack RH", value=current.get("HR_SLACK_WEBHOOK_URL", ""),
+                    placeholder=os.getenv("HR_SLACK_WEBHOOK_URL", "(non configuré)"),
+                )
+
+            st.markdown("**Cadence des relances**")
+            col_days, col_rounds = st.columns(2)
+            with col_days:
+                relance_days = st.text_input(
+                    "Jours avant relance", value=current.get("RELANCE_DAYS", ""),
+                    placeholder=os.getenv("RELANCE_DAYS", "4"),
+                )
+            with col_rounds:
+                relance_rounds = st.text_input(
+                    "Nombre maximum de relances", value=current.get("RELANCE_MAX_ROUNDS", ""),
+                    placeholder=os.getenv("RELANCE_MAX_ROUNDS", "3"),
+                )
+
+            submitted = st.form_submit_button(
+                "Enregistrer les réglages", type="primary", icon=":material/save:"
+            )
+            if submitted:
+                for key, value in {
+                    "CALENDLY_URL": calendly_url,
+                    "SUPPORT_EMAIL": support_email,
+                    "SUPPORT_SLACK_WEBHOOK_URL": support_webhook,
+                    "HR_EMAIL": hr_email,
+                    "HR_SLACK_WEBHOOK_URL": hr_webhook,
+                    "RELANCE_DAYS": relance_days,
+                    "RELANCE_MAX_ROUNDS": relance_rounds,
+                }.items():
+                    if value.strip():
+                        config_store.set_setting(key, value.strip())
+                st.success(
+                    "Réglages enregistrés — pris en compte à la prochaine analyse "
+                    "(`CALENDLY_URL`/routage) ou au prochain cycle planifié (`relance.py`).",
+                    icon=":material/check_circle:",
+                )
+                st.rerun()
+
+        st.caption(
+            "Ces réglages sont relus à chaque exécution de `relance.py` (processus planifié "
+            "indépendant) et à chaque analyse d'e-mail — pas besoin de redémarrer un process pour "
+            "qu'un changement prenne effet."
         )
 
-        st.markdown("**Routage SUPPORT / AUTRE (RH)**")
-        col_support, col_hr = st.columns(2)
-        with col_support:
-            support_email = st.text_input(
-                "E-mail support", value=current.get("SUPPORT_EMAIL", ""),
-                placeholder=os.getenv("SUPPORT_EMAIL", "(non configuré)"),
-            )
-            support_webhook = st.text_input(
-                "Webhook Slack support", value=current.get("SUPPORT_SLACK_WEBHOOK_URL", ""),
-                placeholder=os.getenv("SUPPORT_SLACK_WEBHOOK_URL", "(non configuré)"),
-            )
-        with col_hr:
-            hr_email = st.text_input(
-                "E-mail RH", value=current.get("HR_EMAIL", ""),
-                placeholder=os.getenv("HR_EMAIL", "(non configuré)"),
-            )
-            hr_webhook = st.text_input(
-                "Webhook Slack RH", value=current.get("HR_SLACK_WEBHOOK_URL", ""),
-                placeholder=os.getenv("HR_SLACK_WEBHOOK_URL", "(non configuré)"),
-            )
+    # ── Comptes et rôles (§15.1.6) ────────────────────────────────────────────────────────────
+    if _can(user_store.PERM_MANAGE_USERS):
+        st.divider()
+        st.subheader("Comptes et rôles", anchor=False)
+        st.caption(
+            "Identités nominatives du tenant courant. Tant qu'aucun compte n'existe, l'UI reste "
+            "sur le secret partagé `ACA_UI_PASSWORD` (mode développement) et le journal d'audit "
+            "n'est pas attribuable. Un `operator` valide et rejette des leads ; un `admin` peut en "
+            "plus régler la configuration, curer la base de connaissances et gérer les comptes."
+        )
 
-        st.markdown("**Cadence des relances**")
-        col_days, col_rounds = st.columns(2)
-        with col_days:
-            relance_days = st.text_input(
-                "Jours avant relance", value=current.get("RELANCE_DAYS", ""),
-                placeholder=os.getenv("RELANCE_DAYS", "4"),
+        accounts = user_store.list_users()
+        if accounts:
+            st.dataframe(
+                accounts, hide_index=True, width="stretch",
+                column_config={
+                    "username": "Identifiant", "role": "Rôle", "created_at": "Créé le",
+                    "disabled": st.column_config.CheckboxColumn("Désactivé"),
+                },
             )
-        with col_rounds:
-            relance_rounds = st.text_input(
-                "Nombre maximum de relances", value=current.get("RELANCE_MAX_ROUNDS", ""),
-                placeholder=os.getenv("RELANCE_MAX_ROUNDS", "3"),
-            )
+        else:
+            st.caption("Aucun compte pour l'instant — créez le premier ci-dessous.")
 
-        submitted = st.form_submit_button("Enregistrer les réglages", type="primary", icon=":material/save:")
-        if submitted:
-            for key, value in {
-                "CALENDLY_URL": calendly_url,
-                "SUPPORT_EMAIL": support_email,
-                "SUPPORT_SLACK_WEBHOOK_URL": support_webhook,
-                "HR_EMAIL": hr_email,
-                "HR_SLACK_WEBHOOK_URL": hr_webhook,
-                "RELANCE_DAYS": relance_days,
-                "RELANCE_MAX_ROUNDS": relance_rounds,
-            }.items():
-                if value.strip():
-                    config_store.set_setting(key, value.strip())
-            st.success(
-                "Réglages enregistrés — pris en compte à la prochaine analyse "
-                "(`CALENDLY_URL`/routage) ou au prochain cycle planifié (`relance.py`).",
-                icon=":material/check_circle:",
+        with st.form("create_user_form"):
+            col_name, col_role = st.columns([2, 1])
+            new_username = col_name.text_input("Identifiant")
+            new_role = col_role.selectbox("Rôle", options=list(user_store.ROLES))
+            new_password = st.text_input(
+                "Mot de passe", type="password",
+                help=f"{user_store.MIN_PASSWORD_LENGTH} caractères minimum. Stocké haché "
+                     "(PBKDF2-HMAC-SHA256, sel par utilisateur), jamais en clair.",
             )
-            st.rerun()
+            if st.form_submit_button("Créer le compte", type="primary", icon=":material/person_add:"):
+                try:
+                    user_store.create_user(new_username, new_password, role=new_role)
+                except (user_store.UserExists, user_store.PasswordTooWeak, ValueError) as e:
+                    # Erreurs de saisie volontairement affichées telles quelles : elles ne
+                    # contiennent que ce que l'utilisateur vient de taper, aucune donnée interne
+                    # (contrairement à `_safe_error`, réservé aux exceptions techniques).
+                    st.error(str(e), icon=":material/error:")
+                else:
+                    st.success(f"Compte « {new_username} » créé.", icon=":material/check_circle:")
+                    st.rerun()
 
-    st.caption(
-        "Ces réglages sont relus à chaque exécution de `relance.py` (processus planifié "
-        "indépendant) et à chaque analyse d'e-mail — pas besoin de redémarrer un process pour "
-        "qu'un changement prenne effet."
-    )
+        if accounts:
+            with st.expander("Modifier un compte", icon=":material/manage_accounts:"):
+                target = st.selectbox(
+                    "Compte", options=[a["username"] for a in accounts], key="user_admin_target",
+                )
+                current_account = next(a for a in accounts if a["username"] == target)
+                col_role_edit, col_state = st.columns(2)
+                with col_role_edit:
+                    wanted_role = st.selectbox(
+                        "Rôle", options=list(user_store.ROLES),
+                        index=list(user_store.ROLES).index(current_account["role"]),
+                        key="user_admin_role",
+                    )
+                    if st.button("Appliquer le rôle", icon=":material/badge:"):
+                        user_store.set_role(target, wanted_role)
+                        st.rerun()
+                with col_state:
+                    # Désactiver plutôt que supprimer : le journal d'audit référence l'identifiant,
+                    # l'effacer rendrait les validations passées non attribuables.
+                    label = "Réactiver" if current_account["disabled"] else "Désactiver"
+                    if st.button(label, icon=":material/block:"):
+                        user_store.set_disabled(target, not current_account["disabled"])
+                        st.rerun()
+                reset_password = st.text_input(
+                    "Nouveau mot de passe", type="password", key="user_admin_password",
+                )
+                if st.button("Réinitialiser le mot de passe", icon=":material/key:"):
+                    try:
+                        user_store.set_password(target, reset_password)
+                    except user_store.PasswordTooWeak as e:
+                        st.error(str(e), icon=":material/error:")
+                    else:
+                        st.success("Mot de passe mis à jour.", icon=":material/check_circle:")

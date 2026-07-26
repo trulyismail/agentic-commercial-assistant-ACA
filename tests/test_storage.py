@@ -47,6 +47,17 @@ def test_mark_ready_then_validated(monkeypatch, tmp_path):
     assert queue_store.list_pending() == []
 
 
+def test_mark_ready_then_rejected(monkeypatch, tmp_path):
+    # Rejet humain (bouton "Rejeter" de ui.py / `_do_reject` de l'API) : le lead quitte la file
+    # sans écriture CRM, exactement comme une validation retire l'entrée — mais sans action_node.
+    _fresh_queue(monkeypatch, tmp_path)
+    queue_store.enqueue("msg-1", "t-1", "a@b.fr", "Objet")
+    queue_store.mark_ready("msg-1")
+    assert queue_store.list_pending()[0]["thread_id"] == "t-1"
+    queue_store.mark_rejected("t-1")
+    assert queue_store.list_pending() == []
+
+
 def test_reset_stale_recovers_stuck_entries(monkeypatch, tmp_path):
     _fresh_queue(monkeypatch, tmp_path)
     old = (datetime.now() - timedelta(minutes=30)).strftime(FMT)
@@ -170,6 +181,136 @@ def test_audit_log_roundtrip(monkeypatch, tmp_path):
     by_thread = {r["thread_id"]: r for r in recent}
     assert by_thread["t-1"]["validated_by"] == "Ismail"
     assert by_thread["t-2"]["validated_by"] == "(non renseigné)"
+
+
+# ── audit_log : chaînage tamper-evident (§15.2.7) ────────────────────────────────────────────
+def test_audit_chain_verifies_on_an_untouched_log(monkeypatch, tmp_path):
+    monkeypatch.setattr(audit_log, "DB_PATH", str(tmp_path / "audit.sqlite"))
+    for i in range(3):
+        audit_log.log_validation(f"t-{i}", "alice", "DEVIS", f"{i}@exemple.fr")
+
+    result = audit_log.verify_chain()
+    assert result["ok"] is True
+    assert result["checked"] == 3
+    assert result["legacy_unchained"] == 0
+    assert result["first_invalid_id"] is None
+
+
+def test_audit_chain_detects_an_edited_row(monkeypatch, tmp_path):
+    """Le scénario que §15.2.7 visait : quelqu'un réécrit discrètement QUI a validé un lead."""
+    db = str(tmp_path / "audit.sqlite")
+    monkeypatch.setattr(audit_log, "DB_PATH", db)
+    for i in range(3):
+        audit_log.log_validation(f"t-{i}", "alice", "DEVIS", f"{i}@exemple.fr")
+    assert audit_log.verify_chain()["ok"] is True
+
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE audit SET validated_by = 'bob' WHERE id = 2")
+        conn.commit()
+
+    result = audit_log.verify_chain()
+    assert result["ok"] is False
+    assert result["first_invalid_id"] == 2
+
+
+def test_audit_chain_detects_a_deleted_row(monkeypatch, tmp_path):
+    """Supprimer une ligne du milieu laisse chaque ligne restante individuellement cohérente —
+    c'est le contrôle du `prev_hash` attendu qui le rattrape."""
+    db = str(tmp_path / "audit.sqlite")
+    monkeypatch.setattr(audit_log, "DB_PATH", db)
+    for i in range(4):
+        audit_log.log_validation(f"t-{i}", "alice", "DEVIS", f"{i}@exemple.fr")
+
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM audit WHERE id = 2")
+        conn.commit()
+
+    result = audit_log.verify_chain()
+    assert result["ok"] is False
+    assert result["first_invalid_id"] == 3  # la ligne suivante pointe vers une empreinte disparue
+
+
+def test_audit_chain_tolerates_pre_migration_rows(monkeypatch, tmp_path):
+    """Un journal antérieur au chaînage n'est pas une preuve de fraude : compté à part, pas rejeté."""
+    db = str(tmp_path / "audit.sqlite")
+    monkeypatch.setattr(audit_log, "DB_PATH", db)
+    audit_log.log_validation("t-0", "alice", "DEVIS", "0@exemple.fr")
+    with sqlite3.connect(db) as conn:  # simule une ligne écrite avant la migration
+        conn.execute(
+            "INSERT INTO audit (thread_id, validated_by, classification, sender, validated_at, "
+            "org_id) VALUES ('t-legacy', 'ancien', 'DEVIS', 'x@exemple.fr', "
+            "'2026-01-01 00:00:00', 'default')"
+        )
+        conn.commit()
+
+    result = audit_log.verify_chain()
+    assert result["ok"] is True
+    assert result["legacy_unchained"] == 1
+    assert result["checked"] == 1
+
+
+def test_audit_chain_is_hmac_keyed_when_configured(monkeypatch, tmp_path):
+    """Avec une clé, refabriquer une empreinte valide sans la connaître devient impossible."""
+    db = str(tmp_path / "audit.sqlite")
+    monkeypatch.setattr(audit_log, "DB_PATH", db)
+    monkeypatch.setenv("ACA_AUDIT_HMAC_KEY", "cle-secrete-hors-base")
+    audit_log.log_validation("t-0", "alice", "DEVIS", "0@exemple.fr")
+    assert audit_log.verify_chain()["ok"] is True
+
+    # Un attaquant sans la clé recalcule l'empreinte en SHA-256 simple : la vérification échoue.
+    monkeypatch.delenv("ACA_AUDIT_HMAC_KEY")
+    assert audit_log.verify_chain()["ok"] is False
+
+
+def test_audit_chains_are_independent_per_tenant(monkeypatch, tmp_path):
+    monkeypatch.setattr(audit_log, "DB_PATH", str(tmp_path / "audit.sqlite"))
+    monkeypatch.setenv("ACA_ORG_ID", "acme")
+    audit_log.log_validation("t-acme", "alice", "DEVIS", "a@acme.fr")
+    monkeypatch.setenv("ACA_ORG_ID", "globex")
+    audit_log.log_validation("t-globex", "bob", "DEVIS", "b@globex.fr")
+
+    # L'écriture d'un tenant ne s'intercale pas dans la chaîne de l'autre.
+    assert audit_log.verify_chain()["ok"] is True
+    monkeypatch.setenv("ACA_ORG_ID", "acme")
+    assert audit_log.verify_chain()["ok"] is True
+
+
+# ── Droit à l'effacement RGPD (§15.2.4) ──────────────────────────────────────────────────────
+def test_queue_store_purges_and_lists_by_sender(monkeypatch, tmp_path):
+    monkeypatch.setattr(queue_store, "DB_PATH", str(tmp_path / "queue.sqlite"))
+    queue_store.enqueue("m-1", "t-1", "cible@exemple.fr", "Objet 1")
+    queue_store.enqueue("m-2", "t-2", "cible@exemple.fr", "Objet 2")
+    queue_store.enqueue("m-3", "t-3", "autre@exemple.fr", "Objet 3")
+
+    assert sorted(queue_store.list_threads_by_sender("cible@exemple.fr")) == ["t-1", "t-2"]
+    assert queue_store.purge_sender("cible@exemple.fr") == 2
+    assert queue_store.list_threads_by_sender("cible@exemple.fr") == []
+    # Les données des autres personnes sont intactes.
+    assert queue_store.list_threads_by_sender("autre@exemple.fr") == ["t-3"]
+
+
+def test_erasure_is_scoped_to_the_tenant(monkeypatch, tmp_path):
+    """Une demande d'effacement chez un client ne doit pas toucher les données d'un autre."""
+    monkeypatch.setattr(queue_store, "DB_PATH", str(tmp_path / "queue.sqlite"))
+    monkeypatch.setenv("ACA_ORG_ID", "acme")
+    queue_store.enqueue("m-1", "t-acme", "meme@exemple.fr", "Objet")
+    monkeypatch.setenv("ACA_ORG_ID", "globex")
+    queue_store.enqueue("m-2", "t-globex", "meme@exemple.fr", "Objet")
+
+    assert queue_store.purge_sender("meme@exemple.fr") == 1
+    monkeypatch.setenv("ACA_ORG_ID", "acme")
+    assert queue_store.list_threads_by_sender("meme@exemple.fr") == ["t-acme"]
+
+
+def test_followup_store_purges_by_sender(monkeypatch, tmp_path):
+    """Effet de bord voulu : la personne effacée ne sera plus relancée par relance.py."""
+    monkeypatch.setattr(followup_store, "DB_PATH", str(tmp_path / "followup.sqlite"))
+    followup_store.track("t-1", "gmail-1", "cible@exemple.fr", "Objet 1")
+    followup_store.track("t-2", "gmail-2", "autre@exemple.fr", "Objet 2")
+
+    assert followup_store.purge_sender("cible@exemple.fr") == 1
+    remaining = [row["sender"] for row in followup_store.list_active()]
+    assert remaining == ["autre@exemple.fr"]
 
 
 # ── followup_store (suivi de relance) ────────────────────────────────────────────────────────

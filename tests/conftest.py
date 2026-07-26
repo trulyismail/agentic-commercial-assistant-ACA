@@ -37,6 +37,15 @@ _ENV_OVERRIDES = {
     "CALENDLY_URL": "",                      # → pas de lien ajouté par défaut (test dédié le simule)
     "LANGCHAIN_TRACING_V2": "false",         # → pas de traces LangSmith pendant les tests
     "ACA_ORG_ID": "default",                 # → fondation multi-tenant (§12 item 3) : tenant déterministe en test
+    # ── Sécurité (§15) : tout neutralisé par défaut, chaque test active ce qu'il vérifie ──
+    "ACA_ENV": "development",                # → prod_check.enforce() est un no-op (aucune garde imposée)
+    "ACA_API_KEY": "",                       # → require_api_key laisse passer (mode dev), comme avant §15
+    "ACA_METRICS_TOKEN": "",                 # → /metrics reste ouvert en test
+    "ACA_UI_PASSWORD": "",                   # → gate Streamlit désactivé
+    "ACA_RATE_LIMIT": "0",                   # → limite de débit désactivée (sinon les tests se limitent eux-mêmes)
+    "ACA_AUDIT_HMAC_KEY": "",                # → chaînage d'audit en SHA-256 simple, déterministe en test
+    "ACA_ENABLE_DOCS": "",
+    "ACA_USERS_DB": os.path.join(_TMP_DIR, "users.sqlite"),
     "ACA_CHECKPOINT_DB": os.path.join(_TMP_DIR, "checkpoints.sqlite"),
     "ACA_QUEUE_DB": os.path.join(_TMP_DIR, "queue.sqlite"),
     "ACA_ANALYTICS_DB": os.path.join(_TMP_DIR, "analytics.sqlite"),

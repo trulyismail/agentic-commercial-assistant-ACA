@@ -196,6 +196,28 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   120s..., capped at 15 min) after 5 failed attempts, stored in `st.session_state`. Fixes a real
   gap found during the audit: the gate previously compared the password with no attempt limit at
   all, so a bot could brute-force `ACA_UI_PASSWORD` without any throttle.
+- [session.py](aca/core/session.py) — §15.1.7: session lifetime. Pure, Streamlit-free logic (same
+  stance as `auth_lockout.py`) enforcing an **absolute TTL** (`ACA_SESSION_TTL_SECONDS`, 8h) *and*
+  an **idle timeout** (`ACA_SESSION_IDLE_SECONDS`, 30min), strictest bound winning. `touch()`
+  pushes back idleness but deliberately never `started_at` — otherwise a stolen-but-kept-active
+  session never dies. Before this, `st.session_state.authed = True` stayed valid for as long as the
+  browser tab lived.
+- [prod_check.py](aca/core/prod_check.py) — §15.1.5/§15.3.3: startup security-posture check. The
+  whole project is built on graceful degradation ("absent = feature skipped"), the right default
+  locally and exactly wrong on a public host, where it becomes "absent = exposed". `ACA_ENV` is the
+  explicit switch: unset/`development` ⇒ no checks at all (unchanged behaviour, tests included);
+  `production` ⇒ `enforce()` **refuses to start** when `ACA_API_KEY`, a UI gate, `ACA_RATE_LIMIT`
+  or `ACA_METRICS_TOKEN` is missing. `check()` never raises — it backs `ui.py`'s admin-only banner
+  and `python -m aca.core.prod_check`.
+- [prompt_guard.py](aca/core/prompt_guard.py) — §15.1.4: deterministic bilingual detection of
+  prompt-injection attempts (`scan_injection()`), called by `risk_scan_node` over the same
+  subject+body+attachment text as `risk_scan`, into a **separate** `injection_flags` list. Kept
+  separate on purpose: a contractual clause means "have legal review this", an injection means
+  "distrust this draft" — merging them would hand "ignore previous instructions" to `stratege_node`
+  as a clause to escalate to management. **Flags, never blocks**: the human gate
+  (`interrupt_before=["action"]`) remains the actual protection; this only makes it informed, since
+  an instruction buried on page 14 of an RFP previously surfaced in the draft as one more plausible
+  sentence. No LLM (asking a model to detect model-manipulation exposes it to that manipulation).
 - [tenant.py](aca/core/tenant.py) — `current_org_id()`: the single source of tenant identity for the
   multi-tenant foundation (§12 item 3, audited §14.3) — reads `ACA_ORG_ID` (default `"default"`)
   dynamically (never frozen at import, same reasoning as `DATABASE_URL` in `vector_store.py`). One
@@ -260,10 +282,34 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   both thresholds read the "Réglages" panel override first, `.env`/default otherwise (same pattern
   as `app._calendly_url()`). Run via `python -m aca.core.relance` (standalone, meant to be
   scheduled — e.g. daily — independent of `poller.py`).
-- [audit_log.py](aca/storage/audit_log.py) — minimal traceability (`data/audit.sqlite`, local, not the Google Sheet):
+- [user_store.py](aca/storage/user_store.py) — §15.1.6: named accounts, hashed passwords and roles
+  (`data/users.sqlite`, `ACA_USERS_DB`). Replaces the "one shared password, nobody identified"
+  model: PBKDF2-HMAC-SHA256 with a per-user salt and the cost stored **inside** the encoded hash
+  (`pbkdf2_sha256$240000$<salt>$<hash>`), so raising the cost later doesn't invalidate existing
+  records; constant-time compare plus a dummy hash on unknown accounts, so response time can't
+  enumerate valid usernames. Roles `admin`/`operator` with declarative `ROLE_PERMISSIONS`
+  (fail-closed on an unknown role) — an operator validates/rejects leads, only an admin edits
+  settings, curates the knowledge base or manages accounts. Org-scoped and `sqlite_retry`-wrapped
+  like the other stores. Deliberate graceful degradation: **no account created ⇒ `ui.py` falls back
+  to the old `ACA_UI_PASSWORD` gate**, so existing deployments don't break. Accounts are *disabled*,
+  never deleted (the audit log references the username). CLI:
+  `python -m aca.storage.user_store create <name> --role admin|operator` (also `list`, `passwd`,
+  `role`, `disable`, `enable`).
+- [audit_log.py](aca/storage/audit_log.py) — traceability (`data/audit.sqlite`, local, not the Google Sheet):
   `log_validation(thread_id, validated_by, classification, sender)` called from `ui.py`'s "Valider"
-  handler; `validated_by` comes from the sidebar's "Validé par" free-text field (no real
-  multi-user auth — see `ACA_UI_PASSWORD` below). `list_recent()` for a future audit screen.
+  handler and `aca/api.py`'s `_do_validate`. Since §15.1.6, `validated_by` comes from the
+  **authenticated session**, not the old self-declared free-text field (which survives only in
+  dev/shared-secret mode, where nobody is identified anyway). §15.2.7 — **hash-chained**: each row
+  folds the previous row's digest into its own (`prev_hash`/`row_hash`, per tenant), so quietly
+  editing or deleting an old row breaks every digest after it. `verify_chain()` recomputes and
+  *locates* the first break — checking both the row's own content **and** that its `prev_hash`
+  matches the actually-preceding row, since without the second check deleting a middle row would
+  pass (each surviving row stays individually consistent). With `ACA_AUDIT_HMAC_KEY` set the
+  digests become HMACs, so forging a coherent chain needs a key that lives outside the database.
+  Stated plainly: this is **tamper-evident, not tamper-proof** — without that key, whoever can
+  write to the file can recompute everything; real immutability would need append-only storage or
+  external anchoring. Pre-migration rows have no digest and are counted as "legacy, unchained",
+  never reported as tampering. `python -m aca.storage.audit_log` runs the check (exit 1 on a break).
 - [analytics_store.py](aca/storage/analytics_store.py) — local SQLite event log (`data/analytics.sqlite`, P2 §11.4
   item 17) powering the "Tableau de bord" tab in `ui.py`. Unlike the Sheets `Leads` tab (only
   validated `DEMANDE_DEMO`/`DEVIS`) or `audit_log.py` (only validation events), this captures
@@ -286,7 +332,17 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   `Leads` rows, their corresponding `data/checkpoints.sqlite` threads (`checkpointer.delete_thread`,
   removes the raw email body from graph state), and old validated `data/queue.sqlite` entries older
   than the retention window. Never touches `Enrichissement_Cache` (company data, not personal) or
-  `FAQ`. Run via `python -m aca.core.retention`, meant to be scheduled (e.g. weekly).
+  `FAQ`. Run via `python -m aca.core.retention`, meant to be scheduled (e.g. weekly). §15.2.4 adds
+  the **right to erasure** (GDPR art. 17) that was missing: `purge_subject(sender)` /
+  `python -m aca.core.retention --oublier <address>` erases one person's data immediately —
+  Leads rows, their LangGraph checkpoints (which hold the raw email body), queue entries and
+  follow-up tracking — and returns a per-location count so you can answer the person precisely.
+  That was the real gap: only *age-based* erasure was automated (the easy half), while an explicit
+  request meant hand-hunting rows across a Google Sheet, a checkpoint file and two SQLite
+  registries — so in practice it didn't happen. Wanted side effect: `relance.py` stops chasing
+  someone who just asked to be forgotten. The **audit log is deliberately kept** (legitimate
+  interest, art. 17.3(e); deleting a row would also break the §15.2.7 chain and look like
+  tampering) — a documented decision, not an oversight.
 - [notify.py](aca/integrations/notify.py) — `send(message, webhook_url=None, email_to=None, subject=None)`: Slack
   webhook (`SLACK_WEBHOOK_URL`, or `webhook_url` override) then Gmail send-to-self (`NOTIFY_EMAIL`,
   or `email_to` override) as a graceful-degradation chain, same pattern as `enrichment.py`/`veille.py`.
@@ -315,12 +371,24 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   valider")`) — invisible to the RAG until approved via the Streamlit sidebar. Graceful `""` fallback
   (same pattern as `enrichment.py`) if `TAVILY_API_KEY` absent / search fails / no answer.
 - [ui.py](ui.py) — Streamlit front-end, styled with a light "Fluent" theme
-  ([.streamlit/config.toml](.streamlit/config.toml)). `_check_auth()` gates the whole app behind an
-  optional password (`ACA_UI_PASSWORD`; absent = no gate, dev mode) before anything else renders,
-  now with a **progressive lockout** after 5 failed attempts (§14 item US-41,
+  ([.streamlit/config.toml](.streamlit/config.toml)). `_check_auth()` gates the whole app before
+  anything else renders, in **three modes** (§15.1.6): named accounts with hashed passwords and an
+  `admin`/`operator` role ([user_store.py](aca/storage/user_store.py)) when any account exists;
+  otherwise the legacy shared `ACA_UI_PASSWORD`; otherwise open (dev). Both credentialed modes keep
+  the **progressive lockout** after 5 failed attempts (§14 item US-41,
   [auth_lockout.py](aca/core/auth_lockout.py) — exponential backoff capped at 15 min, since the
-  gate previously had no attempt limit at all). Top of the sidebar has a "Validé par" free-text
-  field (session-scoped, used for `audit_log`), the **"File d'attente"** panel
+  gate previously had no attempt limit at all) and now carry a **session with an absolute TTL and
+  an idle timeout** ([session.py](aca/core/session.py), §15.1.7 — previously `authed = True` held
+  for as long as the tab lived). `_can(permission)` gates the admin-only surfaces: the Réglages
+  form (operators see a read-only view), the knowledge-base uploader and the "FAQ en attente"
+  curation panel, and a **"Comptes et rôles"** section for creating/disabling accounts and
+  resetting passwords. `_safe_error()` replaces four `st.error(f"… : {e}")` sites that printed raw
+  exception text — which for an API error routinely carries the called URL, headers, or a key
+  fragment — with a generic message plus a server-side log (§15.3.2). Admins also get a
+  security-posture expander driven by `prod_check.check()`, shown to admins only since it
+  enumerates precisely what is *not* protected. Top of the sidebar shows the signed-in user and a
+  logout button (the "Validé par" free-text field survives only in dev/shared-secret mode, where
+  nobody is identified), then the **"File d'attente"** panel
   (`queue_store.list_pending()`) — analyses queued by `poller.py`; clicking "Ouvrir" on an entry
   calls `load_queued_thread()` to load its already-paused state (no re-run — the graph already ran in
   the poller process) via the shared `_sync_result()` helper (which also logs the classification event
@@ -482,6 +550,20 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   bold/gray header row, wrapped/widened long-text columns, and conditional cell coloring (Leads:
   `Urgence`/`Catégorie` — same palette as the UI's category badges; FAQ: `Statut`). Touches formatting
   only, never cell values. Run via `python scripts/format_sheets.py`.
+- [verify_rls.py](scripts/verify_rls.py) — §15.2.2: read-only Supabase RLS coverage sweep. Lists
+  every `public` table with its `relrowsecurity` / `relforcerowsecurity` flags and policy count,
+  **and checks the connecting role** — because `FORCE` only binds the table *owner* and doesn't
+  constrain a `BYPASSRLS`/`SUPERUSER` role at all, so an all-green report from the default
+  `postgres` role would be meaningless (the exact trap hit on 2026-07-21). Tables in
+  `EXPECTED_PERMISSIVE` (LangGraph's checkpoint tables, which have no `org_id` and are isolated by
+  `thread_id` inside LangGraph's own queries) are reported as expected rather than flagged — a
+  noisy report stops being read. Run live 2026-07-26: **5 tables, 0 without a policy, connecting as
+  the restricted `aca_app`**. Absent `DATABASE_URL` = says so and exits 0.
+- [DEPLOYMENT_HARDENING.md](docs/DEPLOYMENT_HARDENING.md) — §15.1.8/§15.1.9: the operator runbook
+  for a first public deployment — Caddy/Nginx TLS configs (incl. the Streamlit WebSocket headers
+  whose absence leaves the UI stuck on "Connecting…"), security headers, loopback-only binding,
+  secret-handling rules and a per-secret rotation table, plus the honest limits section. Exists
+  because those two items aren't code: nothing is hosted, so they're configured on deploy day.
 - [api.py](aca/api.py) — FastAPI microservice (§12 item 6 — n8n port "Option A", audited §14): exposes the
   compiled graph over HTTP for a future **self-hosted** n8n workflow (n8n Cloud is paid, cf. §11.5)
   to drive instead of `poller.py`/`ui.py` — `POST /threads` starts an analysis, `GET /threads/{id}`
@@ -521,14 +603,17 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
 - [dashboard/](dashboard/) — the dedicated Next.js client dashboard (§12 item 8), **built
   2026-07-21 at the user's explicit request** — previously deliberately deferred as a product/
   hosting decision, not a code gap. Next.js 16 (App Router, TypeScript, Tailwind v4). **Product
-  positioning (decided 2026-07-22):** this dashboard is the **intended long-term UI spine** — the
-  client-facing "cockpit" (queue, visual agent graph, HITL approve/reject/edit, settings, usage) —
-  and `ui.py` (Streamlit) is reframed as the **internal admin/curator tool** (knowledge ingestion,
-  FAQ approve/reject, advanced back-office config). They run **alongside** today; the migration
-  intent when Streamlit is eventually retired is to move its *client-facing* pieces into the
-  dashboard's main views and its *curator* pieces into a future role-gated `(admin)` group — the
-  point of migrating is that **separation**, not just the framework (copying Streamlit's
-  everything-on-one-sidebar layout verbatim would just be Streamlit with nicer fonts). Talks only to
+  positioning (updated 2026-07-24 — the dashboard is PARKED):** a code-grounded inventory of the
+  three surfaces found the dashboard is a *review-only subset* of Streamlit — it lacks intake
+  (`POST /threads`), knowledge ingestion, and FAQ curation entirely, so it **cannot run standalone**
+  (it depends on the poller/Streamlit to feed its queue) and is not deployed. Decision: **Streamlit
+  (`ui.py`) is the single operational spine today**; the dashboard stays in the repo as a built
+  *showcase* but gets no further investment for now, and the "client cockpit" direction (queue,
+  visual agent graph, HITL approve/reject/edit, settings, usage — with Streamlit's curator pieces
+  eventually moving to a role-gated `(admin)` group) becomes a **deferred future path**, not the
+  active plan. Slack (Valider/Rejeter) already covers approval convenience; n8n stays orthogonal
+  future plumbing. (An earlier 2026-07-22 framing had positioned the dashboard as the long-term UI
+  spine — **superseded** by this parking decision; see roadmap §12bis.) Talks only to
   `aca/api.py`, never to the database directly — `ACA_API_KEY` is attached server-side
   (`lib/aca.ts`, marked `server-only`) and never reaches the browser. Own password gate
   (`DASHBOARD_PASSWORD`, HMAC-signed session cookie via `lib/session.ts`, checked in `proxy.ts` —
@@ -551,9 +636,12 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   96% (48/50) pre-migration — both prior errors were on deliberately ambiguous cases. Run via
   `python -m aca.eval.eval_classifier`; re-run once real emails are available to track accuracy
   under real conditions instead of the synthetic set.
-- [tests/](tests/) — automated pytest suite (160 tests, offline, ~3s — see Known gaps for full
+- [tests/](tests/) — automated pytest suite (**261 tests**, offline, ~12s — see Known gaps for full
   coverage list): [conftest.py](tests/conftest.py) (env isolation + `FakeLLM`/`ExplodingLLM`, now
-  also blanking `ACA_ORG_ID`/`STRIPE_API_KEY` and redirecting `ACA_CONFIG_DB`),
+  also blanking `ACA_ORG_ID`/`STRIPE_API_KEY`, redirecting `ACA_CONFIG_DB`/`ACA_USERS_DB`, and
+  neutralising every §15 security switch — `ACA_ENV=development`, empty `ACA_API_KEY`/
+  `ACA_METRICS_TOKEN`/`ACA_UI_PASSWORD`/`ACA_AUDIT_HMAC_KEY`, `ACA_RATE_LIMIT=0` — so each test
+  turns on only what it verifies),
   [test_graph_nodes.py](tests/test_graph_nodes.py) (incl. §13: `scan_risks()`, `risk_scan_node`,
   `knowledge_gap` propagation, `sum_usage()`, §11.6's `ingestion_node`, and §12 item 7's
   `config_store` overrides for Calendly/routing), [test_sheets_helpers.py](tests/test_sheets_helpers.py),
@@ -566,9 +654,19 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   local stores, same tenant scenario RLS reproduces on Supabase),
   [test_auth_lockout.py](tests/test_auth_lockout.py) (§14 item US-41),
   [test_billing.py](tests/test_billing.py) (§12 item 4, via a fake Stripe client), and
-  [test_api.py](tests/test_api.py) (§12 item 6 + item 8 — 22 tests incl. the Slack approval loop:
+  [test_api.py](tests/test_api.py) (§12 item 6 + item 8 — 36 tests incl. the Slack approval loop:
   genuinely HMAC-signed `/slack/interactions` requests covering approve/reject/bad-signature/
-  unconfigured, via `fastapi.testclient.TestClient`). **175 tests total**, offline, ~4s. Run via
+  unconfigured, via `fastapi.testclient.TestClient`; plus §15's strict payload validation — an
+  oversized body must 422 *without* the LLM being called — the `/settings` key whitelist, the
+  constant-time API-key compare, production fail-closed, and the `/metrics` token), and
+  [test_security.py](tests/test_security.py) (§15 — 43 tests: password hashing/salting/cost
+  migration, credential verification, disabled accounts, per-tenant user isolation, the
+  role/permission matrix incl. fail-closed on an unknown role, session absolute-TTL vs. idle
+  expiry and the guarantee that activity never extends the absolute TTL, prompt-injection
+  detection with a zero-false-positive set of realistic sales emails, and `prod_check`'s
+  development-vs-production behaviour). `test_storage.py` also covers §15.2.7's audit chain
+  (detecting an edited row, a *deleted* row, HMAC keying, per-tenant chains, legacy rows) and
+  §15.2.4's per-subject erasure. **261 tests total**, offline, ~12s. Run via
   `python -m pytest tests/` (pytest pinned in requirements.txt).
 
 ## Stack
@@ -606,7 +704,21 @@ and `/slack/interactions`; absent = no gate, dev mode — must match the dashboa
 except `/metrics` — a sliding window keyed by `X-API-Key` or source IP; absent/≤0 = disabled, dev
 mode, same graceful contract; over-limit ⇒ HTTP 429 + `Retry-After`) with `ACA_RATE_WINDOW_SECONDS`
 (default `60`) — both read dynamically per request, not frozen at import; in-memory (single-process,
-exact at prototype scale — a multi-worker deploy would need a shared Redis backend), `ACA_UI_PASSWORD` (optional password gate for [ui.py](ui.py); absent = no gate), `ACA_ANALYTICS_DB`
+exact at prototype scale — a multi-worker deploy would need a shared Redis backend), `ACA_UI_PASSWORD` (optional password gate for [ui.py](ui.py); absent = no gate — **superseded in
+practice by named accounts**, see `ACA_USERS_DB` below: it is only used when no account exists),
+and the §15 hardening switches: `ACA_ENV` (`development` by default — set to `production` and
+[prod_check.py](aca/core/prod_check.py) makes every protection below **mandatory**, refusing to
+start otherwise, instead of the usual "absent = feature skipped"), `ACA_USERS_DB` (default
+`data/users.sqlite`, named accounts + roles — [user_store.py](aca/storage/user_store.py)),
+`ACA_SESSION_TTL_SECONDS` / `ACA_SESSION_IDLE_SECONDS` (defaults 8h / 30min, session expiry —
+[session.py](aca/core/session.py)), `ACA_METRICS_TOKEN` (optional `X-Metrics-Token` guard on
+`/metrics`, the one route outside `require_api_key` since a Prometheus scraper sends no application
+header; absent = open as before, but `prod_check` refuses it in production), `ACA_ENABLE_DOCS`
+(set to `1` to re-expose `/docs`+`/openapi.json`, which are otherwise **off** under
+`ACA_ENV=production` — the inverse of FastAPI's default), `ACA_AUDIT_HMAC_KEY` (optional — turns
+the audit log's hash chain into HMACs so forging it needs a key held outside the database; ⚠️ the
+one secret whose rotation invalidates existing verification, see
+[DEPLOYMENT_HARDENING.md](docs/DEPLOYMENT_HARDENING.md)), `ACA_ANALYTICS_DB`
 (default `data/analytics.sqlite`, dashboard event log), `ACA_AUDIT_DB`
 (default `data/audit.sqlite`), `RETENTION_DAYS` for [retention.py](aca/core/retention.py) (default `365`),
 `ACA_FOLLOWUP_DB` (default `data/followup.sqlite`) / `RELANCE_DAYS` (default `4`) for
@@ -778,6 +890,29 @@ afterward.
   frontend exists to expose anything from — and "Supabase wide open" in the PostgREST/anon-key
   sense, which doesn't apply since this project only ever connects via a direct `psycopg`
   connection string).
+- ✅ **Fixed (2026-07-26)** — §15 security hardening pass (§15.1, §15.2, and the security-shaped
+  §15.3 items; `docs/ACAM_roadmap.md` §15.6 records it item by item). Delivered: named accounts +
+  roles (15.1.6), session TTL/idle expiry on both surfaces (15.1.7), strict API payload validation
+  and prompt-injection flagging (15.1.4), auth made mandatory in production with constant-time
+  compares (15.1.5), secret-rotation and TLS runbooks (15.1.8/15.1.9), a live-verified RLS sweep
+  (15.2.2), GDPR right-to-erasure (15.2.4), a hash-chained audit log (15.2.7), no stack-trace
+  leakage (15.3.2), locked `/docs`+`/metrics` (15.3.3), and dependency scanning (15.3.8). Suite:
+  192 → **261 tests**. Five things the pass *found* rather than merely built — the reason a
+  "verify" item is worth more than it looks: (1) four sites in `ui.py` printed raw exception text
+  to the screen; (2) `pip-audit` reported 17 known vulnerabilities, 11 of them in two **transitive**
+  packages the project never imports (`gitpython` via Streamlit, `pyasn1` via `google-auth`) — so
+  "requirements.txt is pinned" was false assurance, since indirect dependencies weren't in it;
+  (3) the dashboard's session cookie never expired server-side (the HMAC was a constant; the
+  cookie's `maxAge` is browser-enforced and doesn't survive copying the cookie); (4) `POST
+  /settings` accepted arbitrary keys; (5) a Postgres subtlety that would have made the RLS report
+  misleading — `FORCE ROW LEVEL SECURITY` binds only the table *owner*, so a naive script would
+  have flagged LangGraph's four checkpoint tables forever, and a noisy report stops being read.
+  Deliberately **not** in this pass (out of the requested "security" scope, unchanged in the
+  roadmap): structured logging (15.3.1), circuit breakers (15.3.7) and all of §15.4 (CI, load
+  tests, browser E2E, review process). Still genuinely open, with reasons: TLS is *documented but
+  not applied* (nothing is hosted), the secrets vault is an hosting decision (no code change will
+  be needed — every module reads `os.getenv()` dynamically), local-store RLS is a product call, and
+  DPA/DPIA documents belong to the using company.
 
 ## Status vs. the 8-week roadmap
 

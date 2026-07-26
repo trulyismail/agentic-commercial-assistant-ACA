@@ -146,3 +146,31 @@ def purge_validated_older_than(days: int) -> int:
         cur = conn.execute("DELETE FROM queue WHERE status = 'validé' AND created_at < ?", (cutoff,))
         conn.commit()
         return cur.rowcount
+
+
+@with_sqlite_retry
+def list_threads_by_sender(sender: str, org_id: str = None) -> list:
+    """
+    Thread IDs de ce tenant associés à `sender`, quel que soit leur statut (§15.2.4, droit à
+    l'effacement — cf. `retention.purge_subject`). Contrairement à `list_validated_older_than`,
+    aucune condition d'ancienneté ni de statut : une demande d'effacement ne s'arrête pas aux
+    dossiers clos.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT thread_id FROM queue WHERE sender = ? AND org_id = ?",
+            (sender, org_id or current_org_id()),
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+@with_sqlite_retry
+def purge_sender(sender: str, org_id: str = None) -> int:
+    """Supprime toutes les entrées de ce tenant liées à `sender` (§15.2.4). Renvoie le nombre supprimé."""
+    with _connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM queue WHERE sender = ? AND org_id = ?",
+            (sender, org_id or current_org_id()),
+        )
+        conn.commit()
+        return cur.rowcount

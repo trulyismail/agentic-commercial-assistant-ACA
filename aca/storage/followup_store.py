@@ -111,3 +111,22 @@ def mark_followed_up(thread_id: str) -> None:
             (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), thread_id),
         )
         conn.commit()
+
+
+@with_sqlite_retry
+def purge_sender(sender: str, org_id: str = None) -> int:
+    """
+    Supprime le suivi de relance de ce tenant pour `sender` (§15.2.4, droit à l'effacement — cf.
+    `retention.purge_subject`). Renvoie le nombre de lignes supprimées.
+
+    Cet effacement a un effet de bord souhaitable : `relance.py` ne relancera plus cette personne,
+    puisque `list_active` ne la verra plus. Continuer à relancer quelqu'un qui vient de demander
+    l'effacement de ses données serait le pire enchaînement possible.
+    """
+    with _connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM followup WHERE sender = ? AND org_id = ?",
+            (sender, org_id or current_org_id()),
+        )
+        conn.commit()
+        return cur.rowcount

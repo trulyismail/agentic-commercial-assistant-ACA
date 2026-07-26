@@ -21,7 +21,9 @@ uniquement sous vraie charge multi-clients » ; LangSmith (déjà branché, cf. 
 suffisant au volume prototype. Cet endpoint est donc prêt pour ce cas futur (scrape Prometheus/
 Grafana) sans imposer d'infrastructure supplémentaire tant que personne ne le scrape.
 """
+import hmac
 import json
+import logging
 import os
 import threading
 import time
@@ -35,32 +37,55 @@ from fastapi.responses import JSONResponse
 from langchain_core.callbacks import UsageMetadataCallbackHandler
 from langgraph.types import Command
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from aca.core import app as aca_graph
+from aca.core import app as aca_graph, prod_check
 from aca.core.slack_verify import verify_slack_signature
 from aca.core.tenant import current_org_id
 from aca.storage import analytics_store, audit_log, config_store, queue_store
+
+# §15.1.5 : en `ACA_ENV=production`, refuse de démarrer si une protection requise manque (clé API,
+# limite de débit, /metrics ouvert…). En développement — le défaut — no-op total.
+prod_check.enforce()
+
+# §15.3.3 : Swagger (`/docs`, `/redoc`) et `/openapi.json` publient la surface complète de l'API,
+# routes d'écriture CRM comprises, et sont servis par défaut par FastAPI. Ils restent activés en
+# développement (c'est là qu'ils servent) mais sont coupés dès que `ACA_ENV=production`, sauf
+# `ACA_ENABLE_DOCS=1` explicite — l'inverse du défaut FastAPI, qui expose sans rien demander.
+_DOCS_ENABLED = os.getenv("ACA_ENABLE_DOCS") == "1" or not prod_check.is_production()
 
 api = FastAPI(
     title="ACA — API du graphe LangGraph",
     description="Expose le cerveau ACAM v2 en HTTP pour un futur port n8n (self-hosted, §12 item 6) "
     "et pour le dashboard Next.js (§12 item 8).",
     version="1.1",
+    docs_url="/docs" if _DOCS_ENABLED else None,
+    redoc_url="/redoc" if _DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if _DOCS_ENABLED else None,
 )
 
 
 def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
     """
-    Garde optionnelle (même contrat que `ACA_UI_PASSWORD` sur `ui.py`) : `ACA_API_KEY` absente =
-    pas de garde, mode développement, comportement inchangé pour tout usage existant (n8n local,
-    tests). Réglée = toute requête doit porter le header `X-API-Key` correspondant, sans quoi cette
-    API — qui expose le SEUL point d'entrée d'écriture CRM (`/valider`) — serait accessible sans
-    authentification à qui peut atteindre le port. `/metrics` reste volontairement hors de cette
-    garde (format Prometheus standard, pensé pour être scrapé sans en-tête custom).
+    Garde par clé partagée sur toutes les routes sauf `/metrics` (garde propre, cf. `metrics()`) et
+    `/slack/interactions` (signature HMAC de Slack).
+
+    Contrat historique conservé en développement (même dégradation gracieuse que `ACA_UI_PASSWORD`
+    sur `ui.py`) : `ACA_API_KEY` absente = pas de garde, comportement inchangé pour n8n local et la
+    suite de tests. **§15.1.5** : en `ACA_ENV=production`, cette garde n'est plus optionnelle —
+    l'absence de clé y est un défaut de configuration, pas une autorisation. Le cas est déjà refusé
+    au démarrage par `prod_check.enforce()` ; le contrôle est répété ici pour que la protection ne
+    dépende pas d'un seul point (une variable vidée à chaud ne doit pas rouvrir l'API).
+
+    La comparaison est à temps constant : un `!=` sur un secret fuit la longueur de son préfixe
+    correct par chronométrage (même raisonnement que `ui.py._check_auth()`).
     """
     required = os.getenv("ACA_API_KEY")
-    if required and x_api_key != required:
+    if not required:
+        if prod_check.is_production():
+            raise HTTPException(503, "API non configurée : ACA_API_KEY est requise en production.")
+        return
+    if not x_api_key or not hmac.compare_digest(x_api_key, required):
         raise HTTPException(401, "Clé API manquante ou invalide (en-tête X-API-Key).")
 
 
@@ -112,6 +137,31 @@ async def _rate_limit_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+_logger = logging.getLogger("aca.api")
+
+
+@api.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """
+    Réponse générique sur toute exception non gérée (§15.3.2).
+
+    Une exception qui remonte jusqu'ici porte souvent, dans son texte, l'URL appelée, un en-tête ou
+    un fragment de clé (erreurs Groq/Sheets/HubSpot notamment). Le client ne reçoit donc qu'un
+    identifiant d'incident ; la trace complète part dans les journaux serveur, où l'identifiant
+    permet de la retrouver. Sans ce handler, le comportement dépendait de la configuration du
+    serveur ASGI — acceptable en local, jamais garanti en production.
+    """
+    incident = uuid.uuid4().hex[:12]
+    _logger.exception(
+        "Erreur non gérée [%s] sur %s %s", incident, request.method, request.url.path,
+    )
+    return JSONResponse(
+        {"detail": "Erreur interne. Communiquez l'identifiant d'incident au support.",
+         "incident": incident},
+        status_code=500,
+    )
+
+
 EMAILS_CLASSIFIED = Counter(
     "aca_emails_classified_total", "E-mails classés, par catégorie et par tenant",
     ["classification", "org_id"],
@@ -124,26 +174,47 @@ TOKENS_PER_ANALYSIS = Histogram(
 )
 
 
+# ── Validation stricte des entrées (§15.1.4) ──────────────────────────────────────────────────
+# Les modèles ci-dessous ne déclaraient que des types (`str`), ce que l'audit §15.1.4 relevait :
+# Pydantic garantissait « c'est bien une chaîne », pas « c'est une chaîne plausible ». Un corps
+# d'e-mail de 50 Mo était donc accepté et parti droit vers le LLM (coût, latence, saturation
+# mémoire), et une chaîne vide déclenchait une analyse sur du vide. Les bornes ci-dessous sont
+# larges — elles écartent l'absurde, pas le légitime : `MAX_BODY` dépasse déjà de loin le plafond
+# de `pdf_reader.MAX_CHARS` (15 000) qui borne le texte réellement envoyé au modèle.
+MAX_SENDER = 320        # longueur maximale d'une adresse e-mail (RFC 5321 : 64 + @ + 255)
+MAX_SUBJECT = 998       # RFC 5322, longueur maximale d'une ligne d'en-tête
+MAX_BODY = 200_000
+MAX_DRAFT = 100_000
+MAX_ANSWER = 10_000
+MAX_NAME = 200
+# Un `thread_id` est fabriqué par nous (`uuid4()`) ou repris d'un appelant : le restreindre à des
+# caractères sûrs empêche qu'il serve de véhicule à des séparateurs ou à des caractères de contrôle
+# vers les couches en aval (clés de checkpoint, libellés Slack, lignes de journal).
+THREAD_ID_PATTERN = r"^[A-Za-z0-9_.:-]{1,128}$"
+
+
 class EmailIn(BaseModel):
-    sender: str
-    subject: str
-    body: str
-    thread_id: Optional[str] = None
+    sender: str = Field(min_length=1, max_length=MAX_SENDER)
+    subject: str = Field(max_length=MAX_SUBJECT)
+    body: str = Field(max_length=MAX_BODY)
+    thread_id: Optional[str] = Field(default=None, pattern=THREAD_ID_PATTERN)
 
 
 class ClarificationIn(BaseModel):
-    answer: str
+    answer: str = Field(min_length=1, max_length=MAX_ANSWER)
 
 
 class ValidationIn(BaseModel):
-    validated_by: Optional[str] = None
-    edited_draft: Optional[str] = None
+    validated_by: Optional[str] = Field(default=None, max_length=MAX_NAME)
+    edited_draft: Optional[str] = Field(default=None, max_length=MAX_DRAFT)
 
 
 class SettingsIn(BaseModel):
     """Sous-ensemble de `config_store.SETTINGS_SCHEMA` — une clé absente/vide n'est pas modifiée
     (même comportement que le formulaire « Réglages » de `ui.py` : un champ vide retombe sur la
-    valeur `.env` existante plutôt que de l'effacer)."""
+    valeur `.env` existante plutôt que de l'effacer). §15.1.4 : seules les clés du schéma connu
+    sont acceptées — sans cette liste blanche, `POST /settings` était un magasin clé/valeur
+    arbitraire alimentable par l'appelant."""
     values: dict[str, str]
 
 
@@ -167,6 +238,12 @@ def _snapshot(thread_id: str) -> dict:
         "extracted_info": state.get("extracted_info"),
         "company_profile": state.get("company_profile"),
         "risk_flags": state.get("risk_flags"),
+        # §15.1.4 : exposé au même titre que `risk_flags`. Sans cette clé, le drapeau d'injection
+        # de prompt existait dans l'état du graphe et s'affichait dans Streamlit et l'alerte Slack,
+        # mais restait invisible à tout client de cette API (dashboard, futur n8n) — la personne
+        # qui valide depuis le dashboard n'aurait donc pas su que l'e-mail entrant tentait de
+        # piloter le modèle, ce qui est exactement l'information que ce drapeau doit porter.
+        "injection_flags": state.get("injection_flags"),
         "knowledge_gap": state.get("knowledge_gap"),
         "draft_response": state.get("draft_response"),
         "reasoning_log": state.get("reasoning_log"),
@@ -390,7 +467,16 @@ def get_settings() -> dict:
 
 @api.post("/settings", dependencies=[Depends(require_api_key)])
 def update_settings(payload: SettingsIn) -> dict:
-    """Enregistre chaque réglage non vide — même contrat que le formulaire « Réglages » de `ui.py`."""
+    """
+    Enregistre chaque réglage non vide — même contrat que le formulaire « Réglages » de `ui.py`.
+
+    §15.1.4 : les clés inconnues sont refusées (422) au lieu d'être écrites. `config_store`
+    accepte volontairement n'importe quelle clé texte (c'est un magasin générique), donc la liste
+    blanche appartient à cette frontière-ci, la seule exposée au réseau.
+    """
+    unknown = sorted(set(payload.values) - set(config_store.SETTINGS_SCHEMA))
+    if unknown:
+        raise HTTPException(422, f"Réglage(s) inconnu(s) : {', '.join(unknown)}.")
     for key, value in payload.values.items():
         if value and value.strip():
             config_store.set_setting(key, value.strip())
@@ -398,6 +484,18 @@ def update_settings(payload: SettingsIn) -> dict:
 
 
 @api.get("/metrics")
-def metrics() -> Response:
-    """Exposition Prometheus standard (§12 item 9) — `scrape_config` pointe simplement ici."""
+def metrics(x_metrics_token: Optional[str] = Header(default=None)) -> Response:
+    """
+    Exposition Prometheus standard (§12 item 9) — `scrape_config` pointe simplement ici.
+
+    §15.3.3 : `/metrics` est resté délibérément hors de `require_api_key` (un scrapeur Prometheus
+    n'envoie pas d'en-tête applicatif), mais « hors de la garde » ne doit pas vouloir dire
+    « public » : ces compteurs révèlent la volumétrie, le nombre de leads validés et la liste des
+    tenants. `ACA_METRICS_TOKEN` ajoute donc une garde dédiée, à renseigner côté Prometheus via
+    `authorization`-like `headers: {X-Metrics-Token: …}` dans le `scrape_config`. Absent = ouvert,
+    comme avant (mode développement) — mais `prod_check` le signale et le refuse en production.
+    """
+    required = os.getenv("ACA_METRICS_TOKEN")
+    if required and (not x_metrics_token or not hmac.compare_digest(x_metrics_token, required)):
+        raise HTTPException(401, "Jeton de métriques manquant ou invalide (en-tête X-Metrics-Token).")
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

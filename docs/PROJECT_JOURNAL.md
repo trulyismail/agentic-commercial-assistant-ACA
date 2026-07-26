@@ -1076,3 +1076,134 @@ reportés. Le message clé : la sécurité ici n'est pas « verrouillé comme un
 surface que touche une entrée non fiable est soit échappée, soit signée, soit limitée en débit, soit
 derrière un humain — et les trois choses non faites sont reportées exprès, avec leur état intermédiaire
 dit franchement ».
+
+---
+
+## 2026-07-26 — Phase sécurité (§15) : des comptes nominatifs, un journal infalsifiable, et cinq problèmes trouvés en vérifiant
+
+### Le problème de départ
+
+La roadmap gardait une dernière phase volontairement repoussée en fin de projet : le §15,
+« checklist production-ready ». Ses statuts avaient été écrits en auto-audit **sans re-vérifier le
+code**, avec une consigne explicite : « à re-vérifier au moment de l'implémentation ». C'est
+exactement ce qui a été fait — et c'est cette re-vérification qui s'est révélée la partie la plus
+utile du travail.
+
+Le trou central restait le même, connu et assumé jusqu'ici : **personne n'était identifié**. Les
+trois surfaces (Streamlit, dashboard, API) partageaient chacune un mot de passe unique, et le champ
+« Validé par » du journal d'audit était une zone de texte libre que la personne remplissait
+elle-même. La traçabilité était donc sur l'honneur : n'importe qui pouvait signer une validation au
+nom d'un collègue, et rien ne distinguait un commercial d'un administrateur.
+
+### Ce qui a été fait
+
+**1. De vrais comptes, avec des rôles.** Nouveau registre `aca/storage/user_store.py` : identifiant,
+mot de passe **haché** (PBKDF2-HMAC-SHA256, un sel différent par personne, jamais de mot de passe en
+clair nulle part), et un rôle — `operator` ou `admin`. Un opérateur traite les leads (valider,
+rejeter) ; seul un admin touche aux réglages, à la base de connaissances et aux comptes. Deux détails
+qui comptent : le coût de calcul est stocké *à l'intérieur* du hachage, donc on pourra le durcir plus
+tard sans invalider les mots de passe existants ; et un identifiant inconnu déclenche quand même un
+calcul factice, sinon le temps de réponse révélerait quels comptes existent. Un départ se traite par
+**désactivation**, jamais par suppression — le journal d'audit cite l'identifiant, l'effacer rendrait
+des validations passées non attribuables.
+
+Conséquence directe : « Validé par » vient désormais de la session authentifiée. La traçabilité
+cesse d'être déclarative.
+
+**2. Les sessions expirent enfin.** Avant, une fois connecté, on l'était tant que l'onglet du
+navigateur vivait — des jours, sur un poste non verrouillé. Désormais deux bornes
+(`aca/core/session.py`) : une durée de vie absolue (8 h) **et** un délai d'inactivité (30 min), la
+plus stricte l'emportant. Nuance volontaire : l'activité repousse le compteur d'inactivité mais
+**jamais** la durée absolue — sinon une session volée mais maintenue active ne mourrait jamais.
+
+**3. Un journal d'audit qu'on ne peut plus retoucher discrètement.** Chaque ligne intègre désormais
+l'empreinte de la précédente. Modifier ou supprimer une vieille ligne casse toutes les empreintes
+suivantes, et `verify_chain()` **désigne** la première ligne fautive. Vérifié en direct : après avoir
+changé un `validated_by` directement dans la base, le contrôle a bien pointé la ligne 2. Deux
+contrôles séparés sont nécessaires, et c'est le point subtil : l'empreinte de la ligne *et* le
+chaînage vers la précédente — sans le second, supprimer une ligne au milieu passerait inaperçu,
+puisque chaque ligne restante resterait cohérente prise isolément. Avec une clé
+(`ACA_AUDIT_HMAC_KEY`), forger la chaîne devient impossible sans cette clé, qui vit hors de la base.
+Dit franchement dans le code et la doc : c'est **tamper-evident, pas tamper-proof**.
+
+**4. Le droit à l'oubli, pour de vrai.** Le projet savait purger *par ancienneté* — la partie facile,
+parce qu'automatisable. Une personne qui écrit « supprimez mes données » a pourtant un droit
+immédiat. Jusqu'ici, y répondre imposait de retrouver à la main des lignes dans un Google Sheet, des
+threads dans un fichier de checkpoints et deux registres SQLite : en pratique, ça ne se faisait pas.
+Désormais : `python -m aca.core.retention --oublier adresse@exemple.fr` efface tout et renvoie le
+décompte par emplacement, pour pouvoir répondre précisément à la personne. Effet de bord
+souhaitable : elle n'est plus relancée automatiquement. Le journal d'audit est **volontairement
+conservé** (intérêt légitime, et le supprimer romprait la chaîne du point 3, ce qui ressemblerait à
+une falsification) — décision documentée, pas un oubli.
+
+**5. Les instructions cachées dans les e-mails sont signalées.** Nouveau `aca/core/prompt_guard.py` :
+détection déterministe (FR/EN, sans IA) des tentatives de manipulation du modèle — « ignore les
+instructions précédentes », « tu es désormais… », faux messages système, demandes de révéler le
+prompt. **On signale, on ne bloque pas** : la vraie protection reste la validation humaine. Mais
+c'était précisément le problème — sans signalement, une consigne glissée page 14 d'un cahier des
+charges ressortait dans la proposition comme une phrase plausible de plus. Le relecteur voyait un
+brouillon, pas une attaque : il ne pouvait juger que ce qu'il savait. Ces alertes sont volontairement
+rangées dans une liste **séparée** des clauses contractuelles à risque : une clause appelle une
+relecture juridique, une injection appelle la méfiance envers le brouillon lui-même.
+
+**6. « Absent = ouvert » ne passe plus en production.** Tout le projet repose sur la dégradation
+gracieuse : une protection non configurée est simplement ignorée. C'est le bon défaut en local et
+exactement le mauvais sur un serveur public. Nouveau `aca/core/prod_check.py` : avec
+`ACA_ENV=production`, l'application **refuse de démarrer** s'il manque la clé API, une garde d'accès
+à l'UI, la limite de débit ou le jeton `/metrics`. En développement, rien ne change.
+
+**7. Ce que l'API expose est réduit.** Bornes strictes sur tous les champs entrants (un corps
+d'e-mail de 200 ko est refusé *avant* d'atteindre le LLM, donc avant d'être facturé) ; liste blanche
+des clés de réglages ; Swagger (`/docs`) coupé en production ; `/metrics` derrière son propre jeton,
+distinct de la clé qui écrit dans le CRM — Prometheus peut scraper sans jamais détenir de quoi
+écrire un lead.
+
+**8. TLS et coffre à secrets : la procédure, à défaut du serveur.** Rien n'est hébergé, donc ni HTTPS
+ni coffre ne pouvaient être « codés ». Nouveau `docs/DEPLOYMENT_HARDENING.md` : configurations Caddy
+et Nginx complètes, en-têtes de sécurité, règles de gestion des secrets et tableau de rotation par
+secret.
+
+### Les cinq choses trouvées en vérifiant (le plus intéressant)
+
+Un item « à vérifier » vaut souvent plus qu'un item « à construire » :
+
+1. **`ui.py` affichait le texte brut des exceptions à l'écran**, à quatre endroits. Or le message
+   d'erreur d'une API contient régulièrement l'URL appelée, des en-têtes, parfois un fragment de clé.
+2. **17 vulnérabilités connues dans les dépendances**, dont 11 dans deux paquets **transitifs** que
+   le projet n'importe même pas (`gitpython` arrive via Streamlit, `pyasn1` via `google-auth`).
+   « `requirements.txt` est épinglé » donnait une fausse assurance : les dépendances *indirectes* n'y
+   figuraient pas. Corrigé et re-scanné : plus aucune.
+3. **Le cookie du dashboard n'expirait jamais côté serveur.** Le jeton signé était une valeur
+   constante ; la date d'expiration du cookie n'est appliquée que par le navigateur et ne survit pas
+   à une simple recopie du cookie. L'expiration est désormais signée *dans* le jeton.
+4. **`POST /settings` acceptait n'importe quelle clé** — le magasin de configuration est générique
+   par conception, mais rien ne filtrait à la frontière réseau.
+5. **Une subtilité Postgres qui aurait rendu le rapport RLS trompeur.** `FORCE ROW LEVEL SECURITY` ne
+   s'applique qu'au *propriétaire* de la table. Un script naïf aurait signalé les quatre tables
+   LangGraph comme problématiques à chaque exécution — et un rapport bruyant finit par ne plus être
+   lu.
+
+### Ce qui est resté volontairement non fait (dit clairement)
+
+- **HTTPS n'est pas appliqué**, seulement documenté : il n'y a aujourd'hui aucun serveur ni domaine.
+- **Pas de coffre à secrets** (Vault/Doppler) : décision d'hébergement. Aucun changement de code ne
+  sera nécessaire le jour venu, puisque tous les modules lisent leur configuration dynamiquement.
+- **Les registres SQLite locaux restent cloisonnés au niveau applicatif**, pas au niveau base. Le
+  modèle réel reste « un déploiement = un tenant ».
+- **Pas de double authentification, pas de SSO.** Comptes locaux uniquement.
+- **Le logging structuré, les disjoncteurs et tout le §15.4** (CI, tests de charge, E2E navigateur)
+  ne font pas partie de cette passe : c'est de la qualité et de l'exploitation, pas de la sécurité.
+
+### Comment on sait que ça marche
+
+**261 tests, hors ligne, ~12 s** (contre 192 avant : +69), dont 43 dédiés dans
+`tests/test_security.py`. Ces tests vérifient les scénarios d'attaque eux-mêmes plutôt que le
+« chemin heureux » : une ligne d'audit modifiée est détectée, une ligne **supprimée** aussi, un corps
+d'e-mail démesuré est rejeté **sans que le LLM soit appelé**, un rôle inconnu n'obtient aucun droit,
+l'activité ne prolonge pas la durée de vie absolue d'une session, et dix e-mails commerciaux
+parfaitement normaux ne déclenchent **aucune** fausse alerte d'injection.
+
+Vérifications en direct, pas seulement en test : le balayage RLS sur le vrai Supabase (5 tables,
+0 sans politique, connexion via le rôle restreint `aca_app`), la détection de falsification du
+journal d'audit, le scan de dépendances, et les commandes en ligne de commande (création de comptes,
+contrôle de configuration de production, vérification du journal).

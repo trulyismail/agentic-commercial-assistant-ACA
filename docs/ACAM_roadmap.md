@@ -665,6 +665,38 @@ le « impressionnant mais incohérent » :
   **la dernière chose à réellement câbler** (le port API existe déjà et suffit ; aucune instance n8n
   n'est montée), même s'il restera une fonctionnalité principale offerte à terme.
 
+**Mise à jour (2026-07-24) — le dashboard est PARKÉ ; Streamlit est la colonne vertébrale
+opérationnelle.** Un inventaire des trois surfaces contre le code réel a tranché la question « le
+dashboard est-il vraiment nécessaire ? » : Streamlit (`ui.py`) est la console opérateur *complète*
+(intake formulaire/Gmail + lancement de l'analyse, HITL valider/éditer/**rejeter**, clarification,
+**ingestion de connaissances**, **validation FAQ de la veille**, KPIs, historique, réglages) ; le
+dashboard Next.js n'est qu'un *sous-ensemble en lecture seule* — **il n'a ni l'intake, ni
+l'ingestion, ni la curation FAQ** (confirmé absent du code : aucun `POST /threads`, aucun uploader,
+aucun endpoint FAQ), donc il **ne peut pas tourner seul** (il dépend du poller/Streamlit pour être
+alimenté) et n'est pas déployé. Décision de l'utilisateur : **garder le dashboard dans le dépôt
+comme vitrine construite, mais faire de Streamlit la surface opérationnelle unique** pour la
+démo/soutenance ; aucun investissement dashboard supplémentaire pour l'instant. La direction
+« cockpit client » du dashboard devient une piste future **différée**, pas active ; Slack
+(Valider/Rejeter) couvre déjà la commodité d'approbation ; n8n reste une plomberie future
+orthogonale (voir ci-dessus). Concrètement, la reformulation « dashboard = colonne vertébrale UI à
+long terme » du bloc ci-dessus est remplacée par « Streamlit = colonne vertébrale opérationnelle
+aujourd'hui ; dashboard = vitrine parquée ; cockpit client = piste future différée ».
+
+**Deux incohérences de surface relevées pendant l'inventaire (documentées, différées) :**
+- *Topologie du graphe recopiée à la main en 3 endroits* — `aca/core/app.py` (le vrai graphe),
+  `GRAPH_EDGES` de `ui.py`, et `dashboard/lib/graph-topology.ts` : risque de dérive connu (changer
+  le graphe oblige à re-synchroniser 2 copies UI ou elles divergent en silence). **Risque réduit par
+  le parking du dashboard** (sa copie est désormais gelée) ; s'il est repris, mono-sourcer la liste
+  d'arêtes `app.py ↔ ui.py` en un seul module importé par les deux. Différé.
+- *Trois secrets partagés d'authentification* — `ACA_UI_PASSWORD` (Streamlit), `DASHBOARD_PASSWORD`
+  (dashboard), `ACA_API_KEY` (API) : trois secrets à gérer pour un même opérateur. À consolider dans
+  la phase identité/sécurité déjà planifiée en **§15.1.6** (vraie identité par utilisateur). Différé.
+- *Corrigé le 2026-07-24* — Streamlit n'avait **pas de bouton « Rejeter »** (le rejet explicite
+  n'existait que côté API/Slack/dashboard) : un lead ne pouvait qu'être validé ou abandonné
+  silencieusement, jamais rejeté de façon traçable. Ajouté à `ui.py`, miroir de `_do_reject`
+  (`aca/api.py`) — retire le lead de la file (`queue_store.mark_rejected`), **aucune écriture CRM**,
+  le graphe n'est pas repris. Couvert par un test (`test_mark_ready_then_rejected`).
+
 ## 13. Audit d'un 3e document externe — blueprints « Bid Governance » (2026-07-16)
 
 Issu de deux PDF générés par IA reçus le 2026-07-16 ("ACAM v2 Complete Engineering Blueprint" et
@@ -858,43 +890,43 @@ que la checklist soit honnête et qu'on ne « re-fasse » pas l'existant.
 | 15.1.1 | Clés API & secrets côté serveur uniquement | ✅ | `os.getenv()` partout, aucun secret dans un bundle client (cf. §14.1) |
 | 15.1.2 | `.env` jamais commité | ✅ | gitignoré, vérifié §14 ; idem `credentials/` |
 | 15.1.3 | Rate limiting & prévention d'abus | ✅ | `ACA_RATE_LIMIT` (middleware fenêtre glissante, 429+Retry-After, 2026-07-22) + verrou progressif du gate UI (US-41) |
-| 15.1.4 | Validation & sanitisation des entrées, prévention d'injection | 🟡 | Sortie structurée Pydantic (pas de parse JSON manuel) ; échappement anti-formule Sheets (2026-07-22). **Reste** : validation stricte des payloads API au-delà du typage Pydantic, et pas de filtre d'injection de prompt (mitigé *architecturalement* par le gate humain — cf. Annexe C présentation) |
-| 15.1.5 | Authentification sur les routes protégées | 🟡 | `ACA_API_KEY` sur toutes les routes API (sauf `/metrics`+`/slack`) ; Slack HMAC fail-closed ; cookie session dashboard. **Reste** : la garde est *optionnelle* (absente = ouverte) et à *secret partagé*, pas une vraie auth |
-| 15.1.6 | Autorisation, rôles & permissions | ❌ | Aucun rôle en dur : mot de passe partagé unique. La séparation client/admin (§12bis) est *conçue* mais pas *appliquée*. Prérequis : identité par utilisateur (territoire US-33/§12 item 3) |
-| 15.1.7 | Gestion de session & expiration des tokens | 🟡 | Cookie HMAC dashboard existe ; **à vérifier/ajouter** : TTL/expiration explicite + invalidation, throttle déjà présent côté UI (US-41) |
-| 15.1.8 | Gestion des secrets (coffre, rotation) | 🟡 | `.env` serveur ; **reste** : coffre (Vault/Doppler/Secrets Manager) + rotation, pertinent seulement en phase hébergée |
-| 15.1.9 | HTTPS / TLS & rotation de certificats | ❌ | Rien d'hébergé aujourd'hui → concern de déploiement (reverse-proxy/Caddy/hébergeur gère TLS + renouvellement auto). À câbler au moment du 1er déploiement public |
+| 15.1.4 | Validation & sanitisation des entrées, prévention d'injection | ✅ **Fait (2026-07-26)** | Sortie structurée Pydantic ; échappement anti-formule Sheets (2026-07-22). **Ajouté** : bornes strictes sur tous les payloads de `aca/api.py` (`Field(min_length/max_length)`, `thread_id` restreint par motif — un corps de 200 ko+ est refusé en 422 *avant* d'atteindre le LLM), liste blanche des clés sur `POST /settings` (c'était un magasin clé/valeur ouvert), et [prompt_guard.py](../aca/core/prompt_guard.py) : détection déterministe bilingue des injections de prompt, câblée dans `risk_scan_node` → `injection_flags` → prompt du Stratège + alerte + bandeau UI. **Signale, ne bloque pas** : le gate humain reste la protection, ce drapeau le rend éclairé (une consigne cachée page 14 d'un cahier des charges ressortait auparavant comme une phrase plausible de plus) |
+| 15.1.5 | Authentification sur les routes protégées | ✅ **Fait (2026-07-26)** | `ACA_API_KEY` sur toutes les routes API (sauf `/metrics`, qui a désormais sa propre garde `ACA_METRICS_TOKEN`, et `/slack`, couvert par HMAC). **Ajouté** : comparaison à temps constant (`hmac.compare_digest` — un `!=` fuyait le préfixe correct par chronométrage) et surtout `ACA_ENV=production`, qui rend la garde **obligatoire** : clé absente ⇒ 503 et refus de démarrage ([prod_check.py](../aca/core/prod_check.py)), au lieu de « absente = ouverte » |
+| 15.1.6 | Autorisation, rôles & permissions | ✅ **Fait (2026-07-26)** | [user_store.py](../aca/storage/user_store.py) : comptes nominatifs, mots de passe PBKDF2-HMAC-SHA256 (sel + coût par enregistrement, jamais en clair), rôles `admin`/`operator` et permissions déclaratives (`ROLE_PERMISSIONS`, fail-closed sur rôle inconnu). Appliqué dans `ui.py` : réglages, curation de la base de connaissances et gestion des comptes réservés à `admin`. Effet collatéral important : « Validé par » du journal d'audit vient désormais de la session authentifiée, plus d'un champ libre auto-déclaré. Dégradation gracieuse conservée : aucun compte créé ⇒ ancien gate `ACA_UI_PASSWORD` |
+| 15.1.7 | Gestion de session & expiration des tokens | ✅ **Fait (2026-07-26)** | [session.py](../aca/core/session.py) : TTL absolu (`ACA_SESSION_TTL_SECONDS`, 8 h) **et** délai d'inactivité (`ACA_SESSION_IDLE_SECONDS`, 30 min), la borne la plus stricte l'emportant ; l'activité repousse l'inactivité mais **jamais** le TTL absolu (sinon une session volée maintenue active ne meurt jamais). Côté dashboard, le jeton portait jusqu'ici une valeur constante, donc valable à vie — il embarque désormais son expiration **signée** (le `maxAge` du cookie ne prouvait rien, il n'est appliqué que par le navigateur). Invalidation globale = rotation de `DASHBOARD_SESSION_SECRET` |
+| 15.1.8 | Gestion des secrets (coffre, rotation) | ✅ **Fait (2026-07-26)**, hors coffre lui-même | Règles, tableau de rotation par secret et procédure documentés dans [DEPLOYMENT_HARDENING.md](DEPLOYMENT_HARDENING.md) §3. Le coffre (Vault/Doppler/Secrets Manager) reste une décision d'hébergement, mais **ne demandera aucun changement de code** : tous les modules lisent `os.getenv()` dynamiquement, un agent injectant les variables suffit. Piège documenté : `ACA_AUDIT_HMAC_KEY` est le seul secret dont la rotation casse une vérification (§15.2.7) |
+| 15.1.9 | HTTPS / TLS & rotation de certificats | ✅ **Procédure prête (2026-07-26)**, à appliquer au déploiement | [DEPLOYMENT_HARDENING.md](DEPLOYMENT_HARDENING.md) §2 : configurations Caddy (renouvellement automatique) et Nginx complètes, en-têtes HSTS/nosniff/DENY, écoute sur la boucle locale uniquement, et le piège WebSocket de Streamlit derrière proxy (UI figée sur « Connecting… » sans `Upgrade`/`Connection`). Conséquence applicative documentée : sans `--proxy-headers`, tous les clients partagent un seul quota de débit. Rien n'étant hébergé, l'application effective reste au jour J |
 
 ### 15.2 Données, multi-tenant & conformité
 
 | # | Item | Statut | Note |
 |---|---|---|---|
-| 15.2.1 | RLS sur *chaque* table | 🟡 | `faq_embeddings` : RLS Postgres vérifiée en direct (§14.3). Tables checkpoint LangGraph : politique permissive volontaire (isolation par `thread_id` interne). 5 stores SQLite locaux : cloisonnement `org_id` *applicatif*, pas au niveau base. **Reste** : décider si les stores locaux passent à un backend supportant la RLS en multi-client réel |
-| 15.2.2 | Aucune table laissée totalement publique | 🟡 | **À vérifier** : balayage final Supabase confirmant que toute table `public` a au moins une politique (les tables checkpoint ont reçu une politique permissive manuelle) — 0 table sans politique |
+| 15.2.1 | RLS sur *chaque* table | 🟡 | `faq_embeddings` : RLS Postgres vérifiée en direct (§14.3, revérifiée 2026-07-26 via `scripts/verify_rls.py`). Tables checkpoint LangGraph : politique permissive volontaire (isolation par `thread_id` interne). **Six** stores SQLite locaux (le nouveau `user_store.py` compris, lui aussi cloisonné par `org_id` et couvert par un test d'isolation) : cloisonnement `org_id` *applicatif*, pas au niveau base. **Reste** : décider si les stores locaux passent à un backend supportant la RLS en multi-client réel — arbitrage produit, pas dette technique |
+| 15.2.2 | Aucune table laissée totalement publique | ✅ **Vérifié en direct (2026-07-26)** | [scripts/verify_rls.py](../scripts/verify_rls.py) — balayage rejouable de tout le schéma `public`. Résultat réel : **5 tables, 0 sans politique** (`faq_embeddings` RLS activée + forcée ; les 4 tables LangGraph avec leur politique permissive assumée). Le script contrôle **aussi le rôle de connexion** (`aca_app`, ni `SUPERUSER` ni `BYPASSRLS`) — sans ce contrôle, un rapport « tout est vert » serait trompeur, exactement le piège du 2026-07-21. Nuance apprise en écrivant le script : `FORCE` ne lie que le *propriétaire* de la table, donc son absence sur les tables LangGraph n'est pas un défaut — les signaler à chaque exécution aurait appris à ignorer le rapport |
 | 15.2.3 | Multi-tenant & isolation des données | 🟡 | Fondation `org_id` (5 stores + pgvector) posée (§12 item 3). **Reste** : onboarding/provisioning tenant, aujourd'hui « 1 déploiement = 1 tenant » |
-| 15.2.4 | Gestion des données personnelles (PII) | 🟡 | Purge `retention.py` + politique de confidentialité. **Reste** : minimisation/chiffrement au niveau champ si exigé (PII dans checkpoints/Sheets) |
+| 15.2.4 | Gestion des données personnelles (PII) | ✅ **Fait (2026-07-26)** | Purge `retention.py` + politique de confidentialité, **plus le droit à l'effacement (art. 17)** qui manquait : `retention.purge_subject(sender)` / `python -m aca.core.retention --oublier <adresse>` efface Leads + checkpoints LangGraph (corps brut de l'e-mail) + file d'attente + suivi de relance, et renvoie le décompte par emplacement pour pouvoir répondre précisément à la personne. C'était le vrai manque : seul l'effacement *par ancienneté* était automatisé — la partie facile —, alors qu'une demande explicite imposait de retrouver à la main des lignes dans un Sheet, des threads dans un fichier de checkpoints et deux registres SQLite, donc en pratique ne se faisait pas. Effet de bord voulu : la personne n'est plus relancée par `relance.py`. Le journal d'audit est **volontairement** conservé (intérêt légitime art. 17.3(e), et le supprimer romprait la chaîne §15.2.7 — décision documentée, pas un oubli). **Reste** : chiffrement au niveau champ si un client l'exige |
 | 15.2.5 | Politique de rétention & suppression | ✅ | `retention.py` (RETENTION_DAYS, purge Leads+checkpoints+queue) + [PRIVACY_POLICY.md](PRIVACY_POLICY.md) (§14.4) |
 | 15.2.6 | Conformité réglementaire (RGPD) | 🟡 | Forme RGPD : rétention, politique, audit. **Reste** : champs `[À COMPLÉTER]` (responsable de traitement), DPA client, DPIA formelle si volume réel |
-| 15.2.7 | Journaux d'audit & logs infalsifiables (tamper-evident) | 🟡 | `audit_log.py` enregistre chaque validation (qui/quoi/quand). **Reste** : garantie d'inviolabilité (chaînage de hash / append-only) — aujourd'hui une simple table SQLite modifiable |
+| 15.2.7 | Journaux d'audit & logs infalsifiables (tamper-evident) | ✅ **Fait (2026-07-26)** | Chaînage par hachage dans [audit_log.py](../aca/storage/audit_log.py) : chaque ligne intègre l'empreinte de la précédente (par tenant), `verify_chain()` recalcule et **localise** la première rupture ; `python -m aca.storage.audit_log` en fait un contrôle planifiable. Deux contrôles distincts, car l'empreinte seule ne suffit pas : le contenu de la ligne **et** le `prev_hash` attendu — sans le second, supprimer une ligne du milieu passerait inaperçu, chaque ligne restante étant individuellement cohérente. Avec `ACA_AUDIT_HMAC_KEY`, les empreintes deviennent des HMAC : forger une chaîne exige la clé, qui vit hors de la base. **Vérifié en direct** : falsification d'un `validated_by` détectée, ligne 2 désignée. Limites énoncées : c'est *tamper-evident*, pas tamper-proof (sans clé, qui écrit peut tout recalculer) ; le WORM/ancrage externe reste hors périmètre. Les lignes antérieures à la migration sont comptées « héritées, non chaînées », jamais signalées comme falsifiées |
 
 ### 15.3 Observabilité & robustesse d'exécution
 
 | # | Item | Statut | Note |
 |---|---|---|---|
 | 15.3.1 | Logging | 🟡 | `print` + `analytics_store` + `audit_log` + tracing LangSmith. **Reste** : logging structuré/centralisé (niveaux, JSON, corrélation par `thread_id`) |
-| 15.3.2 | Messages d'erreur ne fuitant pas de stack trace à l'utilisateur | 🟡 | **À vérifier** : confirmer que FastAPI tourne sans `debug=True` en prod (500 générique, pas de trace) et que l'UI n'affiche pas d'exception brute ; la dégradation gracieuse en absorbe déjà beaucoup |
-| 15.3.3 | Endpoints admin/debug coupés ou verrouillés | 🟡 | **À vérifier/durcir** : pas d'endpoint debug custom ; mais le Swagger `/docs` + `/openapi.json` de FastAPI et `/metrics` sont exposés par défaut — à protéger/désactiver en prod |
+| 15.3.2 | Messages d'erreur ne fuitant pas de stack trace à l'utilisateur | ✅ **Fait (2026-07-26)** | Vérification faite, et elle a trouvé un vrai défaut : `ui.py` affichait `st.error(f"... : {e}")` à **quatre** endroits (Gmail, chargement d'e-mail, ingestion, validation). Le texte brut d'une exception d'API contient régulièrement l'URL appelée, des en-têtes, voire un fragment de clé. Remplacé par `_safe_error()` : message actionnable à l'écran, détail complet en console serveur. Côté API, un handler d'exception global renvoie un 500 générique + un **identifiant d'incident** corrélable aux journaux, au lieu de dépendre de la configuration du serveur ASGI |
+| 15.3.3 | Endpoints admin/debug coupés ou verrouillés | ✅ **Fait (2026-07-26)** | `/docs`, `/redoc` et `/openapi.json` sont désormais **coupés dès `ACA_ENV=production`** (sauf `ACA_ENABLE_DOCS=1` explicite) — l'inverse du défaut FastAPI, qui publie la surface complète, routes d'écriture CRM comprises, sans rien demander. `/metrics` reste hors de `require_api_key` (un scrapeur Prometheus n'envoie pas d'en-tête applicatif) mais n'est plus public pour autant : garde dédiée `ACA_METRICS_TOKEN` (en-tête `X-Metrics-Token`), indépendante de la clé d'écriture CRM — Prometheus scrape sans jamais détenir la clé qui écrit dans le CRM |
 | 15.3.4 | Gestion d'erreurs | ✅ | Dégradation gracieuse partout (chaque service optionnel absent = feature ignorée, jamais un crash) |
 | 15.3.5 | Dégradation gracieuse | ✅ | Motif cœur du projet (notify/enrichment/veille/hubspot/billing…) |
 | 15.3.6 | Retry avec back-off & idempotence | ✅ | `RETRY_POLICY` (3 essais, +429) sur chaque nœud à appel externe ; `sqlite_retry` hors graphe ; idempotence poller (`en_cours` avant `invoke`) |
 | 15.3.7 | Circuit breakers & comportement de repli | 🟡 | Replis présents (Gemini→mots-clés, Tavily→"", Postgres→SQLite/mémoire). **Reste** : vrai disjoncteur (ouverture après N échecs pour cesser d'appeler un service mort) — non nécessaire au volume actuel |
-| 15.3.8 | Scan de dépendances & patch de vulnérabilités | ❌ | `requirements.txt` épinglé, mais aucun `pip-audit`/Dependabot/Snyk. **À ajouter** : scan CI + politique de mise à jour |
+| 15.3.8 | Scan de dépendances & patch de vulnérabilités | ✅ **Fait et exécuté (2026-07-26)** | `pip-audit` ajouté à `requirements.txt` et **réellement lancé** : 17 vulnérabilités connues dans 3 paquets, toutes corrigées (`gitpython` 3.1.50 → 8 avis, `pyasn1` 0.6.3 → 3, `pip` 25.2 → 6), scan final « No known vulnerabilities found ». Enseignement : **deux des trois paquets sont transitifs** (`gitpython` via Streamlit, `pyasn1` via `google-auth`) — le projet ne les importe pas, personne ne les aurait surveillés, et « `requirements.txt` épinglé » donnait une fausse impression de maîtrise puisque les dépendances indirectes n'y figuraient pas. D'où des planchers `>=` explicites, sans quoi une installation neuve réintroduisait les versions vulnérables. **Reste** : l'automatisation en CI dépend de 15.4.7 (pas de pipeline aujourd'hui) — la procédure manuelle est dans [DEPLOYMENT_HARDENING.md](DEPLOYMENT_HARDENING.md) §5 |
 
 ### 15.4 Tests & qualité
 
 | # | Item | Statut | Note |
 |---|---|---|---|
-| 15.4.1 | Tests unitaires | ✅ | 191 tests hors ligne (~4,5 s) |
+| 15.4.1 | Tests unitaires | ✅ | **261 tests** hors ligne (~12 s) — +69 lors de la passe sécurité du 2026-07-26 (hachage/rôles/sessions/injection/`prod_check` dans [test_security.py](../tests/test_security.py), chaînage d'audit et effacement RGPD dans `test_storage.py`, validation stricte et gardes d'API dans `test_api.py`, `injection_flags` dans `test_graph_nodes.py`) |
 | 15.4.2 | Tests d'intégration | ✅ | Tests graphe complet (`test_graph_integration.py`, `test_api.py` via TestClient) |
 | 15.4.3 | Tests end-to-end | 🟡 | Intégrations vérifiées *manuellement* en direct (Gmail/Sheets/Slack/Tavily/HubSpot/Supabase). **Reste** : E2E navigateur automatisé (UI Streamlit + dashboard) |
 | 15.4.4 | Tests de régression | ✅ | La suite hors ligne + le jeu d'éval 50 e-mails jouent ce rôle |
@@ -921,3 +953,47 @@ bloquant pour un vrai déploiement multi-client :
 15.2.5, 15.3.4/15.3.5/15.3.6, 15.4.1/15.4.2/15.4.4. Autrement dit, une partie notable d'une
 checklist « production-ready » standard est déjà couverte par l'architecture défensive existante —
 le reste est un travail de durcissement ciblé, pas une reconstruction.
+
+---
+
+### 15.6 Passe de durcissement du 2026-07-26 — ce qui a été fait, et ce qui reste
+
+Périmètre demandé : **la sécurité proprement dite** — §15.1, §15.2, et les items de §15.3 de nature
+sécuritaire (15.3.2, 15.3.3, 15.3.8). Explicitement hors périmètre pour cette passe : 15.3.1
+(logging structuré), 15.3.7 (disjoncteurs) et tout §15.4 (CI, charge, E2E, revue) — qualité et
+exploitation, pas sécurité.
+
+**Livré (12 items) :** 15.1.4, 15.1.5, 15.1.6, 15.1.7, 15.1.8, 15.1.9, 15.2.2, 15.2.4, 15.2.7,
+15.3.2, 15.3.3, 15.3.8 — détail dans les tableaux ci-dessus. Nouveaux modules :
+[user_store.py](../aca/storage/user_store.py), [session.py](../aca/core/session.py),
+[prod_check.py](../aca/core/prod_check.py), [prompt_guard.py](../aca/core/prompt_guard.py),
+[scripts/verify_rls.py](../scripts/verify_rls.py),
+[DEPLOYMENT_HARDENING.md](DEPLOYMENT_HARDENING.md). Suite de tests : 192 → **261**.
+
+**Ce que la passe a réellement trouvé** (au-delà de la mise en œuvre du plan) :
+
+1. **Quatre fuites d'exception dans `ui.py`** (§15.3.2). L'audit disait « à vérifier » ; la
+   vérification a trouvé quatre `st.error(f"… : {e}")` recopiant à l'écran le texte brut
+   d'exceptions Gmail/Sheets/Groq.
+2. **17 vulnérabilités de dépendances**, dont 11 dans deux paquets **transitifs** que le projet
+   n'importe pas (§15.3.8). « `requirements.txt` épinglé » donnait une fausse assurance : les
+   dépendances indirectes n'y figuraient pas.
+3. **Le cookie du dashboard n'expirait jamais côté serveur** (§15.1.7). Le jeton HMAC était
+   constant ; le `maxAge` du cookie, seul garde-fou apparent, n'est appliqué que par le navigateur
+   et ne survit pas à une recopie du cookie.
+4. **`POST /settings` acceptait n'importe quelle clé** (§15.1.4) — `config_store` est un magasin
+   générique par conception, mais rien ne filtrait à la frontière réseau.
+5. **Une nuance Postgres qui aurait rendu le rapport RLS trompeur** (§15.2.2) : `FORCE ROW LEVEL
+   SECURITY` ne lie que le *propriétaire* de la table. Un script naïf aurait signalé les quatre
+   tables LangGraph en permanence — et un rapport bruyant finit par ne plus être lu.
+
+**Ce qui reste ouvert, et pourquoi** (aucun de ces points n'est un oubli) :
+
+| Item | État | Raison |
+|---|---|---|
+| 15.1.9 TLS | Procédure prête, non appliquée | Rien n'est hébergé — l'appliquer demande un serveur et un domaine réels |
+| 15.1.8 coffre | Règles + rotation documentées | Le coffre lui-même est une décision d'hébergement ; aucun changement de code ne sera requis |
+| 15.2.1 RLS des stores locaux | 🟡 assumé | Cloisonnement `org_id` applicatif ; passer à un backend RLS est un arbitrage produit (multi-client réel), pas de la dette |
+| 15.2.3 provisioning tenant | 🟡 | « 1 déploiement = 1 tenant » reste le modèle ; l'onboarding multi-client est un sujet produit |
+| 15.2.6 DPA/DPIA | 🟡 | Documents juridiques propres à l'entreprise utilisatrice, non devinables depuis le code |
+| 15.3.1, 15.3.7, tout §15.4 | Inchangés | Hors du périmètre « sécurité » demandé pour cette passe |

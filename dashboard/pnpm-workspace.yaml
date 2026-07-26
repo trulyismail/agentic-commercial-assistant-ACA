@@ -1,3 +1,8 @@
+# Scripts d'installation autorisés (pnpm 10+ les bloque par défaut : un postinstall est du code
+# arbitraire exécuté à l'installation, donc un vecteur d'attaque de chaîne d'approvisionnement).
+# Ces deux-là sont des dépendances légitimes et connues du projet — `sharp` est l'optimiseur
+# d'images de Next.js, `unrs-resolver` le résolveur d'imports d'ESLint. Sans ces booléens, pnpm 11
+# fait échouer le contrôle de dépendances qui précède `pnpm dev` : le dashboard ne démarre pas.
 allowBuilds:
-  sharp: set this to true or false
-  unrs-resolver: set this to true or false
+  sharp: true
+  unrs-resolver: true

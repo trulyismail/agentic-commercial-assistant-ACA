@@ -24,5 +24,15 @@ fastapi==0.139.2
 uvicorn[standard]==0.50.2
 prometheus-client==0.25.0
 
+# Planchers de sécurité sur des dépendances TRANSITIVES (§15.3.8, scan du 2026-07-26).
+# Ni gitpython ni pyasn1 ne sont importés par ce projet : ils arrivent via streamlit et google-auth.
+# `pip-audit` y a trouvé 8 et 3 vulnérabilités connues sur les versions que pip avait résolues
+# (gitpython 3.1.50, pyasn1 0.6.3). Un `pip install -r requirements.txt` sur une machine neuve
+# aurait pu les réinstaller, puisque rien ici ne disait le contraire : d'où ces planchers explicites
+# (`>=` et non `==`, pour ne pas figer une dépendance dont ce projet ne pilote pas le cycle de vie).
+gitpython>=3.1.55
+pyasn1>=0.6.4
+
 # Dev / tests
 pytest==9.1.1
+pip-audit==2.10.1
