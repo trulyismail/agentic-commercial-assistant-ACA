@@ -19,8 +19,10 @@ x-aca-common: &aca-common
   image: aca:latest
   env_file: [.env]
   volumes:
-    # Registres SQLite (file d'attente, audit, analytics, planificateur, checkpoints) : un volume
-    # nommé, sinon valider un lead puis redémarrer perdrait le journal d'audit.
+    # Registres SQLite (file d'attente, audit, journal d'activité, analytics, planificateur,
+    # comptes, réglages, checkpoints) : un volume nommé, sinon valider un lead puis redémarrer
+    # perdrait le journal d'audit — et depuis §17 la chaîne d'empreintes du journal d'activité, dont
+    # la disparition ressemblerait à une falsification.
     - aca-data:/app/data
     # Identifiants Google en LECTURE SEULE, montés et jamais copiés dans l'image (cf. Dockerfile).
     - ./credentials:/app/credentials:ro
@@ -77,6 +79,22 @@ services:
       - GENERIC_TIMEZONE=Europe/Paris
       # n8n joint l'API par le nom de service du réseau compose, pas par localhost.
       - ACA_API_URL=http://api:8000
+      # La clé d'API, transmise depuis le `.env` (jamais écrite en dur ici : ce fichier est
+      # versionné). Sans elle, les nœuds HTTP du workflow envoient un en-tête `X-API-Key` vide et
+      # l'API répond 401 dès que `ACA_API_KEY` est configurée côté ACA — panne d'autant plus
+      # déroutante que le workflow, lui, paraît parfaitement correct.
+      - ACA_API_KEY=${ACA_API_KEY:-}
+      # Le nœud « Alerter l'équipe (Slack) » du workflow poste sur ce webhook entrant — le MÊME que
+      # celui de notify.py, pour n'avoir ni second canal ni identifiant n8n à créer. Absente, le
+      # nœud échoue sans faire tomber le workflow (`onError: continueRegularOutput`).
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
+      # Destinataire du lien d'approbation envoyé par le nœud « Envoyer le lien d'approbation ».
+      # Sans elle, personne n'est prévenu qu'un lead attend une décision — le formulaire reste
+      # néanmoins accessible depuis la liste des exécutions n8n.
+      - NOTIFY_EMAIL=${NOTIFY_EMAIL:-}
+      # `$env` est accessible dans les expressions n8n par défaut ; on l'affirme explicitement pour
+      # que le workflow ne dépende pas d'un défaut susceptible de changer d'une version à l'autre.
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
     volumes:
       - n8n-data:/home/node/.n8n
       # Le workflow prêt à importer est monté en lecture seule : dans l'interface n8n,

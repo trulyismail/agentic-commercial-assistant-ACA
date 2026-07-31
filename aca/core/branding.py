@@ -1,0 +1,1268 @@
+"""
+Identité visuelle paramétrable (§17) — « marque blanche » pour l'entreprise qui reçoit ACA.
+
+**Le problème.** Jusqu'ici l'apparence vivait entièrement dans `.streamlit/config.toml` : un fichier
+statique, versionné, à éditer à la main puis à redéployer. Livrer ACA à une entreprise dont le
+cahier des charges impose son logo et ses couleurs supposait donc de *modifier le produit* pour
+chaque client — exactement ce qu'un produit ne doit pas demander. Ce module fait de l'apparence une
+**donnée** : des jetons (`BRAND_*`) résolus à l'exécution, éditables depuis l'onglet « Réglages »
+par un administrateur, sans redémarrage et sans toucher au dépôt.
+
+**Deux couches, parce qu'aucune ne suffit seule.**
+
+1. *CSS vivante* (`css()`), injectée à chaque rerun. Prend effet immédiatement, porte les
+   animations, l'en-tête de marque et tout ce que Streamlit n'expose pas nativement. C'est la
+   couche qui rend le changement de couleur instantané pour la personne qui l'édite.
+2. *Thème natif* (`config_toml()` → `.streamlit/config.toml`, sur action explicite). Seule cette
+   couche atteint l'intérieur des composants React de Streamlit (le fond d'un `st.selectbox`
+   ouvert, la palette d'un graphique Vega, le rendu d'un `st.dataframe`). Elle exige un rechargement
+   de page, ce que l'UI annonce au lieu de le cacher.
+
+Le projet a la doctrine inverse par défaut (« pas de CSS, tout dans config.toml », cf. la skill
+`developing-with-streamlit`) et elle reste la bonne pour un thème figé. Elle est écartée ici en
+connaissance de cause : un thème qui se change à l'exécution, par tenant, ne peut pas être un
+fichier statique lu au démarrage du serveur.
+
+**Rien n'est figé à l'import.** `resolve()` relit `config_store` et l'environnement à chaque appel —
+même raison que `DATABASE_URL` dans `vector_store.py` et `ACA_ORG_ID` dans `tenant.py` : un réglage
+enregistré doit s'appliquer au rerun suivant, pas au prochain redémarrage.
+
+**Dégradation gracieuse, comme partout ailleurs.** Aucun jeton réglé ⇒ palette ACA par défaut,
+identique à l'apparence actuelle. Un `config_store` indisponible ⇒ repli sur `.env` puis sur les
+valeurs par défaut, sans exception : une base de réglages verrouillée ne doit pas empêcher l'écran
+de connexion de s'afficher.
+
+Aucun import Streamlit ici (même posture que `risk_scan.py`, `session.py`, `graph_topology.py`) :
+tout est pur et testable hors ligne, `ui.py` se charge du rendu.
+"""
+import os
+import re
+
+# ── Jetons de marque ──────────────────────────────────────────────────────────────────────────
+# Table déclarative : ajouter un paramètre d'apparence = UNE entrée ici, et le formulaire de
+# l'onglet « Réglages » le fait apparaître tout seul (même esprit que `ROUTING_DESTINATIONS` dans
+# app.py et `JOBS` dans scheduler.py). `kind` pilote le widget utilisé côté UI.
+KIND_TEXT = "text"
+KIND_COLOR = "color"
+KIND_CHOICE = "choice"
+KIND_IMAGE = "image"
+
+TOKENS = {
+    # Identité
+    "BRAND_NAME": {
+        "label": "Nom de l'application", "kind": KIND_TEXT, "group": "Identité",
+        "default": "Assistant commercial agentique",
+        "help": "Affiché dans l'en-tête, l'onglet du navigateur et l'écran de connexion.",
+    },
+    "BRAND_TAGLINE": {
+        "label": "Accroche", "kind": KIND_TEXT, "group": "Identité",
+        "default": "Pré-lecture et qualification des e-mails entrants — validation humaine avant "
+                   "écriture CRM.",
+        "help": "Une phrase sous le titre. Laisser vide pour n'afficher que le nom.",
+    },
+    "BRAND_COMPANY": {
+        "label": "Entreprise", "kind": KIND_TEXT, "group": "Identité", "default": "",
+        "help": "Nom du client final, affiché en pied de page (« Déployé pour … »).",
+    },
+    "BRAND_LOGO": {
+        "label": "Logo", "kind": KIND_IMAGE, "group": "Identité", "default": "",
+        "help": "PNG, JPEG, SVG ou WebP, 512 Ko maximum. Vide = icône Material par défaut.",
+    },
+    # Couleurs
+    "BRAND_PRIMARY": {
+        "label": "Couleur principale", "kind": KIND_COLOR, "group": "Couleurs",
+        "default": "#0078D4",
+        "help": "Boutons d'action, liens, éléments actifs. Doit rester lisible sous du texte blanc.",
+    },
+    "BRAND_ACCENT": {
+        "label": "Couleur d'accent", "kind": KIND_COLOR, "group": "Couleurs",
+        "default": "#8764B8",
+        "help": "Second ton des dégradés (en-tête, boutons). Choisir une teinte voisine ou "
+                "complémentaire de la principale.",
+    },
+    "BRAND_BACKGROUND": {
+        "label": "Fond principal", "kind": KIND_COLOR, "group": "Couleurs", "default": "#FFFFFF",
+    },
+    "BRAND_SURFACE": {
+        "label": "Fond des cartes", "kind": KIND_COLOR, "group": "Couleurs", "default": "#F5F7FA",
+        "help": "Doit se distinguer du fond principal, sinon les cartes disparaissent.",
+    },
+    "BRAND_SIDEBAR": {
+        "label": "Fond de la barre latérale", "kind": KIND_COLOR, "group": "Couleurs",
+        "default": "#F3F4F7",
+    },
+    "BRAND_TEXT": {
+        "label": "Texte", "kind": KIND_COLOR, "group": "Couleurs", "default": "#1A1A1A",
+    },
+    "BRAND_BORDER": {
+        "label": "Bordures", "kind": KIND_COLOR, "group": "Couleurs", "default": "#E2E5EA",
+    },
+    "BRAND_SUCCESS": {
+        "label": "Succès", "kind": KIND_COLOR, "group": "Couleurs d'état", "default": "#107C10",
+    },
+    "BRAND_WARNING": {
+        "label": "Avertissement", "kind": KIND_COLOR, "group": "Couleurs d'état",
+        "default": "#D83B01",
+    },
+    "BRAND_DANGER": {
+        "label": "Erreur / risque", "kind": KIND_COLOR, "group": "Couleurs d'état",
+        "default": "#E81123",
+    },
+    "BRAND_INFO": {
+        "label": "Information", "kind": KIND_COLOR, "group": "Couleurs d'état", "default": "#00B7C3",
+    },
+    # Mise en forme
+    "BRAND_FONT": {
+        "label": "Police", "kind": KIND_CHOICE, "group": "Mise en forme", "default": "Inter",
+        "choices": ["Inter", "Open Sans", "Roboto", "Lato", "Montserrat", "Poppins",
+                    "IBM Plex Sans", "Source Sans 3", "Nunito", "Système"],
+        "help": "Chargée depuis Google Fonts. « Système » n'appelle aucun serveur externe — "
+                "à choisir si le réseau du client bloque les CDN.",
+    },
+    "BRAND_RADIUS": {
+        "label": "Arrondi des angles", "kind": KIND_CHOICE, "group": "Mise en forme",
+        "default": "12px", "choices": ["0px", "4px", "8px", "12px", "16px", "24px"],
+    },
+    "BRAND_DENSITY": {
+        "label": "Densité", "kind": KIND_CHOICE, "group": "Mise en forme", "default": "confortable",
+        "choices": ["compacte", "confortable", "aérée"],
+        "help": "Compacte affiche plus d'informations par écran ; aérée respire davantage.",
+    },
+    "BRAND_MODE": {
+        "label": "Mode", "kind": KIND_CHOICE, "group": "Mise en forme", "default": "clair",
+        "choices": ["clair", "sombre"],
+        "help": "Change les valeurs par défaut des couleurs. Un fond explicitement réglé "
+                "ci-dessus reste prioritaire.",
+    },
+    # Animations
+    "BRAND_ANIMATIONS": {
+        "label": "Animations", "kind": KIND_CHOICE, "group": "Animations", "default": "complet",
+        "choices": ["complet", "sobre", "aucune"],
+        "help": "« Sobre » ne garde que les fondus courts. Quel que soit ce réglage, le système "
+                "d'exploitation gagne : « réduire les animations » est toujours respecté.",
+    },
+    "BRAND_HERO": {
+        "label": "En-tête de marque", "kind": KIND_CHOICE, "group": "Animations",
+        "default": "dégradé animé",
+        "choices": ["dégradé animé", "dégradé fixe", "sobre", "masqué"],
+    },
+}
+
+# Palettes prêtes à l'emploi : un cahier des charges arrive rarement avec des codes hexadécimaux,
+# plus souvent avec « nos couleurs sont le bleu marine et l'or ». Un préréglage donne un point de
+# départ cohérent que l'on ajuste ensuite jeton par jeton.
+PRESETS = {
+    "ACA (défaut)": {},
+    # ── Palettes génériques ───────────────────────────────────────────────────────────────────
+    "Azur corporate": {
+        "BRAND_PRIMARY": "#0F4C81", "BRAND_ACCENT": "#3E8FD0", "BRAND_SURFACE": "#F2F6FB",
+        "BRAND_SIDEBAR": "#EDF3F9", "BRAND_BORDER": "#D8E3EF", "BRAND_RADIUS": "8px",
+    },
+    "Émeraude": {
+        "BRAND_PRIMARY": "#0B7A5E", "BRAND_ACCENT": "#37C39B", "BRAND_SURFACE": "#F1F8F5",
+        "BRAND_SIDEBAR": "#ECF5F1", "BRAND_BORDER": "#D5E8E0", "BRAND_SUCCESS": "#0B7A5E",
+    },
+    "Ardoise & or": {
+        "BRAND_PRIMARY": "#1F2933", "BRAND_ACCENT": "#C9A227", "BRAND_SURFACE": "#F4F5F7",
+        "BRAND_SIDEBAR": "#EDEFF2", "BRAND_BORDER": "#DDE1E6", "BRAND_RADIUS": "4px",
+    },
+    "Corail": {
+        "BRAND_PRIMARY": "#D64545", "BRAND_ACCENT": "#F0956A", "BRAND_SURFACE": "#FDF4F2",
+        "BRAND_SIDEBAR": "#FBEFEC", "BRAND_BORDER": "#F2DCD6", "BRAND_RADIUS": "16px",
+    },
+    "Violet nuit (sombre)": {
+        "BRAND_MODE": "sombre", "BRAND_PRIMARY": "#8B7CF6", "BRAND_ACCENT": "#22D3EE",
+        "BRAND_BACKGROUND": "#0F1117", "BRAND_SURFACE": "#181B24", "BRAND_SIDEBAR": "#12141C",
+        "BRAND_TEXT": "#E6E8EF", "BRAND_BORDER": "#282C38", "BRAND_RADIUS": "12px",
+    },
+    "Carbone (sombre)": {
+        "BRAND_MODE": "sombre", "BRAND_PRIMARY": "#4EA1FF", "BRAND_ACCENT": "#5AD1B0",
+        "BRAND_BACKGROUND": "#101214", "BRAND_SURFACE": "#181B1E", "BRAND_SIDEBAR": "#141618",
+        "BRAND_TEXT": "#E4E6E8", "BRAND_BORDER": "#262A2E", "BRAND_RADIUS": "6px",
+    },
+    # ── Profils sectoriels (§18) ──────────────────────────────────────────────────────────────
+    # Un cahier des charges ne dit presque jamais « #0F4C81 » ; il dit « nous sommes un cabinet
+    # d'expertise comptable » ou « nous vendons du matériel de chantier ». Ces profils partent donc
+    # du métier du client plutôt que d'une teinte, et font varier la police, l'arrondi et la densité
+    # en même temps que la palette — un secteur a une allure, pas seulement une couleur.
+    "Industrie & BTP": {
+        "BRAND_PRIMARY": "#B4530A", "BRAND_ACCENT": "#31465A", "BRAND_SURFACE": "#F5F4F1",
+        "BRAND_SIDEBAR": "#EFEDE9", "BRAND_BORDER": "#DAD6CF", "BRAND_TEXT": "#22282E",
+        "BRAND_RADIUS": "0px", "BRAND_FONT": "Roboto", "BRAND_DENSITY": "compacte",
+    },
+    "Santé & médical": {
+        "BRAND_PRIMARY": "#00747C", "BRAND_ACCENT": "#5BC0BE", "BRAND_SURFACE": "#F2F9F9",
+        "BRAND_SIDEBAR": "#EAF4F5", "BRAND_BORDER": "#CFE5E7", "BRAND_INFO": "#00747C",
+        "BRAND_RADIUS": "16px", "BRAND_FONT": "Source Sans 3", "BRAND_DENSITY": "aérée",
+    },
+    "Finance & conseil": {
+        "BRAND_PRIMARY": "#14294B", "BRAND_ACCENT": "#8A6D2F", "BRAND_SURFACE": "#F4F5F8",
+        "BRAND_SIDEBAR": "#EDEFF4", "BRAND_BORDER": "#D9DDE6", "BRAND_TEXT": "#151A22",
+        "BRAND_RADIUS": "4px", "BRAND_FONT": "IBM Plex Sans", "BRAND_ANIMATIONS": "sobre",
+    },
+    "Tech & SaaS": {
+        "BRAND_PRIMARY": "#4F46E5", "BRAND_ACCENT": "#06B6D4", "BRAND_SURFACE": "#F5F5FF",
+        "BRAND_SIDEBAR": "#EFEFFC", "BRAND_BORDER": "#DDDDF2", "BRAND_RADIUS": "16px",
+        "BRAND_FONT": "Inter",
+    },
+    "Luxe & retail": {
+        "BRAND_PRIMARY": "#171717", "BRAND_ACCENT": "#A8874B", "BRAND_SURFACE": "#F7F6F4",
+        "BRAND_SIDEBAR": "#F1EFEC", "BRAND_BORDER": "#E0DCD5", "BRAND_TEXT": "#141414",
+        "BRAND_RADIUS": "0px", "BRAND_FONT": "Montserrat", "BRAND_DENSITY": "aérée",
+        "BRAND_HERO": "dégradé fixe",
+    },
+    "Éducation & secteur public": {
+        "BRAND_PRIMARY": "#1D4E89", "BRAND_ACCENT": "#2E933C", "BRAND_SURFACE": "#F3F6FA",
+        "BRAND_SIDEBAR": "#ECF1F7", "BRAND_BORDER": "#D6DFEA", "BRAND_RADIUS": "8px",
+        "BRAND_FONT": "Source Sans 3",
+    },
+    "Agroalimentaire": {
+        "BRAND_PRIMARY": "#4F6F1F", "BRAND_ACCENT": "#D19A25", "BRAND_SURFACE": "#F6F7F1",
+        "BRAND_SIDEBAR": "#F0F2E9", "BRAND_BORDER": "#DCE0CE", "BRAND_SUCCESS": "#4F6F1F",
+        "BRAND_RADIUS": "12px", "BRAND_FONT": "Nunito",
+    },
+    "Immobilier": {
+        "BRAND_PRIMARY": "#1F4235", "BRAND_ACCENT": "#B08D57", "BRAND_SURFACE": "#F4F6F4",
+        "BRAND_SIDEBAR": "#EDF0ED", "BRAND_BORDER": "#D8DFD9", "BRAND_RADIUS": "8px",
+        "BRAND_FONT": "Lato",
+    },
+    "Énergie (sombre)": {
+        "BRAND_MODE": "sombre", "BRAND_PRIMARY": "#2DD4BF", "BRAND_ACCENT": "#FACC15",
+        "BRAND_BACKGROUND": "#0B1220", "BRAND_SURFACE": "#141C2B", "BRAND_SIDEBAR": "#0E1524",
+        "BRAND_TEXT": "#E2E8F0", "BRAND_BORDER": "#22304A", "BRAND_RADIUS": "8px",
+        "BRAND_FONT": "IBM Plex Sans",
+    },
+    "Transport & logistique": {
+        "BRAND_PRIMARY": "#0B4F9E", "BRAND_ACCENT": "#F59E0B", "BRAND_SURFACE": "#F3F6FB",
+        "BRAND_SIDEBAR": "#EBF1F9", "BRAND_BORDER": "#D5E0EF", "BRAND_RADIUS": "4px",
+        "BRAND_FONT": "Roboto", "BRAND_DENSITY": "compacte",
+    },
+    "Accessibilité renforcée": {
+        # Contrastes poussés et mouvement réduit : pour un client dont le cahier des charges impose
+        # le RGAA/WCAG AA, ou une équipe travaillant sur des écrans de mauvaise qualité.
+        "BRAND_PRIMARY": "#00408A", "BRAND_ACCENT": "#6B21A8", "BRAND_SURFACE": "#F0F2F5",
+        "BRAND_SIDEBAR": "#E8EBF0", "BRAND_BORDER": "#B9C0CC", "BRAND_TEXT": "#0B0F14",
+        "BRAND_RADIUS": "4px", "BRAND_ANIMATIONS": "sobre", "BRAND_DENSITY": "aérée",
+    },
+}
+
+PRESET_KEY = "BRAND_PRESET"
+
+# Préfixe des profils enregistrés par un administrateur depuis l'UI. Stockés dans `config_store`
+# comme le reste des réglages du tenant, en JSON, sous `BRAND_PROFILE_<nom>`.
+PROFILE_PREFIX = "BRAND_PROFILE_"
+
+# Défauts appliqués quand `BRAND_MODE = "sombre"` sans couleur explicite : un mode sombre obtenu en
+# ne changeant que le fond donnerait du texte noir sur fond noir. Ces valeurs vont ensemble.
+_DARK_DEFAULTS = {
+    "BRAND_BACKGROUND": "#0F1117", "BRAND_SURFACE": "#181B24",
+    "BRAND_SIDEBAR": "#12141C", "BRAND_TEXT": "#E6E8EF", "BRAND_BORDER": "#282C38",
+}
+
+# Polices Google : famille -> URL de feuille de style. « Système » n'y figure volontairement pas.
+_GOOGLE_FONTS = {
+    "Inter": "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap",
+    "Open Sans": "https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;500;600;700&display=swap",
+    "Roboto": "https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap",
+    "Lato": "https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700&display=swap",
+    "Montserrat": "https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap",
+    "Poppins": "https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap",
+    "IBM Plex Sans": "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap",
+    "Source Sans 3": "https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&display=swap",
+    "Nunito": "https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700&display=swap",
+}
+_SYSTEM_FONT_STACK = ("-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', "
+                      "Arial, sans-serif")
+
+# Densité -> (espacement vertical entre blocs, padding interne des cartes, marge haute de page).
+_DENSITY = {
+    "compacte": ("0.55rem", "0.85rem", "1.4rem"),
+    "confortable": ("0.95rem", "1.15rem", "2.2rem"),
+    "aérée": ("1.5rem", "1.6rem", "3rem"),
+}
+
+# Logo : formats acceptés et plafond de taille. Le plafond n'est pas cosmétique — le logo est stocké
+# en base64 dans `config.sqlite` et réinjecté à CHAQUE rerun de Streamlit ; un PNG de 5 Mo
+# alourdirait chaque interaction de l'application.
+MAX_LOGO_BYTES = 512 * 1024
+LOGO_MIME_TYPES = {
+    "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+    "svg": "image/svg+xml", "webp": "image/webp",
+}
+
+DEFAULT_LOGO_ICON = ":material/smart_toy:"
+
+_HEX_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+
+
+# ── Utilitaires de couleur (purs) ─────────────────────────────────────────────────────────────
+def is_valid_hex(value: str) -> bool:
+    """`#abc` ou `#aabbcc`. Garde indispensable avant toute écriture dans le CSS : une valeur non
+    validée irait directement dans une feuille de style injectée."""
+    return bool(value and _HEX_RE.match(value.strip()))
+
+
+def _to_rgb(hex_color: str) -> tuple:
+    value = hex_color.strip().lstrip("#")
+    if len(value) == 3:
+        value = "".join(char * 2 for char in value)
+    return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def rgb_string(hex_color: str) -> str:
+    """`"#0078D4"` -> `"0, 120, 212"`, pour composer des `rgba()` en CSS à partir d'un seul jeton."""
+    return ", ".join(str(channel) for channel in _to_rgb(hex_color))
+
+
+def relative_luminance(hex_color: str) -> float:
+    """Luminance relative WCAG (0 = noir, 1 = blanc)."""
+    channels = []
+    for channel in _to_rgb(hex_color):
+        srgb = channel / 255
+        channels.append(srgb / 12.92 if srgb <= 0.04045 else ((srgb + 0.055) / 1.055) ** 2.4)
+    red, green, blue = channels
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def contrast_ratio(first: str, second: str) -> float:
+    """Rapport de contraste WCAG entre deux couleurs (1 à 21). 4,5 est le seuil AA pour du texte."""
+    light, dark = sorted((relative_luminance(first), relative_luminance(second)), reverse=True)
+    return (light + 0.05) / (dark + 0.05)
+
+
+def readable_text_on(hex_color: str) -> str:
+    """
+    Noir ou blanc, selon ce qui se lit le mieux sur `hex_color`.
+
+    Utilisé pour le texte de l'en-tête de marque : un client qui choisit un jaune vif comme couleur
+    principale obtiendrait sinon du blanc sur jaune, illisible — et ce serait *notre* défaut, pas
+    son mauvais goût.
+    """
+    return "#FFFFFF" if relative_luminance(hex_color) < 0.45 else "#111111"
+
+
+def mix(hex_color: str, other: str, ratio: float) -> str:
+    """Mélange linéaire de deux couleurs (`ratio` = part de `other`), en hexadécimal."""
+    ratio = max(0.0, min(1.0, ratio))
+    blended = (round(a + (b - a) * ratio) for a, b in zip(_to_rgb(hex_color), _to_rgb(other)))
+    return "#" + "".join(f"{channel:02X}" for channel in blended)
+
+
+# ── Résolution des jetons ─────────────────────────────────────────────────────────────────────
+def _stored_settings() -> dict:
+    """
+    Réglages `BRAND_*` du tenant courant, ou `{}` si le magasin est indisponible.
+
+    Import local et volontaire : `branding` est appelé depuis l'écran de connexion, avant toute
+    session ; le faire dépendre à l'import d'un module de stockage ferait échouer l'affichage d'un
+    formulaire de connexion pour cause de base verrouillée.
+    """
+    try:
+        from aca.storage import config_store
+
+        return {
+            key: value for key, value in config_store.get_all_settings().items()
+            if key.startswith("BRAND_")
+        }
+    except Exception:  # noqa: BLE001 — l'apparence ne bloque jamais l'application
+        return {}
+
+
+def saved_profiles(stored: dict = None) -> dict:
+    """
+    Profils enregistrés par un administrateur : `{nom: {jeton: valeur}}`.
+
+    Complète les préréglages livrés (`PRESETS`). Un intégrateur qui déploie ACA chez plusieurs
+    clients règle la charte une fois, l'enregistre sous le nom du client, et la retrouve dans la
+    liste déroulante au déploiement suivant — sans repasser par le code ni par un fichier.
+
+    Une valeur illisible (JSON corrompu à la main dans la base) est **ignorée** plutôt que de faire
+    échouer le rendu : l'apparence ne bloque jamais l'application.
+    """
+    import json
+
+    stored = stored if stored is not None else _stored_settings()
+    profiles = {}
+    for key, raw_value in stored.items():
+        if not key.startswith(PROFILE_PREFIX) or not raw_value:
+            continue
+        try:
+            tokens = json.loads(raw_value)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(tokens, dict):
+            profiles[key[len(PROFILE_PREFIX):]] = {
+                token: value for token, value in tokens.items() if token in TOKENS
+            }
+    return profiles
+
+
+def all_profiles(stored: dict = None) -> dict:
+    """
+    Tous les profils sélectionnables : préréglages livrés **puis** profils enregistrés.
+
+    L'ordre compte pour la liste déroulante : les profils propres au client apparaissent après les
+    palettes fournies, donc à un endroit stable, au lieu de se mêler à elles par ordre alphabétique.
+    """
+    return {**PRESETS, **saved_profiles(stored)}
+
+
+def profile_payload(tokens: dict) -> str:
+    """
+    Sérialise les jetons d'apparence courants pour enregistrement comme profil réutilisable.
+
+    Le logo n'est **pas** inclus : il pèse jusqu'à 512 Ko en base64 et une liste de dix profils
+    embarquant chacun son logo transformerait la table de réglages en dépôt d'images. Le logo reste
+    un réglage à part, téléversé pour le tenant courant.
+    """
+    import json
+
+    payload = {
+        key: value for key, value in tokens.items()
+        if key in TOKENS and key != "BRAND_LOGO" and value not in (None, "")
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def resolve(overrides: dict = None) -> dict:
+    """
+    Valeur effective de chaque jeton, par ordre de priorité décroissant :
+
+    1. `overrides` — prévisualisation en direct dans le formulaire (avant enregistrement) ;
+    2. `config_store` — ce qu'un administrateur a réglé dans l'UI, par tenant ;
+    3. variable d'environnement de même nom (`BRAND_PRIMARY=…` dans `.env`) — permet de livrer une
+       image Docker déjà aux couleurs du client, sans base de réglages ;
+    4. préréglage sélectionné (`BRAND_PRESET`) ;
+    5. défauts du mode (clair/sombre), puis défaut du jeton.
+
+    Ainsi une couleur explicitement choisie n'est jamais écrasée par un préréglage ni par le
+    passage en mode sombre : elle a été choisie, elle gagne.
+    """
+    overrides = {k: v for k, v in (overrides or {}).items() if v not in (None, "")}
+    stored = _stored_settings()
+
+    def raw(key: str):
+        if key in overrides:
+            return overrides[key]
+        if stored.get(key):
+            return stored[key]
+        return os.getenv(key) or None
+
+    preset_name = raw(PRESET_KEY) or "ACA (défaut)"
+    # `all_profiles` et non `PRESETS` : un profil enregistré par l'administrateur (§18) doit être
+    # sélectionnable exactement comme une palette livrée, sinon « enregistrer » ne servirait à rien.
+    preset = all_profiles(stored).get(preset_name, {})
+
+    mode = raw("BRAND_MODE") or preset.get("BRAND_MODE") or TOKENS["BRAND_MODE"]["default"]
+    mode_defaults = _DARK_DEFAULTS if mode == "sombre" else {}
+
+    tokens = {PRESET_KEY: preset_name, "BRAND_MODE": mode}
+    for key, spec in TOKENS.items():
+        if key == "BRAND_MODE":
+            continue
+        value = raw(key) or preset.get(key) or mode_defaults.get(key) or spec["default"]
+        # Une couleur corrompue (saisie manuelle, .env mal recopié) retombe sur le défaut plutôt
+        # que d'être injectée telle quelle dans la feuille de style.
+        if spec["kind"] == KIND_COLOR and not is_valid_hex(value):
+            value = mode_defaults.get(key) or spec["default"]
+        tokens[key] = value
+    return tokens
+
+
+def customised_tokens(tokens: dict) -> dict:
+    """
+    Jetons s'écartant de la palette ACA par défaut — ce qu'il est utile de consigner au journal
+    d'activité (§17) et d'afficher comme « personnalisations actives » dans le panneau Apparence.
+    """
+    reference = {PRESET_KEY: "ACA (défaut)", "BRAND_MODE": TOKENS["BRAND_MODE"]["default"]}
+    reference.update({key: spec["default"] for key, spec in TOKENS.items()})
+    return {key: value for key, value in tokens.items() if reference.get(key) != value}
+
+
+# ── Logo ──────────────────────────────────────────────────────────────────────────────────────
+class LogoRejected(ValueError):
+    """Levée par `encode_logo` sur un format non géré, un fichier vide ou trop lourd."""
+
+
+def encode_logo(filename: str, content: bytes) -> str:
+    """
+    Encode un logo téléversé en URI de données (`data:image/png;base64,…`), stockable tel quel.
+
+    Choisi plutôt qu'un fichier sur disque : le réglage reste dans `config.sqlite` avec le reste de
+    la configuration du tenant, donc il suit les sauvegardes et le cloisonnement `org_id` déjà en
+    place — là où un chemin de fichier casse dès que l'application change de machine ou tourne dans
+    un conteneur au système de fichiers éphémère.
+    """
+    import base64
+
+    extension = (filename or "").rsplit(".", 1)[-1].lower()
+    if extension not in LOGO_MIME_TYPES:
+        raise LogoRejected(
+            f"Format non géré : « {extension or filename} ». "
+            f"Formats acceptés : {', '.join(sorted(LOGO_MIME_TYPES))}."
+        )
+    if not content:
+        raise LogoRejected("Fichier vide.")
+    if len(content) > MAX_LOGO_BYTES:
+        raise LogoRejected(
+            f"Logo trop lourd ({len(content) // 1024} Ko) — maximum {MAX_LOGO_BYTES // 1024} Ko. "
+            "Il est réinjecté à chaque interaction : un fichier lourd ralentirait toute "
+            "l'application."
+        )
+    return f"data:{LOGO_MIME_TYPES[extension]};base64,{base64.b64encode(content).decode('ascii')}"
+
+
+def decode_logo(data_uri: str):
+    """
+    Octets d'un logo encodé, ou `None` si la valeur n'est pas une URI de données exploitable.
+
+    `st.logo()` accepte tout ce que `st.image()` accepte, y compris des octets : décoder ici évite
+    de dépendre du support — variable selon les versions — des URI `data:` par le rendu Streamlit.
+    """
+    import base64
+
+    if not data_uri or not data_uri.startswith("data:"):
+        return None
+    try:
+        return base64.b64decode(data_uri.split(",", 1)[1])
+    except (IndexError, ValueError):
+        return None
+
+
+def logo_for_streamlit(tokens: dict):
+    """Valeur à passer à `st.logo()` : octets du logo si configuré, icône Material sinon."""
+    return decode_logo(tokens.get("BRAND_LOGO")) or DEFAULT_LOGO_ICON
+
+
+def favicon_for_streamlit(tokens: dict):
+    """
+    Valeur à passer à `st.set_page_config(page_icon=…)` : le logo du client, ou l'icône par défaut.
+
+    `page_icon` accepte tout ce que `st.image` accepte, donc les octets décodés conviennent. Détail
+    minuscule et très visible : un onglet de navigateur portant le logo Streamlit dans une
+    application censée être aux couleurs du client annule une partie du travail de marque blanche —
+    c'est le premier repère visuel de quelqu'un qui a dix onglets ouverts.
+
+    Les SVG sont volontairement écartés : `st.image` ne les rend pas de façon fiable comme favicon,
+    et un onglet vide serait pire que l'icône par défaut. Le SVG reste parfaitement utilisable comme
+    logo dans la barre latérale.
+    """
+    if (tokens.get("BRAND_LOGO") or "").startswith("data:image/svg"):
+        return DEFAULT_LOGO_ICON
+    return decode_logo(tokens.get("BRAND_LOGO")) or DEFAULT_LOGO_ICON
+
+
+# ── Feuille de style ──────────────────────────────────────────────────────────────────────────
+def font_stack(tokens: dict) -> str:
+    """Pile de polices CSS correspondant au jeton `BRAND_FONT`."""
+    family = tokens.get("BRAND_FONT", "Inter")
+    if family == "Système" or family not in _GOOGLE_FONTS:
+        return _SYSTEM_FONT_STACK
+    return f"'{family}', {_SYSTEM_FONT_STACK}"
+
+
+def font_import(tokens: dict) -> str:
+    """Règle `@import` Google Fonts, ou chaîne vide en police système (aucun appel réseau)."""
+    url = _GOOGLE_FONTS.get(tokens.get("BRAND_FONT", "Inter"))
+    return f"@import url('{url}');\n" if url else ""
+
+
+def _variables(tokens: dict) -> str:
+    """Bloc `:root` — le seul endroit où les jetons deviennent des valeurs CSS."""
+    primary = tokens["BRAND_PRIMARY"]
+    accent = tokens["BRAND_ACCENT"]
+    background = tokens["BRAND_BACKGROUND"]
+    text = tokens["BRAND_TEXT"]
+    gap, pad, top = _DENSITY.get(tokens.get("BRAND_DENSITY"), _DENSITY["confortable"])
+    dark = tokens.get("BRAND_MODE") == "sombre"
+    # Les tons dérivés (survol, ombres, voiles) sont CALCULÉS à partir des deux couleurs de marque
+    # plutôt que d'être des jetons supplémentaires : réclamer douze couleurs à un client dans son
+    # cahier des charges est le meilleur moyen d'obtenir une palette incohérente.
+    return f"""
+:root {{
+  --aca-primary: {primary};
+  --aca-primary-rgb: {rgb_string(primary)};
+  --aca-primary-hover: {mix(primary, "#FFFFFF" if dark else "#000000", 0.14)};
+  --aca-primary-soft: {mix(primary, background, 0.88)};
+  --aca-accent: {accent};
+  --aca-accent-rgb: {rgb_string(accent)};
+  --aca-bg: {background};
+  --aca-surface: {tokens["BRAND_SURFACE"]};
+  --aca-sidebar: {tokens["BRAND_SIDEBAR"]};
+  --aca-text: {text};
+  --aca-muted: {mix(text, background, 0.42)};
+  --aca-border: {tokens["BRAND_BORDER"]};
+  --aca-success: {tokens["BRAND_SUCCESS"]};
+  --aca-warning: {tokens["BRAND_WARNING"]};
+  --aca-danger: {tokens["BRAND_DANGER"]};
+  --aca-info: {tokens["BRAND_INFO"]};
+  --aca-radius: {tokens["BRAND_RADIUS"]};
+  --aca-radius-lg: calc({tokens["BRAND_RADIUS"]} * 1.5);
+  --aca-gap: {gap};
+  --aca-pad: {pad};
+  --aca-top: {top};
+  --aca-font: {font_stack(tokens)};
+  --aca-on-primary: {readable_text_on(primary)};
+  --aca-shadow: 0 1px 2px rgba(16, 24, 40, {"0.35" if dark else "0.06"}),
+                0 4px 16px rgba(16, 24, 40, {"0.30" if dark else "0.05"});
+  --aca-shadow-lift: 0 10px 30px rgba(var(--aca-primary-rgb), {"0.30" if dark else "0.16"});
+}}
+"""
+
+
+# Animations. Séparées du reste pour que le niveau « aucune » se contente de ne pas les émettre,
+# plutôt que de les émettre puis de les neutraliser — un `animation: none !important` laisserait le
+# navigateur composer des couches inutiles à chaque rerun.
+_KEYFRAMES = """
+@keyframes aca-rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+@keyframes aca-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes aca-pop { 0% { opacity: 0; transform: scale(.9); } 60% { transform: scale(1.03); } 100% { opacity: 1; transform: scale(1); } }
+@keyframes aca-slide-in { from { opacity: 0; transform: translateX(-12px); } to { opacity: 1; transform: none; } }
+@keyframes aca-drift { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+@keyframes aca-sheen { 0% { transform: translateX(-120%); } 100% { transform: translateX(220%); } }
+@keyframes aca-halo { 0%, 100% { opacity: .55; transform: scale(1); } 50% { opacity: .95; transform: scale(1.35); } }
+@keyframes aca-float { 0%, 100% { transform: translate3d(0,0,0); } 50% { transform: translate3d(12px,-14px,0); } }
+@keyframes aca-progress { 0% { background-position: 0 0; } 100% { background-position: 42px 0; } }
+@keyframes aca-draw { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+@keyframes aca-ring { 0% { box-shadow: 0 0 0 0 rgba(var(--aca-primary-rgb), .45); } 70% { box-shadow: 0 0 0 9px rgba(var(--aca-primary-rgb), 0); } 100% { box-shadow: 0 0 0 0 rgba(var(--aca-primary-rgb), 0); } }
+@keyframes aca-tick { from { opacity: 0; transform: translateY(6px) scale(.96); } to { opacity: 1; transform: none; } }
+@keyframes aca-warn-glow { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--aca-warning) 35%, transparent); } 50% { box-shadow: 0 0 16px 2px color-mix(in srgb, var(--aca-warning) 55%, transparent); } }
+"""
+
+_ANIMATIONS_FULL = """
+/* Entrée échelonnée des blocs de premier niveau. Les délais sont bornés à quatre paliers : au-delà,
+   l'utilisateur attend l'affichage au lieu de le trouver fluide. */
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] { animation: aca-rise .42s cubic-bezier(.22,.61,.36,1) both; }
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(1) { animation-delay: .02s; }
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(2) { animation-delay: .07s; }
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(3) { animation-delay: .12s; }
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(n+4) { animation-delay: .17s; }
+
+[data-testid="stMetric"] { animation: aca-pop .5s cubic-bezier(.22,.61,.36,1) both; }
+[data-testid="stAlert"] { animation: aca-pop .35s ease-out both; }
+[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] { animation: aca-slide-in .35s ease-out both; }
+
+/* Barre de navigation supérieure : entrée au chargement, puis chaque lien apparaît en léger
+   décalage — le même principe d'entrée échelonnée que le rail de décision, appliqué à la
+   navigation elle-même. `.rc-overflow`/`.rc-overflow-item` (bibliothèque tierce que Streamlit
+   utilise pour cette rangée, classes stables car définies par la bibliothèque elle-même plutôt
+   que hachées par Streamlit à chaque version) sont le vrai conteneur et le vrai élément répété —
+   `[data-testid="stTopNavLinkContainer"]` est un **enfant unique** de son propre wrapper interne,
+   donc `:nth-child` sur lui-même ne différenciait jamais rien (toujours 1er de son parent) : c'est
+   `.rc-overflow-item:nth-child(N)` qui compte réellement la position parmi les liens. Bug trouvé
+   en inspectant le DOM réellement rendu (Playwright), invisible en ne relisant que le CSS. */
+.rc-overflow:has([data-testid="stTopNavLinkContainer"]) { animation: aca-rise .35s ease-out both; }
+[data-testid="stTopNavLinkContainer"] { animation: aca-tick .3s ease-out both; }
+.rc-overflow-item:nth-child(1) [data-testid="stTopNavLinkContainer"] { animation-delay: .02s; }
+.rc-overflow-item:nth-child(2) [data-testid="stTopNavLinkContainer"] { animation-delay: .06s; }
+.rc-overflow-item:nth-child(3) [data-testid="stTopNavLinkContainer"] { animation-delay: .1s; }
+.rc-overflow-item:nth-child(n+4) [data-testid="stTopNavLinkContainer"] { animation-delay: .14s; }
+
+/* Bannière de sécurité : lueur qui respire, pour qu'un point de configuration manquant avant une
+   mise en ligne ne se noie pas visuellement parmi les autres accordéons de la page. */
+.st-key-security_banner [data-testid="stExpander"] details { animation: aca-warn-glow 2.6s ease-in-out infinite; }
+
+/* Reflet qui balaie les boutons principaux au survol : le seul mouvement purement décoratif
+   retenu, parce qu'il porte sur l'action la plus importante de l'écran (« Valider »). */
+.stButton button[kind="primary"], .stFormSubmitButton button[kind="primary"] { position: relative; overflow: hidden; }
+.stButton button[kind="primary"]::after, .stFormSubmitButton button[kind="primary"]::after {
+  content: ""; position: absolute; top: 0; left: 0; width: 45%; height: 100%;
+  background: linear-gradient(100deg, transparent, rgba(255,255,255,.34), transparent);
+  transform: translateX(-120%);
+}
+.stButton button[kind="primary"]:hover::after, .stFormSubmitButton button[kind="primary"]:hover::after { animation: aca-sheen .85s ease-out; }
+
+[data-testid="stSpinner"] > div { animation: aca-fade .25s ease-out both; }
+.stProgress > div > div > div {
+  background-image: linear-gradient(115deg, rgba(255,255,255,.28) 25%, transparent 25%, transparent 50%, rgba(255,255,255,.28) 50%, rgba(255,255,255,.28) 75%, transparent 75%);
+  background-size: 42px 42px; animation: aca-progress .9s linear infinite;
+}
+.aca-pulse::after { animation: aca-halo 1.6s ease-in-out infinite; }
+
+/* ── Animations de la trousse de composants (§18) ────────────────────────────────────────────
+   Chacune porte une information, aucune n'est décorative — c'est le critère retenu pour un outil
+   qu'un opérateur garde ouvert huit heures par jour. */
+
+/* Le rail se DESSINE de haut en bas : le mouvement raconte la séquence du traitement, et l'œil
+   arrive naturellement sur le dernier maillon, qui est la décision demandée. */
+.aca-rail__step { animation: aca-tick .34s cubic-bezier(.22,.61,.36,1) both; }
+.aca-rail__step:nth-child(1) { animation-delay: .02s; }
+.aca-rail__step:nth-child(2) { animation-delay: .08s; }
+.aca-rail__step:nth-child(3) { animation-delay: .14s; }
+.aca-rail__step:nth-child(4) { animation-delay: .2s; }
+.aca-rail__step:nth-child(5) { animation-delay: .26s; }
+.aca-rail__step:nth-child(n+6) { animation-delay: .32s; }
+.aca-rail__step:not(:last-child)::before { transform-origin: top; animation: aca-draw .3s ease-out both; animation-delay: .2s; }
+/* L'étape en cours respire : elle signale « c'est ici que ça se passe » sans texte supplémentaire. */
+.aca-rail__step--active .aca-rail__marker { animation: aca-ring 2s ease-out infinite; }
+
+/* La frise apparaît dans l'ordre chronologique, ce qui est le sens de lecture attendu. */
+.aca-tl__item { animation: aca-tick .3s ease-out both; }
+.aca-tl__item:nth-child(1) { animation-delay: .02s; }
+.aca-tl__item:nth-child(2) { animation-delay: .06s; }
+.aca-tl__item:nth-child(3) { animation-delay: .1s; }
+.aca-tl__item:nth-child(n+4) { animation-delay: .14s; }
+
+.aca-stat { animation: aca-pop .42s cubic-bezier(.22,.61,.36,1) both; }
+.aca-stat:nth-child(2) { animation-delay: .05s; }
+.aca-stat:nth-child(3) { animation-delay: .1s; }
+.aca-stat:nth-child(4) { animation-delay: .15s; }
+.aca-stat:nth-child(n+5) { animation-delay: .2s; }
+
+.aca-empty { animation: aca-fade .3s ease-out both; }
+.aca-empty__icon { animation: aca-float 6s ease-in-out infinite; }
+"""
+
+_ANIMATIONS_SUBTLE = """
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] { animation: aca-fade .25s ease-out both; }
+[data-testid="stAlert"] { animation: aca-fade .25s ease-out both; }
+.rc-overflow:has([data-testid="stTopNavLinkContainer"]) { animation: aca-fade .25s ease-out both; }
+"""
+
+# Polish visuel indépendant du niveau d'animation : bordures, ombres, états de survol. Ce sont des
+# TRANSITIONS (réaction à une action de l'utilisateur), pas des animations autonomes — elles restent
+# donc en mode « aucune », où seul le bloc `prefers-reduced-motion` les réduit à zéro.
+_SURFACES = """
+[data-testid="stAppViewContainer"] { background: var(--aca-bg); }
+[data-testid="stMain"] .block-container { padding-top: var(--aca-top); max-width: 1500px; }
+[data-testid="stMain"] [data-testid="stVerticalBlock"] { gap: var(--aca-gap); }
+html, body, [data-testid="stAppViewContainer"], .stMarkdown, .stMarkdown p { font-family: var(--aca-font); }
+h1, h2, h3, h4, h5, h6 { font-family: var(--aca-font); letter-spacing: -.011em; }
+
+/* Cartes : le conteneur borduré est l'unité de composition de cette application (fiche prospect,
+   proposition, KPI, entrée de file d'attente). Une seule règle les met toutes d'accord. */
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] {
+  border-radius: var(--aca-radius-lg);
+  transition: box-shadow .22s ease, transform .22s ease, border-color .22s ease;
+}
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:hover { border-color: rgba(var(--aca-primary-rgb), .38); }
+
+[data-testid="stMetric"] {
+  background: linear-gradient(160deg, var(--aca-surface), var(--aca-bg));
+  border: 1px solid var(--aca-border); border-radius: var(--aca-radius-lg);
+  padding: calc(var(--aca-pad) * .9) var(--aca-pad); position: relative; overflow: hidden;
+  transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease;
+}
+[data-testid="stMetric"]::before {
+  content: ""; position: absolute; inset: 0 auto 0 0; width: 3px;
+  background: linear-gradient(180deg, var(--aca-primary), var(--aca-accent)); opacity: .9;
+}
+[data-testid="stMetric"]:hover { transform: translateY(-3px); box-shadow: var(--aca-shadow-lift); border-color: rgba(var(--aca-primary-rgb), .45); }
+[data-testid="stMetricValue"] { font-weight: 650; letter-spacing: -.02em; }
+[data-testid="stMetricLabel"] { color: var(--aca-muted); font-weight: 500; }
+
+/* Boutons */
+.stButton button, .stFormSubmitButton button, .stDownloadButton button {
+  border-radius: var(--aca-radius); font-weight: 550;
+  transition: transform .16s ease, box-shadow .16s ease, background .16s ease, border-color .16s ease;
+}
+.stButton button:hover, .stFormSubmitButton button:hover, .stDownloadButton button:hover { transform: translateY(-1px); }
+.stButton button:active, .stFormSubmitButton button:active { transform: translateY(0); }
+.stButton button[kind="primary"], .stFormSubmitButton button[kind="primary"] {
+  background: linear-gradient(120deg, var(--aca-primary), var(--aca-accent));
+  border: none; color: var(--aca-on-primary); box-shadow: 0 2px 10px rgba(var(--aca-primary-rgb), .28);
+}
+.stButton button[kind="primary"]:hover, .stFormSubmitButton button[kind="primary"]:hover { box-shadow: var(--aca-shadow-lift); }
+
+/* Barre de navigation supérieure (§18, `st.navigation(position="top")`) — remplace l'ancien
+   `st.tabs()` du fichier unique pré-restructuration. `stTopNavLinkContainer`/`stTopNavLink` sont les
+   véritables identifiants que Streamlit 1.59 pose sur ce composant (confirmés dans son bundle
+   compilé, `.stTabs`/`tab-baseweb` ne le touchent plus du tout depuis la découpe en pages — un
+   sélecteur mort qui laissait la barre sans habillage). **Bug corrigé** (retour utilisateur : la
+   barre n'était ni visible ni centrée — vérifié en inspectant le DOM réellement rendu via
+   Playwright, pas en relisant seulement le CSS) : `*:has(> [data-testid="stTopNavLinkContainer"])`
+   ne ciblait PAS la rangée flexbox qui aligne les quatre liens. `stTopNavLinkContainer` est un
+   enfant **unique** de son propre wrapper Streamlit interne (classe hachée, privée à cette
+   version) — ce sélecteur n'atteignait donc que ce petit wrapper individuel, un par lien : ni le
+   fond, ni la bordure, ni le centrage ne pouvaient jamais s'appliquer à la barre dans son
+   ensemble, seulement à chaque lien pris isolément (d'où une barre plate malgré le CSS). Le vrai
+   conteneur qui aligne les quatre liens est fourni par `rc-overflow`, la bibliothèque tierce que
+   Streamlit utilise pour cette rangée — `.rc-overflow`/`.rc-overflow-item` sont des classes
+   stables (définies par la bibliothèque elle-même, pas hachées par Streamlit à chaque version),
+   donc un ciblage direct est plus fiable ici qu'un `:has()` devinant la structure. */
+.rc-overflow:has([data-testid="stTopNavLinkContainer"]) {
+  display: flex;
+  justify-content: center;
+  background: linear-gradient(135deg, rgba(var(--aca-primary-rgb), .1), var(--aca-surface));
+  border: 1px solid rgba(var(--aca-primary-rgb), .28);
+  border-radius: var(--aca-radius-lg);
+  padding: .35rem .5rem;
+  box-shadow: var(--aca-shadow-lift);
+}
+[data-testid="stTopNavLinkContainer"] { margin: 0 .35rem; }
+[data-testid="stTopNavLink"] {
+  border-radius: var(--aca-radius);
+  font-weight: 600;
+  transition: background .18s ease, color .18s ease, transform .14s ease, box-shadow .18s ease;
+}
+[data-testid="stTopNavLink"]:hover {
+  background: var(--aca-primary-soft);
+  color: var(--aca-primary);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(var(--aca-primary-rgb), .18);
+}
+
+/* Bannière de sécurité (§18, `key="security_banner"` dans ui.py — un ancrage stable indépendant du
+   texte affiché, que le nombre de points à corriger fait varier). Un point de configuration
+   manquant en production est le genre d'alerte qu'on ne veut pas pouvoir manquer en balayant la
+   page des yeux — d'où un traitement « avertissement », pas un simple accordéon parmi d'autres. */
+.st-key-security_banner [data-testid="stExpander"] details {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--aca-warning) 12%, var(--aca-surface)), var(--aca-surface));
+  border: 1px solid color-mix(in srgb, var(--aca-warning) 45%, var(--aca-border));
+  border-radius: var(--aca-radius-lg);
+}
+.st-key-security_banner summary { font-weight: 650; }
+.st-key-security_banner [data-testid="stExpanderIconSpan"], .st-key-security_banner svg { color: var(--aca-warning); }
+
+/* Barre latérale */
+[data-testid="stSidebar"] { background: var(--aca-sidebar); border-right: 1px solid var(--aca-border); }
+[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] { border-radius: var(--aca-radius); }
+
+/* Champs : anneau de focus aux couleurs de la marque plutôt que le bleu Streamlit */
+input:focus, textarea:focus, [data-baseweb="select"] > div:focus-within {
+  border-color: var(--aca-primary) !important;
+  box-shadow: 0 0 0 3px rgba(var(--aca-primary-rgb), .18) !important;
+}
+[data-testid="stExpander"] details { border-radius: var(--aca-radius); border-color: var(--aca-border); }
+[data-testid="stAlert"] { border-radius: var(--aca-radius); }
+[data-testid="stDataFrame"] { border-radius: var(--aca-radius); overflow: hidden; }
+[data-testid="stHeader"] { background: transparent; }
+"""
+
+_HERO = """
+.aca-hero {
+  position: relative; overflow: hidden; border-radius: var(--aca-radius-lg);
+  padding: calc(var(--aca-pad) * 1.5) calc(var(--aca-pad) * 1.6);
+  margin-bottom: var(--aca-gap); color: var(--aca-on-primary);
+  background: linear-gradient(115deg, var(--aca-primary), var(--aca-accent), var(--aca-primary));
+  background-size: 220% 220%; box-shadow: var(--aca-shadow);
+}
+.aca-hero__title { font-size: 1.55rem; font-weight: 680; letter-spacing: -.02em; margin: 0; line-height: 1.2; }
+.aca-hero__tagline { margin: .45rem 0 0; opacity: .92; font-size: .94rem; max-width: 68ch; }
+.aca-hero__pills { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .9rem; }
+.aca-hero__pill {
+  display: inline-flex; align-items: center; gap: .35rem; font-size: .76rem; font-weight: 600;
+  padding: .24rem .62rem; border-radius: 999px; background: rgba(255,255,255,.18);
+  border: 1px solid rgba(255,255,255,.28);
+}
+.aca-hero__pill--alert { background: rgba(255,255,255,.92); color: var(--aca-danger); border-color: transparent; }
+.aca-hero__orb { position: absolute; border-radius: 50%; filter: blur(42px); opacity: .38; pointer-events: none; }
+.aca-hero__orb--a { width: 220px; height: 220px; top: -90px; right: -40px; background: #FFFFFF; }
+.aca-hero__orb--b { width: 180px; height: 180px; bottom: -110px; right: 130px; background: var(--aca-accent); }
+"""
+
+_HERO_ANIMATED = """
+.aca-hero { animation: aca-drift 14s ease-in-out infinite; }
+.aca-hero__orb--a { animation: aca-float 11s ease-in-out infinite; }
+.aca-hero__orb--b { animation: aca-float 15s ease-in-out infinite reverse; }
+"""
+
+_HERO_FLAT = """
+.aca-hero { background: var(--aca-primary); }
+.aca-hero__orb { display: none; }
+"""
+
+_HERO_PLAIN = """
+.aca-hero {
+  background: var(--aca-surface); color: var(--aca-text); box-shadow: none;
+  border: 1px solid var(--aca-border); border-left: 4px solid var(--aca-primary);
+}
+.aca-hero__pill { background: var(--aca-bg); border-color: var(--aca-border); color: var(--aca-muted); }
+.aca-hero__orb { display: none; }
+"""
+
+# ── Trousse de composants (§18) ───────────────────────────────────────────────────────────────
+# Styles de `aca/core/ui_kit.py`. Ils vivent ici, et non dans `ui_kit.py`, pour qu'il n'existe qu'UN
+# endroit d'où sorte la feuille de style : deux sources de CSS finiraient par se contredire sur la
+# spécificité des sélecteurs, et le débogage d'un padding qui « ne prend pas » coûte des heures.
+_UI_KIT = """
+/* Glyphes Material en ligne. `:material/x:` ne fonctionne que dans les libellés Streamlit, pas
+   dans du HTML injecté ; la police est déjà chargée par la page, donc aucune requête ajoutée. */
+.aca-i {
+  font-family: 'Material Symbols Rounded', 'Material Symbols Outlined';
+  font-weight: normal; font-style: normal; line-height: 1;
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  -webkit-font-feature-settings: 'liga'; -webkit-font-smoothing: antialiased;
+  vertical-align: -.15em; user-select: none;
+}
+
+/* En-têtes de section : une seule hiérarchie pour toute l'application. */
+.aca-section { margin: 0 0 .55rem; }
+.aca-section__eyebrow {
+  display: inline-block; font-size: .68rem; font-weight: 700; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--aca-primary); margin-bottom: .2rem;
+}
+.aca-section__title {
+  display: flex; align-items: center; gap: .45rem; margin: 0;
+  font-size: 1.02rem; font-weight: 640; letter-spacing: -.012em; color: var(--aca-text);
+}
+.aca-section__title .aca-i { font-size: 1.15rem; color: var(--aca-primary); }
+.aca-section__sub { margin: .22rem 0 0; font-size: .82rem; color: var(--aca-muted); max-width: 78ch; }
+
+/* ── Rail de décision : le composant signature ──────────────────────────────────────────────
+   Le métier est une séquence qui se termine par une décision humaine. La numérotation encode donc
+   une information réelle, et le trait vertical relie visuellement le travail de la machine au geste
+   demandé — au lieu de présenter la validation comme une case à cocher détachée. */
+.aca-rail { list-style: none; margin: .2rem 0 0; padding: 0; position: relative; }
+.aca-rail__step {
+  position: relative; display: flex; gap: .7rem; padding: 0 0 .85rem 0; align-items: flex-start;
+}
+/* Le trait ne descend pas sous le dernier maillon : la chaîne s'arrête à la décision. */
+.aca-rail__step:not(:last-child)::before {
+  content: ""; position: absolute; left: 12px; top: 26px; bottom: 0; width: 2px;
+  background: var(--aca-border);
+}
+.aca-rail__marker {
+  flex: 0 0 26px; width: 26px; height: 26px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--aca-surface); border: 2px solid var(--aca-border);
+  font-size: .72rem; font-weight: 700; color: var(--aca-muted); z-index: 1;
+}
+.aca-rail__marker .aca-i { font-size: .95rem; }
+.aca-rail__body { display: flex; flex-direction: column; gap: .1rem; padding-top: .18rem; min-width: 0; }
+.aca-rail__label { font-size: .875rem; font-weight: 570; color: var(--aca-text); }
+.aca-rail__detail { font-size: .78rem; color: var(--aca-muted); overflow-wrap: anywhere; }
+
+.aca-rail__step--done .aca-rail__marker {
+  background: var(--aca-primary); border-color: var(--aca-primary); color: var(--aca-on-primary);
+}
+.aca-rail__step--done:not(:last-child)::before { background: var(--aca-primary); opacity: .45; }
+.aca-rail__step--active .aca-rail__marker {
+  background: var(--aca-bg); border-color: var(--aca-primary); color: var(--aca-primary);
+  box-shadow: 0 0 0 4px rgba(var(--aca-primary-rgb), .16);
+}
+.aca-rail__step--active .aca-rail__label { color: var(--aca-primary); font-weight: 650; }
+.aca-rail__step--alert .aca-rail__marker {
+  background: var(--aca-bg); border-color: var(--aca-danger); color: var(--aca-danger);
+}
+.aca-rail__step--alert .aca-rail__label { color: var(--aca-danger); }
+.aca-rail__step--todo .aca-rail__label { color: var(--aca-muted); font-weight: 500; }
+
+/* Indicateurs */
+.aca-stat-row { display: flex; flex-wrap: wrap; gap: .6rem; margin: .1rem 0 .3rem; }
+.aca-stat {
+  flex: 1 1 150px; display: flex; flex-direction: column; gap: .1rem;
+  padding: .7rem .85rem; border-radius: var(--aca-radius-lg);
+  border: 1px solid var(--aca-border); background: var(--aca-surface);
+  border-left: 3px solid var(--aca-primary);
+  transition: transform .18s ease, box-shadow .18s ease;
+}
+.aca-stat:hover { transform: translateY(-2px); box-shadow: var(--aca-shadow-lift); }
+.aca-stat__label { font-size: .72rem; font-weight: 600; letter-spacing: .02em; color: var(--aca-muted); text-transform: uppercase; }
+.aca-stat__value { font-size: 1.5rem; font-weight: 660; letter-spacing: -.028em; color: var(--aca-text); line-height: 1.15; }
+.aca-stat__hint { font-size: .72rem; color: var(--aca-muted); }
+.aca-stat--ok { border-left-color: var(--aca-success); }
+.aca-stat--warn { border-left-color: var(--aca-warning); }
+.aca-stat--danger { border-left-color: var(--aca-danger); }
+.aca-stat--danger .aca-stat__value { color: var(--aca-danger); }
+
+/* Pastilles */
+.aca-chip-row { display: flex; flex-wrap: wrap; gap: .32rem; margin: .15rem 0; }
+.aca-chip2 {
+  display: inline-flex; align-items: center; gap: .28rem; font-size: .74rem; font-weight: 600;
+  padding: .18rem .55rem; border-radius: 999px; border: 1px solid var(--aca-border);
+  background: var(--aca-surface); color: var(--aca-muted);
+}
+.aca-chip2 .aca-i { font-size: .9rem; }
+.aca-chip2--ok { color: var(--aca-success); border-color: color-mix(in srgb, var(--aca-success) 38%, transparent); }
+.aca-chip2--warn { color: var(--aca-warning); border-color: color-mix(in srgb, var(--aca-warning) 38%, transparent); }
+.aca-chip2--danger { color: var(--aca-danger); border-color: color-mix(in srgb, var(--aca-danger) 38%, transparent); }
+.aca-chip2--info { color: var(--aca-primary); border-color: rgba(var(--aca-primary-rgb), .38); }
+
+/* États vides : orienter, pas constater. */
+.aca-empty {
+  display: flex; flex-direction: column; align-items: center; gap: .3rem; text-align: center;
+  padding: 2.1rem 1.2rem; border-radius: var(--aca-radius-lg);
+  border: 1px dashed var(--aca-border); background: var(--aca-surface);
+}
+.aca-empty__icon { color: var(--aca-primary); opacity: .8; }
+.aca-empty__icon .aca-i { font-size: 2rem; }
+.aca-empty__title { font-size: .95rem; font-weight: 620; color: var(--aca-text); }
+.aca-empty__body { font-size: .82rem; color: var(--aca-muted); max-width: 58ch; }
+.aca-empty__hint {
+  font-size: .78rem; font-weight: 600; color: var(--aca-primary); margin-top: .25rem;
+  padding: .2rem .6rem; border-radius: 999px; background: var(--aca-primary-soft);
+}
+
+/* Chronologie d'un lead */
+.aca-tl { list-style: none; margin: .2rem 0 0; padding: 0; }
+.aca-tl__item {
+  position: relative; display: grid; grid-template-columns: auto 1fr; column-gap: .65rem;
+  padding: 0 0 .8rem 0;
+}
+.aca-tl__item:not(:last-child)::before {
+  content: ""; position: absolute; left: 4px; top: 14px; bottom: 0; width: 2px; background: var(--aca-border);
+}
+.aca-tl__dot {
+  grid-row: 1 / span 4; width: 10px; height: 10px; border-radius: 50%; margin-top: .32rem;
+  background: var(--aca-primary); z-index: 1; box-shadow: 0 0 0 3px var(--aca-bg);
+}
+.aca-tl__item--ok .aca-tl__dot { background: var(--aca-success); }
+.aca-tl__item--warn .aca-tl__dot { background: var(--aca-warning); }
+.aca-tl__item--danger .aca-tl__dot { background: var(--aca-danger); }
+.aca-tl__when { font-size: .72rem; color: var(--aca-muted); font-variant-numeric: tabular-nums; }
+.aca-tl__what { font-size: .86rem; font-weight: 570; color: var(--aca-text); }
+.aca-tl__who { font-size: .76rem; color: var(--aca-primary); font-weight: 600; }
+.aca-tl__detail { font-size: .76rem; color: var(--aca-muted); overflow-wrap: anywhere; }
+
+/* Différentiel */
+.aca-diff {
+  border: 1px solid var(--aca-border); border-radius: var(--aca-radius);
+  overflow: auto; max-height: 340px; background: var(--aca-surface);
+  font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace; font-size: .76rem;
+}
+.aca-diff__line { padding: .1rem .6rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.aca-diff__line--add { background: color-mix(in srgb, var(--aca-success) 14%, transparent); color: var(--aca-success); }
+.aca-diff__line--del { background: color-mix(in srgb, var(--aca-danger) 12%, transparent); color: var(--aca-danger); }
+.aca-diff__line--hunk { color: var(--aca-primary); font-weight: 700; }
+.aca-diff__line--meta { color: var(--aca-muted); }
+.aca-diff__none { font-size: .82rem; color: var(--aca-muted); margin: .2rem 0; }
+
+/* Raccourcis clavier */
+.aca-keys { display: flex; flex-wrap: wrap; gap: .75rem; margin: .35rem 0 .1rem; }
+.aca-keys__pair { display: inline-flex; align-items: center; gap: .3rem; font-size: .72rem; color: var(--aca-muted); }
+.aca-keys kbd {
+  font-family: ui-monospace, monospace; font-size: .68rem; font-weight: 700;
+  padding: .1rem .34rem; border-radius: 4px; background: var(--aca-bg);
+  border: 1px solid var(--aca-border); border-bottom-width: 2px; color: var(--aca-text);
+}
+"""
+
+# Éléments de marque réutilisés par ui.py.
+_COMPONENTS = """
+.aca-pulse { position: relative; display: inline-flex; width: 9px; height: 9px; border-radius: 50%; background: var(--aca-primary); }
+.aca-pulse::after { content: ""; position: absolute; inset: -5px; border-radius: 50%; background: rgba(var(--aca-primary-rgb), .35); }
+.aca-footer { color: var(--aca-muted); font-size: .78rem; text-align: center; padding: 1.4rem 0 .4rem; border-top: 1px solid var(--aca-border); margin-top: 1.6rem; }
+.aca-swatch-row { display: flex; gap: .4rem; flex-wrap: wrap; margin: .3rem 0 .1rem; }
+.aca-swatch { width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--aca-border); box-shadow: var(--aca-shadow); }
+.aca-chip { display: inline-flex; align-items: center; gap: .3rem; font-size: .74rem; font-weight: 600; padding: .16rem .5rem; border-radius: 999px; border: 1px solid var(--aca-border); background: var(--aca-surface); color: var(--aca-muted); }
+"""
+
+# Le système d'exploitation a le dernier mot. Une personne qui a activé « réduire les animations »
+# le fait souvent pour une raison médicale (troubles vestibulaires, migraines) : un réglage
+# applicatif ne doit jamais pouvoir le contredire — d'où les seuls `!important` du fichier.
+_REDUCED_MOTION = """
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important; animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important; scroll-behavior: auto !important;
+  }
+}
+"""
+
+
+def css(tokens: dict = None) -> str:
+    """
+    Feuille de style complète à injecter (`st.html`), pour les jetons donnés.
+
+    ⚠️ Les sélecteurs `data-testid`/`data-baseweb` sont ceux de Streamlit 1.59 : des détails
+    d'implémentation, pas un contrat d'API. Une montée de version peut les invalider, et l'effet
+    serait alors une page **moins jolie**, jamais cassée — chaque règle est décorative, aucune ne
+    conditionne une fonctionnalité. C'est le prix assumé d'un thème réglable à chaud, et la raison
+    pour laquelle la couche `config.toml` (elle, stable) existe en parallèle.
+    """
+    tokens = tokens or resolve()
+    level = tokens.get("BRAND_ANIMATIONS", "complet")
+    hero = tokens.get("BRAND_HERO", "dégradé animé")
+
+    parts = [font_import(tokens), _variables(tokens), _SURFACES, _HERO, _COMPONENTS, _UI_KIT]
+    if hero == "dégradé fixe":
+        parts.append(_HERO_FLAT)
+    elif hero == "sobre":
+        parts.append(_HERO_PLAIN)
+
+    if level != "aucune":
+        parts.append(_KEYFRAMES)
+        parts.append(_ANIMATIONS_FULL if level == "complet" else _ANIMATIONS_SUBTLE)
+        if hero == "dégradé animé" and level == "complet":
+            parts.append(_HERO_ANIMATED)
+    parts.append(_REDUCED_MOTION)
+    return "<style>\n" + "\n".join(part for part in parts if part) + "\n</style>"
+
+
+def hero_html(tokens: dict, pills=()) -> str:
+    """
+    En-tête de marque : titre, accroche et pastilles d'état (utilisateur, rôle, mode démonstration).
+
+    `pills` est une séquence de `(texte, "normal"|"alert")`. Le texte est échappé — une accroche ou
+    un nom d'entreprise saisis dans un formulaire d'administration finissent ici dans du HTML.
+    """
+    from html import escape
+
+    if tokens.get("BRAND_HERO") == "masqué":
+        return ""
+    rendered = "".join(
+        f'<span class="aca-hero__pill{" aca-hero__pill--alert" if kind == "alert" else ""}">'
+        f"{escape(str(text))}</span>"
+        for text, kind in pills
+    )
+    tagline = tokens.get("BRAND_TAGLINE") or ""
+    return (
+        '<div class="aca-hero">'
+        '<div class="aca-hero__orb aca-hero__orb--a"></div>'
+        '<div class="aca-hero__orb aca-hero__orb--b"></div>'
+        f'<h1 class="aca-hero__title">{escape(tokens.get("BRAND_NAME", ""))}</h1>'
+        + (f'<p class="aca-hero__tagline">{escape(tagline)}</p>' if tagline else "")
+        + (f'<div class="aca-hero__pills">{rendered}</div>' if rendered else "")
+        + "</div>"
+    )
+
+
+def chart_colors(tokens: dict) -> list:
+    """
+    Palette catégorielle dérivée des couleurs de marque, pour `st.bar_chart`/`st.line_chart`.
+
+    Les couleurs d'état (succès/avertissement/danger/info) sont réutilisées telles quelles : elles
+    ont déjà été choisies pour se distinguer entre elles, et les répéter dans les graphiques rend le
+    tableau de bord cohérent avec les bandeaux d'alerte.
+    """
+    primary, accent = tokens["BRAND_PRIMARY"], tokens["BRAND_ACCENT"]
+    return [
+        primary, tokens["BRAND_SUCCESS"], tokens["BRAND_WARNING"], accent,
+        tokens["BRAND_INFO"], tokens["BRAND_DANGER"],
+        mix(primary, accent, 0.5), mix(primary, tokens["BRAND_BACKGROUND"], 0.45),
+    ]
+
+
+# ── Thème natif (config.toml) ─────────────────────────────────────────────────────────────────
+_GENERATED_HEADER = (
+    "# ─────────────────────────────────────────────────────────────────────────────\n"
+    "# Section [theme] GÉNÉRÉE par aca/core/branding.py (onglet « Réglages » → Apparence).\n"
+    "# Toute modification manuelle ici sera écrasée au prochain enregistrement de la marque.\n"
+    "# Les autres sections du fichier (server, client, browser…) sont préservées telles quelles.\n"
+    "# ─────────────────────────────────────────────────────────────────────────────\n"
+)
+
+
+def config_toml(tokens: dict) -> str:
+    """
+    Section `[theme]` correspondant aux jetons — la couche qui atteint l'INTÉRIEUR des composants
+    Streamlit (menu déroulant ouvert, en-tête de `st.dataframe`, palette Vega), hors de portée de la
+    CSS injectée. Prend effet au rechargement de la page.
+    """
+    font = tokens.get("BRAND_FONT", "Inter")
+    font_line = (f'font = "{font}:{_GOOGLE_FONTS[font]}"' if font in _GOOGLE_FONTS
+                 else 'font = "sans-serif"')
+    radius = tokens["BRAND_RADIUS"]
+    palette = ", ".join(f'"{color}"' for color in chart_colors(tokens))
+    return f"""{_GENERATED_HEADER}[theme]
+base = "{"dark" if tokens.get("BRAND_MODE") == "sombre" else "light"}"
+primaryColor = "{tokens["BRAND_PRIMARY"]}"
+backgroundColor = "{tokens["BRAND_BACKGROUND"]}"
+secondaryBackgroundColor = "{tokens["BRAND_SURFACE"]}"
+textColor = "{tokens["BRAND_TEXT"]}"
+linkColor = "{tokens["BRAND_PRIMARY"]}"
+borderColor = "{tokens["BRAND_BORDER"]}"
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "{radius}"
+buttonRadius = "{radius}"
+{font_line}
+baseFontSize = 14
+linkUnderline = false
+headingFontSizes = ["28px", "22px", "18px", "16px", "14px", "12px"]
+headingFontWeights = [650, 640, 620, 600, 600, 600]
+chartCategoricalColors = [{palette}]
+blueColor = "{tokens["BRAND_PRIMARY"]}"
+greenColor = "{tokens["BRAND_SUCCESS"]}"
+redColor = "{tokens["BRAND_DANGER"]}"
+orangeColor = "{tokens["BRAND_WARNING"]}"
+violetColor = "{tokens["BRAND_ACCENT"]}"
+dataframeBorderColor = "{tokens["BRAND_BORDER"]}"
+dataframeHeaderBackgroundColor = "{tokens["BRAND_SURFACE"]}"
+
+[theme.sidebar]
+backgroundColor = "{tokens["BRAND_SIDEBAR"]}"
+secondaryBackgroundColor = "{mix(tokens["BRAND_SIDEBAR"], tokens["BRAND_TEXT"], 0.06)}"
+textColor = "{tokens["BRAND_TEXT"]}"
+borderColor = "{tokens["BRAND_BORDER"]}"
+primaryColor = "{tokens["BRAND_PRIMARY"]}"
+"""
+
+
+def merge_config_toml(existing: str, theme_section: str) -> str:
+    """
+    Remplace les sections `[theme…]` d'un `config.toml` existant en conservant TOUT le reste.
+
+    Réécrire le fichier entier depuis les jetons serait plus simple et détruirait silencieusement un
+    `[server]`, un `[client]` ou un `[browser]` ajoutés par l'opérateur au moment du déploiement —
+    c'est-à-dire précisément la configuration dont dépend la mise en ligne (cf.
+    docs/DEPLOYMENT_HARDENING.md). Fonction pure : elle prend du texte, elle rend du texte, et se
+    teste sans toucher au disque.
+    """
+    kept, pending, skipping = [], [], False
+    for line in (existing or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            skipping = stripped.startswith("[theme")
+            # Les commentaires qui PRÉCÈDENT une section documentent cette section : ils partent
+            # avec elle. Sans cette mise en attente, l'en-tête « GÉNÉRÉE par branding.py » (et tout
+            # commentaire d'un opérateur au-dessus de `[theme]`) s'empilerait à chaque
+            # enregistrement, jusqu'à un fichier composé surtout d'en-têtes périmés.
+            pending_before = pending
+            pending = []
+            if skipping:
+                # L'en-tête `[theme]`/`[theme.sidebar]` lui-même est réémis par `theme_section` :
+                # le conserver ici laissait une section vide en tête de fichier, et le résultat
+                # n'était donc pas idempotent (défaut trouvé par `test_merge_est_idempotent`).
+                continue
+            kept.extend(pending_before)
+            kept.append(line)
+            continue
+        if skipping:
+            continue
+        if stripped.startswith("#") or not stripped:
+            pending.append(line)
+            continue
+        kept.extend(pending)
+        pending = []
+        kept.append(line)
+    kept.extend(pending)
+    preserved = "\n".join(kept).strip()
+    return (preserved + "\n\n" if preserved else "") + theme_section
+
+
+def write_config_toml(tokens: dict, path: str = ".streamlit/config.toml") -> str:
+    """Écrit le thème natif en préservant les autres sections. Renvoie le chemin écrit."""
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            existing = handle.read()
+    except FileNotFoundError:
+        existing = ""
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(merge_config_toml(existing, config_toml(tokens)))
+    return path
+
+
+def accessibility_report(tokens: dict) -> list:
+    """
+    Contrôles de contraste WCAG sur la palette choisie — liste de problèmes en clair.
+
+    Affiché en direct dans le formulaire d'apparence : un client peut demander « notre jaune
+    d'entreprise » comme couleur principale et rendre ses boutons illisibles sans s'en apercevoir.
+    Le rôle de ce rapport est d'avertir, jamais de refuser : c'est sa marque, c'est son choix, et un
+    produit qui interdit la charte graphique de son client se fait remplacer.
+    """
+    problems = []
+    text_bg = contrast_ratio(tokens["BRAND_TEXT"], tokens["BRAND_BACKGROUND"])
+    if text_bg < 4.5:
+        problems.append(
+            f"Texte sur fond principal : contraste {text_bg:.1f}:1 (minimum recommandé 4,5:1). "
+            "Le corps de texte sera pénible à lire."
+        )
+    button = contrast_ratio(readable_text_on(tokens["BRAND_PRIMARY"]), tokens["BRAND_PRIMARY"])
+    if button < 4.5:
+        problems.append(
+            f"Libellé des boutons principaux : contraste {button:.1f}:1. La couleur principale est "
+            "trop moyenne — ni le blanc ni le noir ne s'y détachent nettement."
+        )
+    surface = contrast_ratio(tokens["BRAND_SURFACE"], tokens["BRAND_BACKGROUND"])
+    if surface < 1.04:
+        problems.append(
+            "Fond des cartes presque identique au fond principal : les blocs bordurés "
+            "(fiche prospect, proposition) ne se distingueront plus."
+        )
+    return problems

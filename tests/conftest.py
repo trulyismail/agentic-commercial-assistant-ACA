@@ -32,6 +32,18 @@ _ENV_OVERRIDES = {
     "SUPPORT_SLACK_WEBHOOK_URL": "",
     "HR_EMAIL": "",
     "HR_SLACK_WEBHOOK_URL": "",
+    # §16.1.2 — le SEUL canal sortant qui avait été oublié ici, et le plus coûteux à oublier :
+    # `webhook.emit()` est appelé depuis les nœuds du graphe, donc depuis presque tous les tests
+    # d'intégration. Sans ces deux lignes, `ACA_WEBHOOK_URL` du `.env` réel restait actif pendant
+    # la suite et chaque exécution de pytest expédiait de VRAIS événements à l'instance n8n de
+    # production — constaté le 2026-07-29 : une rafale de 10 exécutions `analysis.paused` portant
+    # de faux prospects (« jean@entreprise.fr ») dans le journal n8n Cloud. Inoffensif tant que le
+    # workflow s'arrêtait à l'alerte ; depuis qu'il porte la moitié « validation », le même
+    # incident enverrait des e-mails d'approbation et laisserait autant d'exécutions en attente
+    # pour toujours. `test_webhook.py`/`test_api_n8n.py` posent leur propre valeur par monkeypatch
+    # et ne sont donc pas affectés.
+    "ACA_WEBHOOK_URL": "",                   # → webhook.emit() no-op silencieux, comme notify.send()
+    "ACA_WEBHOOK_SECRET": "",
     "HUBSPOT_ACCESS_TOKEN": "",              # → hubspot.is_enabled() False
     "STRIPE_API_KEY": "",                    # → billing.is_enabled() False
     "CALENDLY_URL": "",                      # → pas de lien ajouté par défaut (test dédié le simule)
@@ -50,6 +62,10 @@ _ENV_OVERRIDES = {
     "ACA_QUEUE_DB": os.path.join(_TMP_DIR, "queue.sqlite"),
     "ACA_ANALYTICS_DB": os.path.join(_TMP_DIR, "analytics.sqlite"),
     "ACA_AUDIT_DB": os.path.join(_TMP_DIR, "audit.sqlite"),
+    # §17 — journal d'activité. Sans cette ligne, la suite écrirait dans le VRAI
+    # `data/activity.sqlite` : des connexions et des validations fictives viendraient se mêler aux
+    # traces réelles, dans le journal même dont l'intérêt est d'être digne de foi.
+    "ACA_ACTIVITY_DB": os.path.join(_TMP_DIR, "activity.sqlite"),
     "ACA_FOLLOWUP_DB": os.path.join(_TMP_DIR, "followup.sqlite"),
     "ACA_CONFIG_DB": os.path.join(_TMP_DIR, "config.sqlite"),
     "ACA_SCHEDULE_DB": os.path.join(_TMP_DIR, "schedule.sqlite"),

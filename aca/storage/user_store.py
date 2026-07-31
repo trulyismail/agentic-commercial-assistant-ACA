@@ -15,10 +15,13 @@ registre remplace ce modèle par des comptes nominatifs :
 - comparaison à **temps constant** (`hmac.compare_digest`) et hachage factice quand le compte
   n'existe pas, pour que « utilisateur inconnu » et « mot de passe faux » prennent le même temps —
   sans quoi le temps de réponse énumère les comptes valides ;
-- **rôles** (`admin` / `operator`) et permissions déclaratives (`ROLE_PERMISSIONS`) : un opérateur
-  valide ou rejette des leads, un admin seul touche aux réglages, à la curation de la base de
-  connaissances et aux comptes. C'est la séparation client/admin décrite en §12bis, jusqu'ici
-  *conçue* mais jamais *appliquée*.
+- **rôles** (`admin` / `operator` / `viewer`) et permissions déclaratives (`ROLE_PERMISSIONS`) : un
+  opérateur valide ou rejette des leads, un `viewer` ne fait que consulter (§18), un admin seul
+  touche aux réglages, à la curation de la base de connaissances et aux comptes. C'est la séparation
+  client/admin décrite en §12bis, jusqu'ici *conçue* mais jamais *appliquée* ;
+- **second facteur TOTP** exigé des comptes `admin` (§18, cf. `TOTP_REQUIRED_ROLES` et
+  [aca/core/totp.py](aca/core/totp.py)) : le mot de passe restait le facteur unique d'un compte
+  capable de créer d'autres administrateurs et de rediriger les alertes commerciales.
 
 Comme les quatre autres registres locaux, la table est cloisonnée par `org_id`
 (cf. aca.core.tenant) et chaque fonction publique passe par `with_sqlite_retry` (deux process —
@@ -46,7 +49,13 @@ DB_PATH = os.getenv("ACA_USERS_DB", "data/users.sqlite")
 # ── Rôles et permissions ──────────────────────────────────────────────────────────────────────
 ROLE_ADMIN = "admin"
 ROLE_OPERATOR = "operator"
-ROLES = (ROLE_ADMIN, ROLE_OPERATOR)
+# §18 — rôle de consultation. Il manquait un cas pourtant très courant : un directeur commercial, ou
+# le client final, qui veut voir le tableau de bord et l'historique **sans** pouvoir écrire au CRM.
+# Jusqu'ici il fallait lui attribuer `operator`, donc le droit de valider des leads — c'est-à-dire
+# accorder l'écriture pour permettre la lecture. L'ajout tient en deux lignes : c'est exactement ce
+# que la table déclarative `ROLE_PERMISSIONS` était censée rendre possible (§15.1.6).
+ROLE_VIEWER = "viewer"
+ROLES = (ROLE_ADMIN, ROLE_OPERATOR, ROLE_VIEWER)
 
 # Permissions déclaratives plutôt que des `if role == "admin"` disséminés dans `ui.py`/`api.py` :
 # ajouter un rôle (ex. « lecteur seul ») devient une entrée de ce dict, pas une chasse aux
@@ -67,7 +76,18 @@ ROLE_PERMISSIONS = {
     ROLE_OPERATOR: {
         PERM_VALIDATE_LEAD, PERM_REJECT_LEAD, PERM_VIEW_DASHBOARD, PERM_VIEW_HISTORY,
     },
+    # Lecture seule stricte : aucune permission d'écriture, pas même le rejet d'un lead. Rejeter
+    # paraît anodin mais retire l'analyse de la file de tout le monde — ce n'est pas de la
+    # consultation.
+    ROLE_VIEWER: {PERM_VIEW_DASHBOARD, PERM_VIEW_HISTORY},
 }
+
+# Rôles pour lesquels le second facteur est exigé (§18). Réservé à `admin` : un compte capable de
+# créer d'autres administrateurs, de rediriger les alertes commerciales et de curer la base de
+# connaissances que l'IA citera aux prospects justifie la contrainte. L'imposer à un opérateur qui
+# valide vingt leads par jour se paierait en contournements (secret partagé, application
+# d'authentification sur un unique téléphone de service) — cf. la docstring de `aca/core/totp.py`.
+TOTP_REQUIRED_ROLES = frozenset({ROLE_ADMIN})
 
 
 def can(role: str, permission: str) -> bool:
@@ -130,14 +150,26 @@ def _connect() -> sqlite3.Connection:
         "CREATE TABLE IF NOT EXISTS users ("
         "org_id TEXT NOT NULL, username TEXT NOT NULL, password_hash TEXT NOT NULL, "
         "role TEXT NOT NULL, created_at TEXT NOT NULL, disabled INTEGER NOT NULL DEFAULT 0, "
-        "PRIMARY KEY (org_id, username))"
+        "totp_secret TEXT, PRIMARY KEY (org_id, username))"
     )
+    # Migration idempotente pour les bases antérieures au §18 (même procédé que `org_id` puis
+    # `prev_hash`/`row_hash` dans audit_log.py). Colonne nullable : un compte existant continue de
+    # fonctionner sans second facteur, et l'activer reste une décision explicite.
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "totp_secret" not in existing_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN totp_secret TEXT")
     conn.commit()
     return conn
 
 
 def _row_to_user(row) -> dict:
-    return {"username": row[0], "role": row[1], "created_at": row[2], "disabled": bool(row[3])}
+    return {
+        "username": row[0], "role": row[1], "created_at": row[2], "disabled": bool(row[3]),
+        # Le secret lui-même ne sort JAMAIS d'ici : seul le fait qu'un second facteur soit actif est
+        # exposé. `list_users()` alimente un tableau affiché à l'écran ; y faire transiter le secret
+        # partagé serait exactement le genre de fuite discrète qu'un audit ne rattrape pas.
+        "totp": bool(len(row) > 4 and row[4]),
+    }
 
 
 @with_sqlite_retry
@@ -196,7 +228,8 @@ def get_user(username: str, org_id: str = None) -> dict:
     """Compte du tenant courant (sans le hash), ou `None`."""
     with _connect() as conn:
         row = conn.execute(
-            "SELECT username, role, created_at, disabled FROM users WHERE org_id = ? AND username = ?",
+            "SELECT username, role, created_at, disabled, totp_secret FROM users "
+            "WHERE org_id = ? AND username = ?",
             (org_id or current_org_id(), (username or "").strip()),
         ).fetchone()
     return _row_to_user(row) if row else None
@@ -207,7 +240,8 @@ def list_users(org_id: str = None) -> list:
     """Tous les comptes du tenant courant (jamais le hash), par ordre alphabétique."""
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT username, role, created_at, disabled FROM users WHERE org_id = ? ORDER BY username",
+            "SELECT username, role, created_at, disabled, totp_secret FROM users "
+            "WHERE org_id = ? ORDER BY username",
             (org_id or current_org_id(),),
         ).fetchall()
     return [_row_to_user(row) for row in rows]
@@ -271,8 +305,67 @@ def set_disabled(username: str, disabled: bool, org_id: str = None) -> bool:
     return cursor.rowcount > 0
 
 
+# ── Second facteur (§18) ──────────────────────────────────────────────────────────────────────
+def totp_required(role: str) -> bool:
+    """Ce rôle doit-il présenter un second facteur ? (cf. `TOTP_REQUIRED_ROLES`)"""
+    return role in TOTP_REQUIRED_ROLES
+
+
+@with_sqlite_retry
+def set_totp_secret(username: str, secret: str, org_id: str = None) -> bool:
+    """
+    Active (secret non vide) ou désactive (`None`/`""`) le second facteur d'un compte.
+
+    Le secret est stocké **en clair**, et c'est inévitable : contrairement à un mot de passe, il doit
+    être relu pour recalculer le code attendu à chaque connexion — un secret TOTP haché serait
+    inutilisable. La protection réelle est donc celle du fichier `users.sqlite` lui-même (chiffrement
+    disque de la machine, permissions du système), ce qui est énoncé dans
+    `docs/DEPLOYMENT_HARDENING.md` plutôt que masqué derrière un faux sentiment de sécurité.
+    """
+    with _connect() as conn:
+        cursor = conn.execute(
+            "UPDATE users SET totp_secret = ? WHERE org_id = ? AND username = ?",
+            (secret or None, org_id or current_org_id(), (username or "").strip()),
+        )
+        conn.commit()
+    return cursor.rowcount > 0
+
+
+@with_sqlite_retry
+def get_totp_secret(username: str, org_id: str = None) -> str:
+    """Secret TOTP du compte, ou `None`. Réservé au chemin de vérification — jamais affiché."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT totp_secret FROM users WHERE org_id = ? AND username = ?",
+            (org_id or current_org_id(), (username or "").strip()),
+        ).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def has_totp(username: str, org_id: str = None) -> bool:
+    """Un second facteur est-il configuré pour ce compte ?"""
+    return get_totp_secret(username, org_id) is not None
+
+
+def verify_totp(username: str, code: str, org_id: str = None, now: float = None) -> bool:
+    """
+    Vérifie un code à six chiffres pour ce compte.
+
+    Import différé de `aca.core.totp` : ce module de stockage est importé par `prod_check.py` au
+    démarrage, et n'a pas besoin d'entraîner la couche cryptographique tant que personne ne se
+    connecte. Un compte sans second facteur configuré renvoie `False` — l'appelant doit vérifier
+    `has_totp()` d'abord et décider si l'absence de facteur bloque (rôle `admin`) ou non.
+    """
+    from aca.core import totp as totp_module
+
+    secret = get_totp_secret(username, org_id)
+    if not secret:
+        return False
+    return totp_module.verify(secret, code, now=now)
+
+
 def _cli() -> None:
-    """`python -m aca.storage.user_store <create|list|passwd|role|disable|enable> …`"""
+    """`python -m aca.storage.user_store <create|list|passwd|role|disable|enable|totp-off> …`"""
     import argparse
     import getpass
 
@@ -296,6 +389,14 @@ def _cli() -> None:
         sub = subparsers.add_parser(name, help=f"{'dés' if flag else 'ré'}activer un compte")
         sub.add_argument("username")
 
+    # §18 — la seule voie de secours d'un second facteur : quelqu'un ayant accès à la machine
+    # débloque un administrateur qui a perdu son téléphone. Volontairement hors interface : un
+    # bouton « désactiver la double authentification » dans l'UI serait la porte dérobée que le
+    # second facteur est censé fermer.
+    totp_off = subparsers.add_parser(
+        "totp-off", help="désactiver le second facteur d'un compte (perte de téléphone)")
+    totp_off.add_argument("username")
+
     args = parser.parse_args()
 
     if args.command == "list":
@@ -304,7 +405,14 @@ def _cli() -> None:
             print("Aucun compte — l'UI utilise encore ACA_UI_PASSWORD (mode developpement).")
         for user in users:
             state = " (desactive)" if user["disabled"] else ""
-            print(f"{user['username']:<24} {user['role']:<10} cree le {user['created_at']}{state}")
+            second = " [2FA]" if user["totp"] else ""
+            print(f"{user['username']:<24} {user['role']:<10} cree le "
+                  f"{user['created_at']}{state}{second}")
+        return
+
+    if args.command == "totp-off":
+        print("Second facteur desactive." if set_totp_secret(args.username, None)
+              else "Compte introuvable.")
         return
 
     if args.command in ("create", "passwd"):

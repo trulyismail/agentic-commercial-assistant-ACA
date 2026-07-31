@@ -144,7 +144,7 @@ def test_run_due_jobs_runs_only_due_ones(monkeypatch):
     executed = scheduler.run_due_jobs(now)
 
     assert "relance" not in executed
-    assert set(executed) == {"maintenance", "retention", "billing"}
+    assert set(executed) == {"maintenance", "retention", "billing", "archive"}
     assert "relance" not in ran
 
 
@@ -223,3 +223,57 @@ def test_runs_are_scoped_per_tenant():
 
     assert schedule_store.get_last_run("retention", org_id="client-a") == pytest.approx(now)
     assert schedule_store.get_last_run("retention", org_id="client-b") is None
+
+
+# ── Archive mensuelle (§18) ───────────────────────────────────────────────────────────────────
+
+
+def test_last_completed_month_is_previous_month():
+    from datetime import datetime
+
+    assert scheduler._last_completed_month(datetime(2026, 7, 15)) == (2026, 6)
+
+
+def test_last_completed_month_wraps_year_boundary():
+    """Le mois précédent en janvier est décembre de l'année d'AVANT, pas mois 0."""
+    from datetime import datetime
+
+    assert scheduler._last_completed_month(datetime(2026, 1, 5)) == (2025, 12)
+
+
+def test_job_archive_writes_signed_csv_for_previous_month(monkeypatch, tmp_path):
+    """
+    `_job_archive` archive le mois précédent (jamais le mois en cours, pas terminé) et produit un
+    CSV + son empreinte `.sha256`, via le même mécanisme que `activity_log.archive_period`.
+    """
+    from datetime import datetime
+
+    from aca.storage import activity_log
+
+    monkeypatch.setattr(activity_log, "DB_PATH", str(tmp_path / "activity.sqlite"))
+    activity_log.init_db()
+    monkeypatch.setattr(scheduler, "ARCHIVE_DIR", str(tmp_path / "archives"))
+
+    year, month = scheduler._last_completed_month(datetime.now())
+    activity_log.log(
+        activity_log.ACTION_JOB_RAN, actor="(scheduler)", source=activity_log.SOURCE_CLI,
+        details={"label": "test"},
+    )
+    # `log()` horodate avec `datetime.now()`, donc cette ligne tombe forcément dans le mois EN
+    # COURS — on vérifie ici seulement que `_job_archive` ne plante pas et écrit une archive
+    # (potentiellement vide) pour le mois précédent, jamais celui-ci.
+    scheduler._job_archive()
+
+    csv_path = tmp_path / "archives" / f"activite-{year:04d}-{month:02d}.csv"
+    digest_path = tmp_path / "archives" / f"activite-{year:04d}-{month:02d}.csv.sha256"
+    assert csv_path.exists()
+    assert digest_path.exists()
+
+
+def test_archive_job_declared_like_the_others():
+    """Garde-fou : la nouvelle entrée suit le même contrat que `test_every_declared_job_is_callable`."""
+    spec = scheduler.JOBS["archive"]
+    assert callable(spec["fn"])
+    assert spec["env"] == "ACA_SCHEDULE_ARCHIVE_HOURS"
+    assert spec["default_hours"] > 0
+    assert spec["label"]

@@ -1270,3 +1270,252 @@ exclusifs (le gate d'authentification et l'application) — aucun doublon, rien 
 
 Aucun de ces points n'est une pièce de code manquante : ce sont, à chaque fois, un compte, une
 instance ou un hébergement qui n'existe pas encore.
+
+---
+
+## §17 — Marque blanche, animations, et journal d'activité attribuable (2026-07-30)
+
+Demande initiale, en trois volets : rendre l'interface Streamlit « plus belle, avec beaucoup
+d'animations », rendre **tout paramétrable** (logo et couleurs) pour que l'entreprise qui reçoit ACA
+puisse l'aligner sur son cahier des charges, et créer un **profil d'audit du rôle `operator`** afin
+qu'un administrateur voie « qui a fait quel changement, depuis quel poste, quand et où ».
+
+### 17.1 Ce que l'audit du code a trouvé avant d'écrire quoi que ce soit
+
+Comme aux passes précédentes, l'inventaire préalable a révélé davantage que la demande ne le
+laissait supposer.
+
+1. **Le rôle `operator` existait depuis §15.1.6 sans qu'aucune de ses actions ne soit tracée.**
+   `audit_log.py` ne consigne qu'**un** type d'événement : la validation d'un lead. Ni les
+   connexions, ni les **échecs de connexion**, ni les rejets, ni les changements de réglages, ni la
+   curation de la base de connaissances, ni la gestion des comptes ne laissaient de trace. La
+   question « qu'a fait cette personne cette semaine ? » n'avait aucune réponse dans le produit.
+
+2. **Le verrou anti-force brute bloquait en silence.** `auth_lockout.py` (§14, US-41) empêchait un
+   bot de tester des mots de passe — sans que personne ne puisse jamais **constater** qu'une série
+   de tentatives avait eu lieu. Un dispositif de sécurité qui ne laisse pas de trace ne permet ni de
+   détecter, ni de dater, ni de rattacher un incident.
+
+3. **Le rejet d'un lead n'était consigné nulle part.** Ajouté à l'UI et à l'API, il restait
+   indistinguable d'un lead jamais traité — alors que c'est une décision commerciale qu'on peut
+   avoir à expliquer.
+
+4. **L'apparence n'était pas un paramètre, c'était un fichier du dépôt.** Livrer ACA à une entreprise
+   imposant son logo et ses couleurs supposait de **modifier le produit** pour chaque client
+   (`.streamlit/config.toml`, statique, lu au démarrage du serveur).
+
+### 17.2 Ce qui a été livré
+
+| Pièce | Rôle |
+|---|---|
+| [tamper_chain.py](aca/storage/tamper_chain.py) | Chaînage par hachage extrait de `audit_log.py`, désormais partagé par les deux journaux — une seule implémentation de la partie cryptographique, pas deux qui divergeront |
+| [activity_log.py](aca/storage/activity_log.py) | Journal d'activité : 25 actions déclarées, `outcome` (succès/refusé/échec), `source` (streamlit/api/slack), poste, IP, session, hôte serveur, chaîné et cloisonné par tenant |
+| [branding.py](aca/core/branding.py) | 22 jetons `BRAND_*` résolus à chaud, 7 préréglages, CSS + animations générées, thème natif `config.toml`, contrôles de contraste WCAG |
+| Onglet « Journal d'activité » | Admin uniquement : KPI, activité par personne, **fiche d'audit par opérateur avec les postes utilisés**, frise filtrable, export CSV, vérification d'intégrité |
+| Panneau « Apparence » | Admin uniquement : préréglages, 11 sélecteurs de couleur, téléversement du logo, police/densité/arrondi/animations, nuancier, avertissements d'accessibilité |
+| 87 tests | `test_branding.py` (46) + `test_activity_log.py` (41) — suite portée de 352 à **451** |
+
+### 17.3 Deux décisions de conception à assumer
+
+**La CSS injectée, contre la doctrine par défaut du projet.** La skill `developing-with-streamlit`
+prescrit « jamais de CSS, tout dans `config.toml` », et c'est la bonne règle pour un thème figé. Elle
+est écartée ici en connaissance de cause : un thème qui change **à l'exécution**, par tenant, ne peut
+pas être un fichier statique lu au démarrage. D'où **deux couches** — la CSS vivante (effet immédiat,
+porte les animations) et le thème natif `config.toml` (seul à atteindre l'intérieur des composants
+React : menu déroulant ouvert, en-tête de `st.dataframe`, palette Vega), écrit sur action explicite
+et effectif au rechargement. Le prix est énoncé dans la docstring : les sélecteurs `data-testid` sont
+des détails d'implémentation Streamlit, donc une montée de version peut rendre la page **moins
+jolie** — jamais cassée, aucune règle ne conditionne une fonctionnalité.
+
+**« Depuis quel poste », sans surpromesse.** Une application web ne peut pas identifier une machine.
+Ce qui est réellement stocké : l'IP vue par le serveur (celle du proxy si `X-Forwarded-For` n'est pas
+propagé), le user-agent (déclaratif, donc falsifiable), une empreinte `device_id` = hachage tronqué
+de (IP, user-agent) qui **regroupe** les actions d'un même poste sans déposer de cookie de traçage,
+et le nom de la machine serveur — qui, en déploiement « Solo » (`run_solo.py` sur le portable d'un
+commercial), **est** justement le poste. Prétendre à une identification matérielle dans un journal
+d'audit serait pire que de ne rien écrire.
+
+### 17.4 Trois défauts trouvés par la vérification, pas par la relecture
+
+1. **`log()` pouvait lever, en violation de son propre contrat.** La sérialisation de `details` avait
+   lieu *hors* du `try` : un objet non JSON levait avant d'entrer dans la protection. Or ce module
+   s'intercale dans le chemin d'une écriture CRM — l'exception aurait fait échouer une validation
+   légitime pour cause de journal indisponible. Corrigé, plus `default=str` : mieux vaut un détail
+   approximatif qu'une entrée d'audit manquante.
+
+2. **Une entrée d'audit était perdue en silence.** Premier essai de bout en bout dans l'UI :
+   l'action « analyse lancée » n'apparaissait pas. Cause — `st.context.ip_address` ne renvoie pas
+   forcément une chaîne ; la valeur descendait jusqu'à SQLite (`Error binding parameter 13`), `log()`
+   attrapait l'exception au titre de son contrat « ne lève jamais »… et la ligne disparaissait avec.
+   **Un journal de sécurité qu'on croit complet et qui ne l'est pas est plus dangereux qu'un journal
+   absent.** Corrigé aux deux bouts (conversion dans `ui.py`, normalisation dans le magasin) et
+   verrouillé par un test de régression. C'est le défaut le plus instructif de la passe : il ne se
+   voyait *que* dans une exécution réelle, et le mécanisme censé protéger l'application était
+   précisément ce qui masquait la perte.
+
+3. **`merge_config_toml` n'était pas idempotent.** Réappliquer la marque laissait une section
+   `[theme]` vide en tête de fichier. Trouvé par le test d'idempotence — et au passage, la première
+   version du test était elle-même fausse (elle comptait le texte « [theme] », qui apparaît aussi
+   dans le commentaire d'en-tête généré) : comparer le fichier entier est le bon contrôle.
+
+### 17.5 Ce qui reste ouvert
+
+| Point | État | Raison |
+|---|---|---|
+| Sélecteurs CSS `data-testid` | Fonctionnels sur Streamlit 1.59 | Non contractuels ; à revérifier à chaque montée de version (dégradation cosmétique uniquement) |
+| SSO / SCIM, domaine personnalisé | Non fait | Attentes classiques d'un achat grand compte, hors périmètre du prototype — cf. les recommandations de `docs/AMELIORATIONS_SUGGEREES.md` |
+| Journal d'activité sur un vrai multi-poste | Testé hors ligne + une exécution locale réelle | Aucun déploiement multi-utilisateur n'existe encore : l'IP est celle de la boucle locale |
+| Alerte sur incident | Non fait | Les échecs de connexion sont consignés et visibles, mais rien ne prévient personne en temps réel |
+
+---
+
+## §18 — Suggestions produit, restructuration multi-pages, second facteur (2026-07-30)
+
+Demande initiale : mettre en œuvre **toutes** les suggestions de `docs/AMELIORATIONS_SUGGEREES.md`,
+à l'exception de l'hébergement (§1.2, §10 du récapitulatif) et de l'alerte Slack sur incident (§1.1,
+§3 du récapitulatif) — les deux seules exigeant une infrastructure réelle qui n'existe pas pour ce
+projet — accompagnée d'une passe de design délibérée via `/example-skills:frontend-design` pour que
+l'interface reste structurée à mesure que les nouvelles surfaces s'ajoutent.
+
+### 18.1 Portée retenue
+
+Le tableau récapitulatif (§7 du document de suggestions) classe 12 actions par ordre de priorité ;
+les items 11 et 12 (SSO/SCIM, multilingue) y sont explicitement marqués « à n'engager que sur
+demande d'un client réel », donc hors périmètre d'une mise en œuvre spéculative. Les 8 items
+restants — rôle lecture seule, favicon (les deux déjà faits au §17), journalisation des actions
+machine, vue chronologique par lead, avertissement avant expiration de session, export mensuel
+archivé, export PDF de la proposition, TOTP sur les comptes admin — constituent donc la portée
+réelle de cette passe, complétée par les items du §5 (interface) les moins coûteux à livrer dans le
+même mouvement.
+
+### 18.2 Ce qui a été livré
+
+| Pièce | Rôle |
+|---|---|
+| [totp.py](aca/core/totp.py) | Second facteur RFC 6238, stdlib uniquement (`hmac`/`hashlib`/`struct`/`base64`) — pas de nouvelle dépendance |
+| [ui_kit.py](aca/core/ui_kit.py) | Vocabulaire d'interface réutilisable : `decision_rail` (composant signature), `timeline`, `diff`, `stat`/`chip`/`empty_state` |
+| [pdf_export.py](aca/integrations/pdf_export.py) | Export PDF de la proposition à la marque du client, via PyMuPDF déjà épinglé (aucune nouvelle dépendance) |
+| `activity_log.py` (étendu) | `lead_timeline`, `is_new_device`/`known_devices`, purge à deux vitesses, `archive_period` signée |
+| `user_store.py` (étendu) | `ROLE_VIEWER` (lecture seule stricte), colonnes/fonctions TOTP, CLI `totp-off` |
+| `poller.py`/`relance.py`/`retention.py`/`scheduler.py` (étendus) | Journalisation des actions machine (`SOURCE_POLLER`/`SOURCE_CLI`), nouveau travail planifié `archive` |
+| `ui.py` → routeur + `aca/ui/shared.py` + `app_pages/*.py` | Découpe d'un fichier unique de ~1700 lignes en un routeur `st.navigation` fin + cinq pages |
+| 99 tests | `test_ui_kit.py` (24) + `test_totp.py` (19) + `test_pdf_export.py` (14) + `test_retention.py` (3) + `test_ui_shared.py` (2, QR code) + extensions de `test_security.py`/`test_activity_log.py`/`test_storage.py` — suite portée de 451 à **550** |
+
+### 18.3 Ce que l'audit du code a trouvé avant d'écrire quoi que ce soit
+
+1. **La journalisation des actions machine était déjà à moitié construite, et inutilisée.** Les
+   constantes `SOURCE_POLLER`/`SOURCE_CLI` existaient dans `activity_log.py` depuis le §17 — le
+   document de suggestions le relève lui-même (§4 item 5, marqué « raccordement trivial ») — mais
+   aucun appelant ne s'en servait : `poller.py`, `scheduler.py`, `relance.py` et `retention.py`
+   agissaient chacun sans laisser de trace attribuable à un acteur.
+
+2. **La rétention à deux vitesses existait dans `activity_log.py`, mais n'était jamais invoquée.**
+   `purge_older_than(days, sensitive_days=None)` était déjà écrite (le paramètre existait dès le
+   §17) — mais `retention.py`, le seul appelant réel en production, ne passait jamais
+   `sensitive_days`. Sans ce raccordement, les événements sensibles (échecs de connexion,
+   verrouillages, changements de rôle) auraient continué à purger à la même échéance que le bruit
+   d'usage courant, exactement le manque que le document de suggestions signale au §4 item 4 —
+   trouvé en écrivant les tests de la passe, pas en la planifiant.
+
+3. **Un fichier unique de ~1700 lignes n'était plus tenable pour recevoir de nouvelles surfaces.**
+   Ni la vue chronologique par lead, ni le bouton d'export PDF, ni l'interface d'inscription TOTP
+   n'avaient d'endroit raisonnable où vivre dans l'ancien `ui.py` monolithique — la découpe en pages
+   `st.navigation` n'était donc pas une fin en soi, mais la condition pour livrer le reste
+   proprement.
+
+### 18.4 Deux décisions de conception à assumer
+
+**Le rail de décision, pas un simple indicateur d'étapes numéroté.** Numéroter des étapes est
+d'ordinaire un tic décoratif. Ici la séquence — e-mail reçu, classé, enrichi, proposition rédigée,
+**décision humaine** — est réelle, et le dernier maillon est précisément le geste qu'on demande au
+lecteur. `decision_rail()` rend donc visible que la décision humaine est le terminus du travail de
+la machine, pas une case à cocher accessoire — cohérent avec la garantie centrale du produit
+(« rédige et attend »).
+
+**TOTP réservé au rôle `admin`, jamais imposé à `operator`.** Un opérateur qui valide vingt leads
+par jour se verrait imposer un coût disproportionné pour un gain de sécurité marginal — et
+l'expérience documentée ailleurs dans ce projet est que ce type de contrainte se paie en
+contournements (secret partagé, application d'authentification sur un seul téléphone de service),
+qui affaiblissent la sécurité plutôt que de la renforcer. Seul un compte capable de créer d'autres
+administrateurs, de rediriger les alertes commerciales et de curer ce que le Stratège affirmera aux
+prospects justifie la contrainte.
+
+### 18.5 Défauts trouvés par la vérification, pas par la relecture
+
+1. **`st.navigation` n'exécute que la page sélectionnée, contrairement à `st.tabs()`.** Sous l'ancien
+   régime, le corps de *tous* les onglets s'exécutait à chaque rerun — un résultat chargé depuis la
+   barre latérale ("Ouvrir" sur une analyse en file, "Charger cet e-mail" depuis Gmail) apparaissait
+   donc quel que soit l'onglet visuellement actif. Sous `st.navigation`, ce n'est plus vrai : sans un
+   `st.switch_page("app_pages/1_inbox.py")` explicite après ces deux actions, le résultat chargé
+   restait invisible tant que la personne ne cliquait pas elle-même sur « Nouvel e-mail ». Trouvé en
+   vérifiant le comportement de bout en bout via `AppTest`, pas en relisant le code.
+
+2. **L'avertissement de session vérifiait le temps restant *après* `touch()`.** `session.touch()`
+   repousse systématiquement le compteur d'inactivité à sa valeur maximale — vérifier le temps
+   restant après cet appel aurait rendu l'avertissement d'inactivité pratiquement inatteignable en
+   usage réel (la borne TTL absolue, elle, n'est pas affectée par `touch()`). Corrigé en inversant
+   l'ordre : vérifier avant de repousser.
+
+3. **`streamlit.testing.v1` classe tout `st.expander(..., icon=...)` sous son type interne
+   `Status`, jamais `Expander`.** Un artefact de l'outillage de test de cette version de Streamlit
+   (le tri se fait sur la seule présence de `proto.icon`), qui touche tous les accordéons à icône
+   déjà présents dans le code, pas seulement les nouveaux — `at.expander` n'en trouve aucun ;
+   `at.status` est le bon accessoire. Consigné ici pour ne pas être redécouvert à la prochaine
+   session de vérification.
+
+### 18.6 Ce qui reste ouvert, par exclusion délibérée
+
+| Point | État | Raison |
+|---|---|---|
+| Hébergement, TLS, domaine personnalisé | Non fait | Exclu explicitement par la demande initiale — nécessite une infrastructure réelle |
+| Alerte Slack en temps réel sur incident | Non fait | Exclu explicitement par la demande initiale — nécessite une application Slack réelle à tester |
+| Raccourcis clavier valider/rejeter | Non fait | Nécessite `st.components.v2` — effort disproportionné pour cette passe |
+| Traitement par lot | Non fait | Le document lui-même appelle à la prudence : diluerait la garantie de validation humaine |
+| Vue mobile | Non fait | Rien à tester contre — aucun appareil mobile disponible dans cet environnement |
+| Recherche globale inter-pages | Non fait | Effort disproportionné pour cette passe, reportée sans avoir été commencée |
+| SSO / SCIM | Non fait | Le document lui-même déconseille de les construire par anticipation |
+| Multilingue | Partiel (§18.7, 2026-07-31) | Engagé un jour plus tard sur demande explicite, portée réduite au chrome principal |
+
+### 18.7 Addendum (2026-07-31) — QR code, style de la barre de navigation, bascule FR/EN
+
+Trois demandes de suivi sur la découpe qui vient d'être livrée, pas de nouveaux items de la feuille
+de route : (1) le secret d'inscription TOTP (§18.2), jusque-là affiché en texte brut `otpauth://`,
+se rend maintenant en QR code scannable (`_totp_qr_png()`, `aca/ui/shared.py`, via `segno` — même
+raisonnement stdlib/zéro-dépendance que `totp.py` lui-même) ; (2) la barre de navigation et le
+bandeau de sécurité admin gagnent un style plus visible et animé, centré — voir `branding.py` ;
+(3) [i18n.py](../aca/core/i18n.py), un sélecteur de langue FR/EN, referme l'item 12 du tableau
+§18.6 ci-dessus, laissé « non fait » à la fin du §18 principal.
+
+**Le premier essai du point (2) ne fonctionnait pas réellement.** Les sélecteurs choisis en
+grep-ant le bundle JS compilé (`data-testid="stTopNavLinkContainer"`/`stTopNavLink`) étaient les
+bons noms, mais `*:has(> [data-testid="stTopNavLinkContainer"])` cible le parent *direct* du
+testid — un `div` privé, propre à Streamlit, qui n'enveloppe qu'**un seul** lien à la fois, jamais
+la rangée flexbox des quatre. Le fond, la bordure et le centrage (`margin-inline: auto`) tombaient
+donc chacun sur quatre petites boîtes individuelles, quasi invisibles, jamais sur une seule barre
+partagée — exactement le retour de l'utilisateur (« ni visible, ni centrée »). Trouvé en lançant un
+vrai navigateur (Playwright, installé pour l'occasion) contre l'application réelle plutôt qu'en
+relisant seulement le bundle minifié : l'inspection du DOM effectivement rendu a montré que le
+vrai conteneur flexbox est fourni par `rc-overflow`, la bibliothèque tierce de liste que Streamlit
+utilise ici — `.rc-overflow`/`.rc-overflow-item` sont ses propres classes, stables (pas hachées par
+Streamlit à chaque version), et la bonne cible. Au passage, l'animation « échelonnée » de l'entrée
+des liens était morte pour la même raison : `:nth-child(N)` sur un élément qui est toujours l'unique
+enfant de son parent vaut toujours `:nth-child(1)`, donc les quatre liens recevaient systématiquement
+le même délai. Corrigé en ciblant `.rc-overflow`/`.rc-overflow-item` (confirmé en direct : `justify-
+content`, fond et ombre corrects sur l'élément réellement rendu, avant/après capturés à l'écran).
+
+**Portée du multilingue, décidée par l'utilisateur** : interrogé sur traduire tout le projet (des
+centaines de chaînes, ~15 fichiers) ou seulement le chrome principal, l'utilisateur a choisi le
+chrome principal — navigation, en-têtes/légendes de page, boutons/étiquettes premiers, messages
+clés. Les écrans de curation admin, le détail du journal d'activité, l'export PDF et les logs
+console restent français par ce choix, pas par oubli. Dictionnaire fait main (pas de Babel/gettext,
+même raisonnement stdlib que `totp.py`/`slack_verify.py`) ; `translate()` ne lève jamais (clé
+inconnue → la clé elle-même, langue inconnue → repli sur le français).
+
+**Un bug trouvé par la vérification** : le sélecteur de langue, placé d'abord après la porte
+`check_auth()`/`st.stop()` de `ui.py`, ne s'affichait jamais sur l'écran de connexion — corrigé en
+le déplaçant avant `prod_check.enforce()`. Suite : 550 → **561 tests** (`test_i18n.py`, 11 tests).
+Vérifié en direct via `AppTest` : connexion admin avec inscription TOTP forcée, bascule vers
+l'anglais en cours de session, puis les cinq pages confirmées sans exception avec la légende propre
+à chacune (`dashboard.caption`/`history.caption`/`activity.caption`) réellement traduite dans la
+langue active — pas seulement l'absence d'erreur. Détail complet :
+`docs/PROJECT_JOURNAL.md` (entrée du 2026-07-31).

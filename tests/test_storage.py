@@ -152,6 +152,39 @@ def test_edit_rate_zero_validated_no_division_error(monkeypatch, tmp_path):
     assert analytics_store.edit_rate(days=1) == {"validés": 0, "édités": 0, "taux_pct": 0.0}
 
 
+# ── analytics_store.get_draft_edit (§18, recap #5/§4 item 2 — différentiel avant/après) ────────
+def test_get_draft_edit_absent_renvoie_none(monkeypatch, tmp_path):
+    _fresh_analytics(monkeypatch, tmp_path)
+    assert analytics_store.get_draft_edit("jamais-edite") is None
+
+
+def test_get_draft_edit_renvoie_le_texte_complet(monkeypatch, tmp_path):
+    _fresh_analytics(monkeypatch, tmp_path)
+    analytics_store.record_edit("t-1", "Bonjour, prix : 500€.", "Bonjour, prix : 450€.")
+    edit = analytics_store.get_draft_edit("t-1")
+    assert edit["original"] == "Bonjour, prix : 500€."
+    assert edit["edited"] == "Bonjour, prix : 450€."
+    assert edit["edited_at"]
+
+
+def test_get_draft_edit_renvoie_la_plus_recente_modification(monkeypatch, tmp_path):
+    """`record_edit` n'a pas de contrainte d'unicité sur `thread_id` — la lecture doit servir la
+    version qui correspond à la validation effectivement envoyée, pas la première."""
+    _fresh_analytics(monkeypatch, tmp_path)
+    analytics_store.record_edit("t-1", "V0", "V1")
+    analytics_store.record_edit("t-1", "V1", "V2")
+    edit = analytics_store.get_draft_edit("t-1")
+    assert edit == {"original": "V1", "edited": "V2", "edited_at": edit["edited_at"]}
+
+
+def test_get_draft_edit_ne_melange_pas_les_threads(monkeypatch, tmp_path):
+    _fresh_analytics(monkeypatch, tmp_path)
+    analytics_store.record_edit("t-1", "A", "B")
+    analytics_store.record_edit("t-2", "C", "D")
+    assert analytics_store.get_draft_edit("t-1")["edited"] == "B"
+    assert analytics_store.get_draft_edit("t-2")["edited"] == "D"
+
+
 def test_record_tokens_noop_when_zero(monkeypatch, tmp_path):
     _fresh_analytics(monkeypatch, tmp_path)
     analytics_store.record_tokens("t-1", 0, 0)

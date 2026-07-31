@@ -1,6 +1,6 @@
 # ACA / ACAM — Assistant Commercial Agentique (Multimodal)
 ### Presentation source document — structured content for slides
-*Internship project, 8 weeks · Prepared 2026-07-16 · Source of truth: this repository (`CLAUDE.md`, `docs/ACAM_roadmap.md`, `docs/PROJECT_JOURNAL.md`)*
+*Internship project, 8 weeks · Prepared 2026-07-16 · Updated 2026-07-28 (§15 security hardening, §16 Solo tier / n8n port / demo mode) · Source of truth: this repository (`CLAUDE.md`, `docs/ACAM_roadmap.md`, `docs/PROJECT_JOURNAL.md`)*
 
 > **How to use this document:** each numbered section maps to a slide group.
 > "Key talking points" boxes are the sentences to actually say; tables and diagrams are the visuals.
@@ -267,7 +267,9 @@ flowchart TB
 | UI | **Streamlit** (Fluent theme) | Validation gate, queue, clarification dialog, editable draft, dashboard — built in days, not weeks |
 | Documents | PyMuPDF · python-docx · openpyxl | Multi-format attachment extraction |
 | Observability | **LangSmith** (free tier) + local analytics SQLite + token logging | Per-node traces; KPIs without paid infra |
-| Testing | **pytest** — 191 offline tests (~4.5 s) + 50-email labeled eval set | Fake LLMs, temp DBs, full-graph integration tests; classifier measured at 100 % |
+| Packaging | **Docker** (one image, four services) + **compose profiles** `solo` / `enterprise` | Same image both tiers; n8n added or removed by one word. Credentials mounted read-only, never baked into a layer; non-root user |
+| CI | **GitHub Actions** — tests on Python 3.11 + 3.14, `pip-audit`, derived-artifact drift check | Possible only because the suite is fully offline: it runs on a public runner with no secrets |
+| Testing | **pytest** — 352 offline tests (~13 s) + 50-email labeled eval set | Fake LLMs, temp DBs, full-graph integration tests; classifier measured at 100 % |
 
 ### Non-functional requirements (all implemented)
 
@@ -276,12 +278,16 @@ flowchart TB
   service off = feature silently skipped, never a crash).
 - **Idempotence:** poller marks emails `en_cours` *before* analysis; crash mid-analysis cannot
   duplicate processing; stale entries auto-recovered.
-- **Security & compliance:** optional UI password gate, per-validation audit log, GDPR retention
-  sweep (`RETENTION_DAYS`), secrets in gitignored `.env`/`credentials/`.
-- **Cost: 0 €** — every service used is a free tier; the n8n port target is self-hosted (free),
-  not n8n Cloud (paid).
-- **Portability:** each capability is an isolated node/module → "n8n-ready" (planned Option A:
-  keep the LangGraph brain as a FastAPI microservice, n8n as the infrastructure shell).
+- **Autonomy:** `poller.py` ingests Gmail and runs the graph 24/7 with the UI closed; `scheduler.py`
+  runs follow-ups, the GDPR purge and queue maintenance on a cadence. **No n8n required** —
+  one command starts all four processes (`python scripts/run_solo.py`).
+- **Security & compliance:** named accounts with roles, expiring sessions, hash-chained audit log,
+  GDPR purge *and* right to erasure, prompt-injection flagging, and a production mode that refuses
+  to start unprotected. Full detail in Appendix C.
+- **Cost: 0 €** — every service used is a free tier; the n8n tier targets self-hosted community
+  edition (free), never n8n Cloud (paid).
+- **Portability:** each capability is an isolated node/module, driven over HTTP by `aca/api.py`
+  with 5 outbound webhooks — so n8n orchestrates ACA rather than replacing any of it.
 
 > **Key talking points:** the architecture is defensive by design — retries, fallbacks, staging,
 > and two human interrupts; and it costs literally nothing to run.
@@ -313,18 +319,25 @@ flowchart TB
 | **Query de-contextualization** | RAG queries are built from the extracted need (and resolved against customer history for implicit references), not the raw email — measurably better retrieval |
 | **Classification confidence routing** | Low-confidence classifications alert a human even for normally-silent categories (spam/support) — the riskiest silent failure is eliminated |
 | **Edit-capture corpus** | Every human edit of a draft is recorded as an (original, edited) pair — a free future few-shot/eval dataset |
-| **Full measurement culture** | 191 automated tests, a 50-email labeled eval set (100 % accuracy), token-per-analysis logging, edit rate, response-time funnel |
+| **Two deployment tiers, n8n optional** | Solo (API + UI + poller + scheduler) is autonomous *without* n8n; Enterprise adds it for cross-system orchestration. Same image, same code — one word on the compose line. The distinction "automation ≠ orchestration" is itself the product argument |
+| **Event-driven integration, not polling** | 5 outbound HMAC-signed webhooks push state to n8n; the alternative would have been reimplementing our own poller inside n8n |
+| **Zero-credential demo mode** | The whole graph runs with no API key at all — real nodes, real supervisor, real pause, simulated model. Evaluators can *run* it, not just read it. CRM writes fail loudly rather than degrading quietly |
+| **Full measurement culture** | 352 automated tests, a 50-email labeled eval set (100 % accuracy), token-per-analysis logging, edit rate, response-time funnel, `pip-audit` in CI |
 | **Critical audit of AI-generated advice** | Three external AI-written architecture documents were audited against the real code; good ideas were adopted, and **two factual errors were caught before being copied in** (a wrong hallucination-gate threshold and a mis-sized vector schema) |
 
 ### Measured results
 
 - Classifier accuracy: **100 %** (50/50) on the labeled eval set (96 % before structured-output migration).
-- Test suite: **191 tests, ~4.5 s, fully offline**.
+- Test suite: **352 tests, ~13 s, fully offline** — no key, no network, so it also runs on a public
+  CI runner with zero secrets.
 - Live-verified integrations: Gmail, Google Sheets, Slack, Tavily, HubSpot, Supabase (pgvector +
-  cross-process checkpointing), LangSmith, Calendly link injection.
+  cross-process checkpointing + RLS), LangSmith, Calendly link injection, GDPR purge/erasure.
+- Dependency scan (`pip-audit`): **0 known vulnerabilities**.
 - Verification caught **real bugs before production**: a retry-swallowing anti-pattern, a
   cp1252 print crash that would have *duplicated CRM leads*, a silent pgvector
-  misconfiguration, and an IPv6-only database host.
+  misconfiguration, an IPv6-only database host, four raw-exception leaks in the UI, a dashboard
+  session cookie that never expired server-side, a graph diagram silently out of sync with the
+  real graph, and an outbound event that was documented but never emitted.
 
 > **Key talking points:** the innovation is not "we used an LLM" — it's the *governance around*
 > the LLM: guardrails, staging, self-critique, honesty flags, and measurement, at zero cost.
@@ -339,14 +352,19 @@ flowchart TB
   Gmail inbox to validated CRM lead with a ready-to-send draft — with a human always in command.
 - The 0-€ constraint was held end-to-end, proving that **state-of-the-art agentic AI is accessible
   to SMEs**, not just enterprises.
-- The prototype is deliberately **product-ready in shape**: n8n-ready module boundaries, a
-  documented commercialization backlog (multi-tenant, usage billing, client dashboard), and a
-  technical-debt list already mostly paid down (tests, retries, structured outputs).
-- Honest limits: single-tenant today; the multi-round follow-up cadence (up to 3 touches) isn't yet
-  verified against a real Gmail thread with a prospect reply; dashboard built but not yet observed
-  over a real multi-day run, nor deployed; usage billing (Stripe) scaffolded but not live-verified
-  (no test account); free-tier rate limits won't survive commercial traffic (a paid-model switch is
-  budgeted in the SaaS phase).
+- The prototype is deliberately **product-ready in shape**: two packaged deployment tiers, a
+  hardened security posture (named accounts, expiring sessions, chained audit log, GDPR erasure),
+  CI, and a technical-debt list already mostly paid down (tests, retries, structured outputs).
+- It can now be **evaluated without any account at all** — `ACA_DEMO_MODE` runs the real graph with
+  a simulated model, which turns "interesting repository" into "I just ran it".
+- Honest limits: single-tenant today; the follow-up cadence isn't yet verified against a real Gmail
+  thread with a prospect reply; usage billing (Stripe) scaffolded but not live-verified (no test
+  account); the n8n workflow and the Docker image are written but never run against a real instance
+  (no n8n, no Docker on the dev machine); nothing is hosted, so TLS is documented rather than
+  applied; free-tier rate limits won't survive commercial traffic (a paid-model switch is budgeted
+  in the SaaS phase).
+- **None of those limits is missing code** — each is a missing account, instance or host. Saying so
+  precisely is, itself, part of the engineering.
 
 ### Sustainable Development Goals alignment
 
@@ -483,22 +501,27 @@ flowchart LR
 
 ## Appendix B — Product Backlog & Sprints
 
-**Method:** Scrum, 4 sprints × 2 weeks (the 8-week internship), plus a future-phase backlog.
-Priorities in MoSCoW; estimates in story points (Fibonacci). Statuses reflect the real repository.
+**Method:** Scrum — **4 sprints × 2 weeks = the 8-week internship**. Priorities in MoSCoW,
+estimates in story points. This appendix shows the **headline features only**; the exhaustive
+item-by-item backlog lives in `docs/ACAM_roadmap.md`.
 
-### Epics
+**Product vision (the one sentence the whole backlog serves):**
+> *Your sales email is read, qualified, researched and answered while you're away — and nothing
+> reaches your CRM until you click "Validate".*
 
-| Epic | Name | Goal |
+### Epics — what each one is worth to the customer
+
+| Epic | Name | Customer value |
 |---|---|---|
-| E1 | Core analysis pipeline | Classify, extract, and qualify an incoming email |
-| E2 | Human-in-the-loop & UI | Validation gate, clarification, editable drafts, Streamlit UI |
-| E3 | Knowledge & RAG | FAQ knowledge base, semantic search, ingestion, web fallback |
-| E4 | Integrations | Gmail, Google Sheets, HubSpot, Slack, Tavily, Calendly, Supabase |
-| E5 | Multi-agent orchestration | Supervisor, worker agents, reflection, guardrails |
-| E6 | Production hardening | Persistence, retries, poller, routing, notifications, GDPR, audit |
-| E7 | Measurement & quality | Test suite, eval set, dashboard, token/edit tracking |
-| E8 | Commercialization (future) | Multi-tenant, billing, client dashboard, n8n port |
-| E9 | Security & compliance hardening | Auth rate limiting, RLS (with multi-tenant), privacy policy |
+| E1 | **Read & qualify** | Stop triaging the inbox by hand — every email arrives already sorted and summarised |
+| E2 | **Human stays in command** | The AI drafts, the human decides. No autonomous action on the CRM, ever |
+| E3 | **Knows your business** | Answers come from *your* prices and rules, editable by your team in a spreadsheet |
+| E4 | **Fits your existing tools** | Gmail, Google Sheets, HubSpot, Slack — no new habits to learn |
+| E5 | **Thinks before it writes** | A team of specialist agents researches, drafts, then re-reads its own work |
+| E6 | **Runs on its own** | Works nights and weekends; nothing to remember to launch |
+| E7 | **Proves its value** | Volumes, conversion funnel, response times, cost per analysis |
+| E8 | **Ready to sell** | Two deployment tiers, per-client isolation, usage metering |
+| E9 | **Safe to trust** | Named accounts, tamper-evident audit trail, GDPR rights |
 
 ### Sprint 1 (Weeks 1–2) — "Walking skeleton" ✅
 
@@ -506,10 +529,10 @@ Priorities in MoSCoW; estimates in story points (Fibonacci). Statuses reflect th
 |----|-----------|------|--------|-----|--------|
 | US-01 | As a **sales rep**, I want incoming emails automatically classified (demo/quote/support/other/spam) so that I stop triaging my inbox manually | E1 | Must | 5 | ✅ |
 | US-02 | As a **sales rep**, I want key lead info (company, contact, urgency, need) extracted automatically so that I don't re-read every email | E1 | Must | 5 | ✅ |
-| US-03 | As a **developer**, I want a LangGraph state graph with a checkpointer so that execution can pause and resume deterministically | E1 | Must | 5 | ✅ |
-| US-04 | As a **sales rep**, I want qualified leads written to a Google Sheet so that the team's existing CRM habit is preserved | E4 | Must | 3 | ✅ |
+| US-03 | As a **sales rep**, I want an analysis to stop and resume exactly where it left off so that waiting for my decision never costs work or restarts | E1 | Must | 5 | ✅ |
+| US-04 | As a **sales rep**, I want qualified leads landing in the spreadsheet my team already uses so that nobody changes their habits | E4 | Must | 3 | ✅ |
 
-**Sprint goal:** an email in → a classified, extracted lead row out (hard-coded inputs accepted).
+**Sprint goal:** an email goes in, a qualified lead comes out.
 
 ### Sprint 2 (Weeks 3–4) — "Multimodal + human control" ✅
 
@@ -517,20 +540,19 @@ Priorities in MoSCoW; estimates in story points (Fibonacci). Statuses reflect th
 |----|-----------|------|--------|-----|--------|
 | US-05 | As a **sales rep**, I want PDF attachments analyzed together with the email so that RFP details aren't missed | E1 | Must | 5 | ✅ |
 | US-06 | As a **manager**, I want the system to **pause before any CRM write** until a human clicks "Valider" so that the AI never acts alone | E2 | Must | 8 | ✅ |
-| US-07 | As a **sales rep**, I want a simple web UI showing the prospect card and draft so that I can review and validate in one place | E2 | Must | 5 | ✅ |
-| US-08 | As a **sales rep**, I want to be flagged when a sender is a returning customer or a duplicate so that I don't create double entries | E1 | Should | 3 | ✅ |
+| US-07 | As a **sales rep**, I want one screen showing the prospect, the draft and a Validate button so that reviewing takes seconds | E2 | Must | 5 | ✅ |
+| US-08 | As a **sales rep**, I want to be told when a sender is already a customer or a duplicate so that I never create a double entry | E1 | Should | 3 | ✅ |
 
-**Sprint goal:** the full human-in-the-loop loop works end-to-end on manual input.
+**Sprint goal:** nothing reaches the CRM without a human clicking Validate.
 
 ### Sprint 3 (Weeks 5–6) — "Knowledge & real inbox" ✅
 
 | ID | User story | Epic | MoSCoW | Pts | Status |
 |----|-----------|------|--------|-----|--------|
-| US-09 | As a **prospect**, I want my classic questions (price, SLA, deadlines) answered from the company's real FAQ so that replies are accurate | E3 | Must | 8 | ✅ |
-| US-10 | As a **manager**, I want the knowledge base to live in Google Sheets so that my team updates prices without touching code | E3 | Must | 3 | ✅ |
-| US-11 | As a **manager**, I want to upload a PDF/Markdown document and have it become FAQ entries so that onboarding knowledge is fast | E3 | Should | 5 | ✅ |
-| US-12 | As a **sales rep**, I want real unread Gmail messages imported and marked processed so that the tool works on my actual inbox | E4 | Must | 8 | ✅ |
-| US-13 | As a **sales rep**, I want the semantic search to fall back to keyword search when embeddings are unavailable so that the tool never breaks | E3 | Should | 3 | ✅ |
+| US-09 | As a **prospect**, I want my usual questions (price, deadlines, SLA) answered from the company's real FAQ so that replies are accurate, not generic | E3 | Must | 8 | ✅ |
+| US-10 | As a **manager**, I want the knowledge base to live in a spreadsheet so that my team updates prices without calling a developer | E3 | Must | 3 | ✅ |
+| US-11 | As a **manager**, I want to drop in a PDF and have it become answerable knowledge so that onboarding takes minutes | E3 | Should | 5 | ✅ |
+| US-12 | As a **sales rep**, I want it working on my **real** mailbox, not a demo one | E4 | Must | 8 | ✅ |
 
 **Sprint goal:** the assistant answers from company knowledge and reads the real mailbox.
 
@@ -538,72 +560,58 @@ Priorities in MoSCoW; estimates in story points (Fibonacci). Statuses reflect th
 
 | ID | User story | Epic | MoSCoW | Pts | Status |
 |----|-----------|------|--------|-----|--------|
-| US-14 | As a **manager**, I want a supervisor orchestrating specialist agents (enrichment, knowledge, web-watch, strategist) with deterministic guardrails so that the analysis is thorough but bounded | E5 | Must | 13 | ✅ |
-| US-15 | As a **sales rep**, I want the agent to ask me **one clarifying question** when the need is vague so that drafts aren't built on guesses | E2 | Must | 5 | ✅ |
-| US-16 | As a **sales rep**, I want a company profile of the sender auto-researched and cached so that I open every conversation informed | E5 | Should | 5 | ✅ |
-| US-17 | As a **manager**, I want web-found answers **staged for my approval** before entering the FAQ so that the knowledge base stays trustworthy | E3 | Must | 5 | ✅ |
-| US-18 | As a **sales rep**, I want the draft self-critiqued against the FAQ (max 1 rewrite) so that invented prices never reach me | E5 | Should | 5 | ✅ |
-| US-19 | As a **sales rep**, I want analyses to survive an app restart so that a pause never loses my work | E6 | Must | 5 | ✅ |
-| US-20 | As a **sales rep**, I want new emails analyzed in the background and queued for me so that drafts are ready when I arrive | E6 | Must | 8 | ✅ |
-| US-21 | As a **sales rep**, I want a Slack/email alert when an analysis awaits validation so that response times stay low | E6 | Must | 3 | ✅ |
-| US-22 | As a **support/HR team member**, I want misdirected emails routed to me with a prefilled forward draft so that they aren't lost | E6 | Must | 5 | ✅ |
-| US-23 | As a **sales rep**, I want a Gmail reply draft created in-thread after validation so that I only reread and press Send | E4 | Must | 5 | ✅ |
-| US-24 | As a **sales rep**, I want follow-up drafts prepared automatically after N days of silence so that leads don't go cold | E6 | Should | 5 | ✅ |
-| US-25 | As an **admin**, I want an audit log of every validation and an optional password gate so that actions are accountable | E6 | Should | 3 | ✅ |
-| US-26 | As an **admin**, I want personal data purged after a retention period so that we respect GDPR | E6 | Should | 3 | ✅ |
-| US-27 | As a **manager**, I want a dashboard (volumes, funnel, response times) so that I can measure the tool's impact | E7 | Should | 5 | ✅ |
-| US-28 | As a **developer**, I want an offline automated test suite and a labeled eval set so that every change is verifiable in seconds | E7 | Must | 8 | ✅ |
-| US-29 | As a **manager**, I want contractual risk clauses flagged deterministically so that dangerous commitments reach legal, not the prospect | E1 | Should | 3 | ✅ |
-| US-30 | As a **sales rep**, I want to edit the draft before validating (and have edits recorded) so that the final word is always mine | E2 | Must | 3 | ✅ |
-| US-31 | As an **admin**, I want per-analysis LLM token usage logged so that the theoretical cost per client is known before commercialization | E7 | Could | 2 | ✅ |
-| US-32 | As a **manager**, I want low-confidence classifications to alert a human even for spam/support so that silent misclassification can't hide | E1 | Should | 3 | ✅ |
+| US-14 | As a **manager**, I want a supervisor directing specialist agents (research, knowledge, web-watch, writing) so that each email gets exactly the work it needs — no more, no less | E5 | Must | 13 | ✅ |
+| US-15 | As a **sales rep**, I want the assistant to **ask me one question** when a request is vague, instead of guessing | E2 | Must | 5 | ✅ |
+| US-16 | As a **sales rep**, I want the prospect's company researched automatically so that I open every conversation informed | E5 | Should | 5 | ✅ |
+| US-18 | As a **sales rep**, I want the draft to **re-read itself** against our FAQ so that invented prices never reach me | E5 | Should | 5 | ✅ |
+| US-20 | As a **sales rep**, I want emails analysed in the background so that the work is already done when I arrive | E6 | Must | 8 | ✅ |
+| US-23 | As a **sales rep**, I want a reply waiting as a draft in my own mailbox so that I only reread and press Send | E4 | Must | 5 | ✅ |
+| US-24 | As a **sales rep**, I want follow-ups prepared automatically after days of silence so that leads don't go cold | E6 | Should | 5 | ✅ |
+| US-29 | As a **manager**, I want dangerous contract clauses flagged so that risky commitments reach legal, not the prospect | E1 | Should | 3 | ✅ |
+| US-27 | As a **manager**, I want a dashboard of volumes, conversion and response times so that I can prove the tool's impact | E7 | Should | 5 | ✅ |
 
-**Sprint goal:** a production-shaped system: resilient, measured, auditable, background-capable.
+*Also delivered this sprint (supporting, not headline): restart-proof pauses, Slack/email alerts,
+support & HR routing, editable drafts with edit capture, GDPR purge, audit log, cost-per-analysis
+logging, low-confidence alerting, and the automated test suite + labeled evaluation set — US-17,
+19, 21, 22, 25, 26, 28, 30, 31, 32.*
 
-### Sprint 5+ backlog — commercialization phase (planned post-internship, **largely delivered ahead of schedule** at the user's request)
+**Sprint goal:** a production-shaped system: resilient, measured, auditable, and working while
+nobody is watching.
 
-*This backlog was scoped as post-internship work. In practice most of it was pulled forward and
-built during the internship at the user's explicit request — the Status column reflects the real
-repository, not the original plan. Only usage billing (US-35) remains partial (scaffolded, no Stripe
-test account to live-verify against).*
+### Beyond the 8 weeks — from prototype to product
 
-| ID | User story | Epic | MoSCoW | Pts | Status |
-|----|-----------|------|--------|-----|--------|
-| US-33 | As a **new customer org**, I want my data isolated (multi-tenant, org_id + Row-Level Security) so that ACA can serve several companies | E8 | Must | 13 | ✅ Foundation — `org_id` across all local stores + pgvector RLS live-verified; tenant onboarding/provisioning still future |
-| US-34 | As a **manager**, I want a settings panel (Calendly link, routing addresses, thresholds) so that configuration doesn't require a developer | E8 | Must | 8 | ✅ Done — `config_store.py` + "Réglages" tab |
-| US-35 | As the **vendor**, I want usage metering aggregated per organization and billed (Stripe) so that ACA becomes a sustainable SaaS | E8 | Must | 8 | 🟡 Scaffolded — `billing.py`; **not** live-verified (no Stripe account) |
-| US-36 | As a **client**, I want a dedicated dashboard (login, execution timeline, HITL buttons) so that the product feels professional | E8 | Should | 13 | ✅ Built — Next.js dashboard; runs locally, not yet deployed |
-| US-37 | As an **ops engineer**, I want the LangGraph brain exposed as a FastAPI microservice inside self-hosted n8n so that infrastructure (triggers, queues, waits) is visual and standard | E8 | Should | 13 | ✅ Done — `aca/api.py`; not yet exercised against a real n8n |
-| US-38 | As a **sales rep**, I want multi-round follow-up cadences (stop on reply) so that persistence matches real sales practice (~5+ touches) | E6 | Should | 5 | ✅ Done — `RELANCE_MAX_ROUNDS` (default 3); not yet verified on a real replied thread |
-| US-39 | As an **auditor**, I want a searchable "History" tab over past executions so that any past decision can be justified | E6 | Could | 3 | ✅ Done — "Historique" tab over `audit_log` |
-| US-40 | As a **developer**, I want attachment extraction moved into an explicit graph `ingestion` node so that the whole pipeline lives in the graph | E1 | Could | 3 | ✅ Done — `ingestion_node` in the graph |
-| US-41 | As an **admin**, I want the UI password gate to lock out after repeated failed attempts so that it can't be brute-forced by a bot | E9 | Must | 3 | ✅ Done — `auth_lockout.py` |
-| US-42 | As a **prospect / data subject**, I want a published privacy policy describing what's collected and my GDPR rights so that the company isn't in violation before it ever collects real leads | E9 | Must | 3 | ✅ Done — `docs/PRIVACY_POLICY.md` |
-| US-43 | As a **client organization**, I want Row-Level Security enabled on Supabase tables so that another tenant's data is cloisonné at the database level | E9 (bundled with US-33) | Must | — | ✅ Done — live-verified 2026-07-21 (folded into US-33's 13 pts) |
+*The 8-week backlog above was the internship. Everything below was scoped as **post-internship**
+work and then pulled forward at the client's request. Shown as themes rather than tickets — the
+full 20-story detail is in `docs/ACAM_roadmap.md` §12–§16.*
 
-> **Security audit note (2026-07-21):** a generic "5 AI security mistakes" checklist was checked
-> against this codebase before adding anything above. Two items from that checklist were **already
-> non-issues by architecture** and are *not* backlog items: (1) exposed API keys — every secret is
-> read server-side from `.env` via `os.getenv()`, never hardcoded, never printed in the UI, and
-> Streamlit has no client-side bundle to inspect (`view-source` shows nothing sensitive — the
-> "frontend hardcoding" attack the checklist describes needs a JS frontend, which doesn't exist
-> here); (2) "Supabase wide open" — no RLS exists (true), but the checklist's actual attack (a
-> public *anon* key reachable from a browser via PostgREST) doesn't apply either, since this
-> project only ever connects with a server-side `DATABASE_URL` connection string, never an anon
-> key or `supabase-js`. RLS is still real debt, just not an *active* hole today — hence bundled with
-> the multi-tenant story (US-33) rather than listed as an urgent standalone fix. The two genuine
-> gaps — no rate limiting on the password gate, no privacy policy — are US-41/US-42 above. Full
-> item-by-item reasoning: `docs/ACAM_roadmap.md` §14.
+| Theme | What the customer gets | Status |
+|---|---|---|
+| **Sell it to several companies** | Each client's data isolated from every other's, enforced at the database level | ✅ Foundation live-verified · onboarding still manual |
+| **Configure without a developer** | A settings screen for booking links, routing addresses and follow-up timing | ✅ Done |
+| **Know what it costs** | Usage metered per client, ready to bill | 🟡 Built, never billed (no payment account) |
+| **Approve from Slack** | Validate or reject a lead without opening any interface | ✅ Done |
+| **Plug into the rest of the business** | Connect ACA to a CRM, ERP or ticketing system via n8n | ✅ Ready · never run against a live n8n |
+| **Run it anywhere** | Two packaged tiers — *Solo* (works alone) and *Enterprise* (adds n8n) | ✅ Packaged · image never built |
+| **Trust it with a real inbox** | Named accounts and roles, expiring sessions, a tamper-evident audit trail, GDPR erasure on request | ✅ Done |
+| **Try it in 30 seconds** | The whole product runs with no account and no API key at all | ✅ Done |
+
+> **The finding worth telling in the defence.** The last phase began as a narrow technical
+> question. Auditing the code instead of answering from memory surfaced something bigger:
+> **the product was already autonomous but didn't look it, and the orchestration tool couldn't
+> actually have driven it.** Two problems long conflated into one ("you need n8n for this to be
+> automatic"), both false for opposite reasons. That reframing produced the Solo/Enterprise
+> tiering — now the clearest part of the commercial pitch.
 
 ### Velocity summary
 
-| Sprint | Committed pts | Delivered | Notes |
-|---|---|---|---|
-| S1 | 18 | 18 ✅ | Walking skeleton |
-| S2 | 21 | 21 ✅ | HITL loop complete |
-| S3 | 27 | 27 ✅ | Knowledge + real Gmail |
-| S4 | 89 | 89 ✅ | Multi-agent + full hardening (largest sprint — many small verified items) |
-| S5+ | 72 | ~64 ✅ | Planned post-internship but mostly pulled forward at the user's request (multi-tenant foundation, dashboard, API/n8n port, settings, follow-up cadence, History, security US-41/42/43). Only US-35 (Stripe billing, 8 pts) left partial — scaffolded, no test account to verify against |
+| Sprint | Weeks | Committed | Delivered | Theme |
+|---|---|---|---|---|
+| S1 | 1–2 | 18 | 18 ✅ | Walking skeleton — an email in, a qualified lead out |
+| S2 | 3–4 | 21 | 21 ✅ | Attachments + the human validation gate |
+| S3 | 5–6 | 27 | 27 ✅ | Company knowledge + the real mailbox |
+| S4 | 7–8 | 94 | 94 ✅ | Agent team, autonomy, measurement (largest sprint) |
+| **Total (internship)** | **8 weeks** | **160** | **160 ✅** | **Scope delivered in full** |
+| Extension | post-8w | 122 | ~114 ✅ | Commercialisation, security, packaging — pulled forward on request. Only usage billing left unverified |
 
 ---
 
@@ -620,27 +628,46 @@ plus concrete hardening of the surfaces that untrusted input actually reaches.*
 | CRM write | **Human validation gate** (`interrupt_before=["action"]`) | Nothing reaches Sheets/HubSpot/Gmail-send without a human click — the core promise, and the root security guarantee |
 | Slack approval endpoint | **HMAC-SHA256 signature**, constant-time compare, anti-replay, **fails closed** if `SLACK_SIGNING_SECRET` unset | The only place a click writes to CRM without the API key — and the best-guarded one ([slack_verify.py](../aca/core/slack_verify.py)) |
 | FastAPI (all routes) | Optional **`ACA_API_KEY`** gate + **rate limiting** (`ACA_RATE_LIMIT`, per-client sliding window, HTTP 429) | Blocks both unauthenticated access *and* abuse/brute-force by a client |
-| Streamlit / dashboard login | Password gate + **progressive lockout** (US-41) + **constant-time** secret comparison | Timing side-channel on the password/session token closed (`hmac.compare_digest` / pure-JS `timingSafeEqualHex`) |
+| Streamlit / dashboard login | **Named accounts + `admin`/`operator` roles** (US-44), PBKDF2 hashes, progressive lockout (US-41), constant-time comparison | Replaces the shared password. A dummy hash on unknown usernames stops response time revealing which accounts exist |
+| Sessions | **Absolute TTL (8 h) + idle timeout (30 min)**, strictest wins (US-45) | Activity pushes back idleness but *never* the absolute TTL — otherwise a stolen-but-active session never dies |
+| Audit log | **Hash-chained** rows (US-46); `verify_chain()` locates the first break; optional HMAC key | Detects an edited *or deleted* row. Tamper-**evident**, not tamper-proof — said plainly, since without the external key whoever can write the file can recompute it |
+| Untrusted email → LLM | **Deterministic prompt-injection detection** (`prompt_guard.py`), kept separate from contractual risk flags | Flags, never blocks — see below |
+| Startup | `ACA_ENV=production` **refuses to boot** without API key, UI gate, rate limit and metrics token (US-48) | Inverts the project's "absent = feature skipped" default, which is right locally and exactly wrong on a public host |
 | Spreadsheet writes | **Formula-injection escaping** on every untrusted field (sender, need, draft, web-sourced FAQ) | A lead arriving as `=IMPORTXML(...)` can no longer execute when a human opens the sheet ([sheets.py](../aca/integrations/sheets.py) `_escape_formula`) |
 | Multi-tenant DB | **Row-Level Security** on `faq_embeddings` via a non-`BYPASSRLS` `aca_app` role | Live-verified: a bogus tenant sees 0 of 74 rows |
 | Data at rest | Secrets in gitignored `.env`/`credentials/`, read server-side via `os.getenv`, never in a client bundle | The §14 audit correctly dismissed "exposed keys" as a non-issue (no JS frontend to leak from) |
-| Personal data | GDPR retention sweep (`retention.py`) + published privacy policy (US-42) + per-validation audit log | |
+| Personal data | GDPR retention sweep + **right to erasure** (`--oublier <address>`, US-47) + published privacy policy (US-42) + per-validation audit log | Age-based purge was the easy half; an explicit request previously meant hand-hunting rows across a Sheet, a checkpoint file and two registries — so in practice it never happened |
+| Dependencies | `pip-audit` in CI (US-52) | The first scan found 17 known vulnerabilities, **11 of them in transitive packages the project never imports** — "requirements.txt is pinned" was false assurance |
 
 ### Prompt injection (untrusted email → LLM)
 
 Every incoming email is attacker-controlled text fed to the classifier/extractor/stratège. The
 defense is **architectural, not a filter**: (1) the human-in-the-loop gate means a manipulated draft
 still hits a human before any CRM write or send; (2) the contractual **risk scan is deterministic
-RegEx**, not an LLM, so it can't be "talked out of" flagging a clause. Residual risk = a *misleading
-draft*, which the validation gate catches. This is a mitigation worth stating proudly, not a gap to hide.
+RegEx**, not an LLM, so it can't be "talked out of" flagging a clause.
+
+§15 added a third layer: [prompt_guard.py](../aca/core/prompt_guard.py) detects injection attempts
+deterministically (no LLM — asking a model to spot model-manipulation exposes it to that
+manipulation) into a **separate** `injection_flags` list. Kept separate from risk flags on purpose:
+a contractual clause means *"have legal review this"*, an injection means *"distrust this draft"* —
+merging them would hand "ignore previous instructions" to the Stratège as a clause to escalate to
+management. It **flags, never blocks**: the human gate stays the protection, this only makes it
+*informed*. Before it, an instruction buried on page 14 of an RFP surfaced in the draft as one more
+plausible sentence. Zero false positives across a set of ten perfectly ordinary sales emails.
 
 ### Deliberately deferred (phase-gaps, not quick fixes — named honestly)
 
+*Per-user identity was on this list until §15 — it is now built (US-44/45), so it has moved up to
+the controls table. What remains is genuinely deferred, and none of it is missing code:*
+
 | Item | Why deferred | Interim state |
 |---|---|---|
-| **Real per-user identity** (SSO/accounts) | A half-built auth system that *looks* real but isn't is a liability; real identity is a genuine feature (US-33 territory) | Shared-password gates + free-text "Validé par" — accountability is honor-system today, and said so |
-| **DB-enforced isolation on the 5 local SQLite stores** | Real model is one-deployment-per-tenant; app-level `org_id` scoping is sufficient there (unlike the shared pgvector table, which *is* RLS-enforced) | Application-level `org_id` filter on every query |
+| **TLS / HTTPS** | Nothing is hosted — applying it needs a real server and domain | Full Caddy/Nginx runbook written ([DEPLOYMENT_HARDENING.md](DEPLOYMENT_HARDENING.md)), applied on deploy day |
+| **Secrets vault** (Vault/Doppler) | A hosting decision, not a code one | Rules + per-secret rotation table documented; **no code change will be needed** — every module already reads `os.getenv()` dynamically |
+| **SSO / 2FA** | Local accounts cover the real model (one deployment, a small team) | Named accounts with roles (US-44) |
+| **DB-enforced isolation on the local SQLite stores** | Real model is one-deployment-per-tenant; app-level `org_id` scoping is sufficient there (unlike the shared pgvector table, which *is* RLS-enforced) | Application-level `org_id` filter on every query |
 | **Multi-process rate-limit backend** (Redis) | In-memory sliding window is exact at single-process prototype scale | Correct for one uvicorn worker; needs a shared store before horizontal scaling |
+| **DPA / DPIA documents** | Legal artefacts belonging to the using company, not derivable from code | Privacy policy published (US-42) |
 
 > **Key talking points:** the security story is not "it's locked down like a bank" — it's *"every
 > surface untrusted input touches is either escaped, signed, rate-limited, or gated behind a human,

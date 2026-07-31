@@ -1327,8 +1327,12 @@ et l'application. Il n'y avait pas de doublon ; je n'ai rien touché.
 
 - **Le workflow n8n n'a jamais été importé dans un vrai n8n**, et les webhooks n'ont jamais été reçus
   par une vraie instance : aucune n'existe pour ce projet.
+  *(Dépassé depuis — voir l'entrée du 2026-07-28 : le workflow a été importé dans une instance n8n
+  Cloud réelle, ce qui a révélé quatre défauts que la relecture seule n'avait pas vus.)*
 - **L'image Docker n'a jamais été construite** — Docker n'est pas installé sur la machine de
   développement. Seule la configuration a été validée (le bon nombre de services par palier).
+  *(Dépassé depuis — voir l'entrée du 2026-07-28 : Docker 29.3.1 installé, image construite
+  (1,28 Go), conteneur `api` démarré et sonde de santé au vert.)*
 - **L'intégration continue ne s'exécutera qu'au premier envoi vers un dépôt distant.**
 - **Le one-pager n'est hébergé nulle part**, pour la même raison que le HTTPS de la phase précédente :
   il n'y a ni serveur ni domaine.
@@ -1350,3 +1354,449 @@ l'API pour interdire toute dérive future entre les deux.
 Vérifié aussi hors tests : le graphe complet sur les six e-mails de démonstration sans aucune clé, la
 configuration Docker résolue par palier, et les exports (schéma OpenAPI, topologie du graphe)
 régénérés à l'identique.
+
+---
+
+## 2026-07-28 — Brancher le workflow pour de vrai : quatre défauts qu'aucune relecture n'avait vus
+
+### Le problème de départ
+
+Le workflow n8n était écrit, commité, documenté — et n'avait jamais été exécuté. L'entrée précédente
+le disait honnêtement. Le brancher à une vraie instance a suffi à faire tomber quatre défauts, dont
+trois sont invisibles à la lecture parce qu'ils ne se manifestent qu'à l'exécution.
+
+### Ce qui a été fait
+
+**Les quatre défauts du workflow.**
+
+1. **`item.index` n'existe pas.** Le nœud de préparation lisait les pièces jointes avec
+   `getBinaryDataBuffer(item.index ?? 0, clé)`. Un item n8n expose `.json`, `.binary` et
+   `.pairedItem`, mais **pas** `.index` : l'expression valait donc toujours `0`. Avec deux e-mails
+   dans un même cycle, le lead n°2 recevait les documents du lead n°1 — une proposition rédigée à
+   partir du mauvais dossier, sans le moindre message d'erreur. Remplacé par un compteur de boucle
+   explicite.
+2. **L'alerte n'était envoyée à personne.** Le nœud « Mettre en forme l'alerte » n'avait aucune
+   connexion sortante : le workflow mettait l'alerte en forme, puis la jetait. Ajout du nœud
+   « Alerter l'équipe (Slack) », qui poste sur le **même** webhook entrant que `notify.py` — donc
+   aucun identifiant n8n à créer.
+3. **La sonde de santé ne pouvait jamais s'exécuter.** Elle n'avait aucune entrée. Sa propre note
+   disait « branche d'erreur » — mais rien ne l'avait branchée. Reliée à la **sortie d'erreur** de
+   l'appel `POST /threads` (`onError: continueErrorOutput`) : si `/health` répond, ACA est debout et
+   c'est cet e-mail-là qui a échoué ; sinon, c'est ACA qui est tombé.
+4. **Un nœud parasite** (`evaluationTrigger` vide, déconnecté) accaparait le bouton « Execute » dans
+   l'instance Cloud. Supprimé.
+
+**Trois erreurs de configuration, toutes du même genre : silencieuses.**
+
+- `ACA_WEBHOOK_URL` valait `http://n8n:5678/webhook/aca-events` : l'hôte `n8n` ne se résout que dans
+  le réseau Docker, alors que l'instance visée tournait ailleurs. Une URL fausse se manifeste par un
+  404 silencieux, jamais par une erreur au démarrage.
+  **Correction d'une correction — l'erreur la plus instructive de la journée.** J'avais d'abord
+  « corrigé » le *chemin* en `/webhook/<webhookId>/<path>`, en me fiant au champ « Production URL »
+  remonté par l'API MCP de n8n, et j'avais réécrit `n8n/README.md` en conséquence. C'était faux : le
+  test en conditions réelles contre l'instance active a tranché sans ambiguïté —
+  `/webhook/aca-events` répond `200 {"message":"Workflow was started"}`, la forme avec `webhookId`
+  répond `404 … is not registered`. Le `webhookId` ne sert qu'à *engendrer* un chemin lorsque `path`
+  est vide. Le README d'origine avait donc raison, et j'ai passé plusieurs heures à faire confiance
+  à un champ d'API plutôt qu'à une requête. La leçon vaut d'être écrite : **une documentation ne se
+  corrige pas sur la foi d'un résumé d'outil, mais sur celle d'un appel qui répond.**
+- **n8n Cloud interdit `$env`.** Toute expression `$env.…` y lève « access to env vars denied », et
+  le réglage `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` posé par `docker-compose.yml` est un réglage
+  *auto-hébergé*, sans effet sur Cloud. Constaté empiriquement plutôt que supposé, via un nœud de
+  diagnostic temporaire : `$env` lève, `$vars` répond. La copie Cloud utilise désormais `$vars` ; le
+  fichier du dépôt garde `$env`, correct pour l'auto-hébergement, et `n8n/README.md` documente les
+  deux formes côte à côte.
+- **`run_solo.py --without` n'était pas répétable.** `--without scheduler --without poller` ne
+  retenait que la dernière occurrence : le planificateur a démarré alors qu'on le croyait exclu, et
+  a lancé « relance », qui écrit de vrais brouillons Gmail à de vrais prospects. Aucun dégât (le
+  seuil de 4 jours n'était pas atteint), mais par chance, pas par maîtrise. Corrigé
+  (`action="append"`), les noms exclus sont désormais validés eux aussi — une faute de frappe
+  refuse de démarrer au lieu d'ignorer silencieusement l'exclusion — et un `--dry-run` permet de
+  vérifier ce qui serait lancé sans rien lancer.
+
+### Ce que la vérification a trouvé, une fois encore
+
+- **Le contrat le plus important du webhook s'est vérifié en conditions réelles.** L'émission de
+  `analysis.paused` a échoué (n8n n'écoutait pas) et **`POST /threads` a tout de même renvoyé 200**.
+  C'est `webhook.emit()` qui tient sa promesse de ne jamais lever. S'il avait levé, `RETRY_POLICY`
+  aurait rejoué le nœud jusqu'à trois fois — et dans `action_node`, cela signifie une **double
+  écriture CRM**, exactement l'incident HubSpot du 2026-07-12. Ce contrat n'avait jusqu'ici que des
+  tests unitaires ; il a maintenant été éprouvé contre un vrai point d'entrée injoignable.
+- **`console.py` protège les `print()` contre l'encodage, pas contre un tuyau fermé.** Un `POST
+  /threads` a renvoyé 500 alors que le même appel passait juste après. Cause probable : le processus
+  API était orphelin, sa sortie standard fermée — et un `print()` vers un tuyau mort lève, à
+  l'intérieur de nœuds enveloppés par `RETRY_POLICY`. Même classe d'incident que le bug HubSpot,
+  mais par rupture de tuyau plutôt que par encodage. Noté, non corrigé.
+- **n8n Cloud ne peut pas joindre une API locale, par conception.** Ce n'est pas un réglage : Cloud
+  refuse les adresses de bouclage et privées au titre de la protection anti-SSRF. Aucune
+  modification du workflow n'y change quoi que ce soit ; il faut une URL publique (tunnel ou
+  hébergement) ou une instance n8n locale.
+
+### Ce qui reste volontairement non fait
+
+- **La moitié « réaction » a bel et bien tourné de bout en bout** (exécution n°8, `mode: webhook`,
+  2026-07-28) : une analyse réelle — vrai e-mail, vrais appels de modèles, enrichissement du domaine
+  de l'expéditeur — s'est arrêtée à la pause de validation, a émis `analysis.paused`, et n8n Cloud
+  l'a reçue, filtrée et mise en forme. L'alerte produite portait le bon `thread_id`
+  (`e2e-final-…`), l'entreprise déduite (« Teamwill Consulting ») et les deux drapeaux de risque
+  contractuel détectés par `risk_scan_node`. Seul l'envoi Slack final manque : il attend la création
+  de la variable `SLACK_WEBHOOK_URL` côté Cloud. Le nœud a d'ailleurs échoué **sans faire tomber le
+  workflow**, exactement comme prévu par son `onError: continueRegularOutput`.
+- **La moitié « ingestion » n'a pas été éprouvée** : le déclencheur Gmail exige un consentement
+  OAuth via navigateur, et n8n Cloud ne peut pas joindre l'API locale. La correction n°1 — la plus
+  lourde de conséquences — **reste donc vérifiée par lecture seule**, faute de binaire dans les
+  données épinglées.
+- **Le déclencheur Gmail n'a pas de justificatif en local** : son OAuth exige un navigateur.
+- **`SLACK_SIGNING_SECRET` n'est pas défini**, donc les boutons « Valider »/« Rejeter » répondent
+  503 — échec fermé, conforme à la conception, mais la boucle d'approbation Slack reste non testée.
+- **Aucun hébergement de l'API**, qui est pourtant la seule vraie solution pour n8n Cloud.
+
+---
+
+## 2026-07-29 — La moitié « validation » passe en production, et la suite de tests avoue qu'elle n'était pas hors ligne
+
+### Le point de départ
+
+Relire le workflow n8n **contre la définition réelle des nœuds** plutôt que de mémoire. Les cinq
+nœuds de validation écrits la veille n'avaient jamais quitté le dépôt : l'instance Cloud tournait
+toujours sur la version à 8 nœuds. La relecture, puis la mise en production, ont fait apparaître
+trois défauts — dont un qui n'a rien à voir avec n8n et qui est de loin le plus gênant.
+
+### Ce qui a été corrigé
+
+1. **Le lien d'approbation pointait vers la mauvaise URL.** L'e-mail transportait
+   `$execution.resumeUrl` alors que le nœud *Wait* est en mode `form`. Ce sont deux chemins
+   distincts (`/webhook-waiting/` contre `/form-waiting/`), et la définition du nœud ne rattache
+   `resumeFormUrl` qu'à `resume: ["form"]`. Le lien envoyé était donc mort, ou reprenait
+   l'exécution **sans réponses de formulaire** — auquel cas `Décision` est vide et l'aiguillage
+   sûr retombe sur « Rejeter ». Autrement dit : toute la boucle d'approbation était cassée, et le
+   défaut par sécurité aurait masqué la panne en rejetant silencieusement les prospects.
+2. **`formSubmittedText` était placé sous `options`, où ce n'est pas une clé du schéma** — donc
+   ignoré sans le moindre avertissement. Le vrai chemin est
+   `options.respondWithOptions.values.formSubmittedText`.
+3. **Le nœud « Mettre en forme l'alerte » de Cloud n'exposait ni `draft` ni `besoin`**, que le
+   formulaire d'approbation lit. Poussé tel quel, le formulaire aurait affiché un brouillon vide.
+
+Aucun des trois ne se voit à la lecture du JSON : il faut comparer aux définitions des nœuds.
+
+### Ce que la vérification a trouvé, et qui ne concernait pas n8n
+
+**La suite de tests n'était pas hors ligne.** En cherchant *pourquoi* le journal n8n comptait une
+rafale de dix exécutions ce matin-là, l'en-tête `user-agent: python-requests` et l'horodatage ont
+désigné le coupable : ma propre exécution de `pytest`. `tests/conftest.py` vide consciencieusement
+tous les canaux sortants — Slack, e-mail de notification, support, RH, HubSpot, Stripe — mais
+**`ACA_WEBHOOK_URL` avait été oublié** lors de l'ajout du §16.1.2. Chaque exécution locale de la
+suite expédiait donc de vrais événements `analysis.paused`, portant de faux prospects
+(« jean@entreprise.fr »), vers l'instance n8n de production.
+
+C'est doublement instructif. D'abord parce que « la suite est entièrement hors ligne » est affirmé
+noir sur blanc dans `CLAUDE.md`, dans la feuille de route **et dans le commentaire d'en-tête du
+fichier de CI** : une garantie répétée quatre fois, fausse depuis l'ajout des webhooks, et que
+personne ne pouvait démentir puisque rien ne la mesurait. Ensuite parce que la gravité venait
+d'augmenter à l'instant même : tant que le workflow s'arrêtait à l'alerte, ces faux événements
+étaient inoffensifs ; depuis qu'il porte la moitié « validation », la même exécution de `pytest`
+enverrait une rafale d'e-mails d'approbation et laisserait autant d'exécutions en attente
+**pour toujours**.
+
+Correction : deux lignes dans `_ENV_OVERRIDES`. La vérification vaut mieux que la correction —
+après coup, la suite passe toujours (352 tests) et crée **zéro** nouvelle exécution n8n, là où elle
+en créait dix. Elle tourne au passage en 14 s au lieu de 34 s : les vingt secondes manquantes
+étaient des allers-retours réseau réels vers n8n Cloud, ce qui est en soi la preuve du diagnostic.
+
+### État de l'instance Cloud
+
+13 nœuds, publiés et actifs. L'identifiant Gmail existe et est rattaché ; le déclencheur Gmail
+**reste volontairement désactivé** — l'activer lancerait une scrutation toutes les minutes vers une
+API que Cloud ne peut pas joindre, produisant un échec par minute.
+
+### Ce qui reste non fait
+
+- **Les variables Cloud** (`ACA_API_URL`, `ACA_API_KEY`, `NOTIFY_EMAIL`, `SLACK_WEBHOOK_URL`) — à
+  créer dans Settings → Variables ; aucun outil de l'API MCP ne permet de les poser.
+- **Le tunnel ou l'hébergement public**, sans quoi n8n Cloud ne joindra jamais l'API locale
+  (protection anti-SSRF, cf. entrée du 2026-07-28).
+- **Le fichier du dépôt garde `$env`**, correct en auto-hébergement ; Cloud utilise `$vars`. Six
+  nœuds sont désormais concernés, contre quatre avant la moitié « validation » — le tableau de
+  correspondance de `n8n/README.md` a été complété.
+
+---
+
+## 2026-07-30 — Marque blanche, animations, et un journal qui sait qui a fait quoi
+
+Demande en trois volets : embellir l'interface avec beaucoup d'animations, rendre **tout**
+paramétrable (logo, couleurs) pour l'aligner sur le cahier des charges du client, et créer un profil
+d'audit du rôle `operator` pour qu'un administrateur voie qui a fait quel changement, depuis quel
+poste, quand.
+
+### Ce que l'inventaire a révélé avant d'écrire une ligne
+
+Le troisième volet supposait qu'il existait déjà quelque chose à compléter. Il n'existait presque
+rien. `audit_log.py` — le « journal d'audit » du projet depuis §12 — ne consigne **qu'un seul type
+d'événement** : la validation d'un lead. Ni les connexions, ni les échecs de connexion, ni les
+rejets, ni les changements de réglages, ni la curation de la base de connaissances, ni la création
+d'un compte administrateur ne laissaient de trace. Le rôle `operator` existait depuis §15.1.6 ; rien
+ne permettait de dire ce qu'une personne portant ce rôle avait fait de sa semaine.
+
+Le cas le plus parlant est le verrou anti-force brute. Depuis §14, `auth_lockout.py` bloque un bot
+qui essaie des mots de passe. Il le faisait **en silence** : aucune trace de la tentative, donc
+aucune possibilité de détecter l'attaque, de la dater ou de la rattacher à une adresse. Un dispositif
+de sécurité qui ne laisse pas de trace protège l'instant et n'apprend rien.
+
+Quatrième constat, celui du volet « paramétrable » : l'apparence n'était pas un paramètre mais un
+fichier du dépôt. Livrer ACA à une entreprise imposant sa charte imposait de **modifier le produit**
+pour ce client.
+
+### Le défaut le plus instructif : une entrée d'audit perdue en silence
+
+La première exécution de bout en bout dans l'interface (mode démonstration, graphe réel) s'est bien
+déroulée : classification, superviseur, quatre agents, auto-critique, pause de validation. Puis le
+journal affichait **zéro ligne**. L'action « analyse lancée » avait disparu.
+
+Cause : `ui.py` lit `st.context.ip_address`, dont rien ne garantit que ce soit une chaîne de
+caractères. La valeur est descendue jusqu'à SQLite, qui a refusé de la lier
+(`Error binding parameter 13`), et `log()` a attrapé l'exception — au titre de son contrat
+« ne lève jamais », écrit précisément pour qu'un journal indisponible ne fasse jamais échouer une
+validation CRM légitime. Le mécanisme de protection a donc parfaitement fonctionné, et c'est
+exactement lui qui a masqué la perte : la ligne d'audit s'est volatilisée en laissant une seule ligne
+dans la console du serveur.
+
+**Un journal de sécurité qu'on croit complet et qui ne l'est pas est plus dangereux qu'un journal
+absent** : on s'appuie dessus. Corrigé aux deux bouts — conversion explicite dans `ui.py`,
+normalisation systématique dans le magasin (défense au bon endroit : les appelants sont nombreux et
+le resteront) — et verrouillé par un test de régression. Ce défaut ne se voyait *que* dans une
+exécution réelle : ni la relecture, ni les tests unitaires écrits jusque-là ne pouvaient le montrer.
+
+En corrigeant, un second problème de qualité de données est apparu : la colonne « Adresse IP »
+acceptait n'importe quel texte. Derrière un reverse proxy, cette valeur vient d'un en-tête
+`X-Forwarded-For`, donc du client, donc falsifiable. Elle est désormais validée (`ipaddress`, et
+seule la première entrée d'une liste « client, proxy1, proxy2 » est retenue) et le user-agent est
+plafonné : ne jamais laisser un tiers décider de la taille de ce qu'on stocke.
+
+### Deux autres défauts trouvés par les tests
+
+`log()` **pouvait lever**, en violation de son contrat : la sérialisation de `details` avait lieu hors
+du `try`. Et `merge_config_toml` n'était pas idempotent — réappliquer la marque laissait une section
+`[theme]` vide en tête de fichier. Sur ce dernier point, la première version du test était elle-même
+fausse : elle comptait les occurrences du texte « [theme] », qui apparaît aussi dans le commentaire
+d'en-tête généré. Comparer le fichier entier est le bon contrôle, et c'est cette comparaison qui a
+révélé le vrai défaut derrière la fausse alerte.
+
+### Choix assumés
+
+**De la CSS, contre la doctrine par défaut du projet.** La skill Streamlit prescrit « jamais de CSS,
+tout dans `config.toml` » — juste, pour un thème figé. Un thème qui change à l'exécution, par tenant,
+ne peut pas être un fichier lu au démarrage du serveur. D'où deux couches assumées : la CSS vivante
+(effet immédiat, porte les animations) et le thème natif `config.toml` écrit sur action explicite,
+seul à atteindre l'intérieur des composants React de Streamlit. Le prix est énoncé dans le code : les
+sélecteurs `data-testid` ne sont pas contractuels, donc une montée de version peut rendre la page
+moins jolie — jamais cassée, aucune règle ne conditionne une fonctionnalité.
+
+**« Depuis quel poste », sans surpromesse.** Une application web ne peut pas identifier une machine.
+Sont stockés : l'IP vue par le serveur, le user-agent (déclaratif, donc falsifiable), une empreinte
+qui regroupe les actions d'un même poste sans déposer de cookie de traçage, et le nom de la machine
+serveur — qui, en déploiement « Solo », **est** le poste du commercial. Vérifié en pratique : la
+colonne « Serveur » affiche bien `ISMAIL`. Prétendre à une identification matérielle dans un journal
+d'audit serait pire que de ne rien écrire.
+
+**L'accessibilité avertit, elle ne refuse pas.** Un client peut demander « notre jaune d'entreprise »
+en couleur principale. Le panneau calcule les contrastes WCAG et le signale — puis applique la
+couleur. C'est sa charte ; un produit qui interdit la charte graphique de son client se fait
+remplacer. En revanche, le texte des boutons est choisi automatiquement (noir ou blanc selon la
+luminance) : livrer des boutons illisibles serait notre défaut, pas son mauvais goût.
+
+### Vérifications réellement effectuées
+
+- Suite complète : **451 tests** (352 avant), hors ligne, ~19 s.
+- Rendu headless de l'application entière (`AppTest`) : aucune exception, 5 onglets, 11 sélecteurs de
+  couleur, panneau Apparence et vérification d'intégrité présents.
+- Analyse de bout en bout puis rejet via l'interface : les deux actions apparaissent au journal avec
+  poste, serveur et issue ; chaîne d'empreintes intacte ; résumé par personne correct.
+- Changement de charte appliqué depuis le magasin de configuration, puis relu dans le HTML rendu :
+  couleur principale, accent, arrondi, police Poppins, densité compacte, nom et pied de page du
+  client, animations désactivées, `prefers-reduced-motion` présent. Tout concorde.
+
+### Ce qui reste non fait
+
+Le journal n'a jamais tourné sur un vrai déploiement multi-poste (aucun n'existe : l'IP observée est
+celle de la boucle locale). Aucune alerte en temps réel sur incident : les échecs de connexion sont
+consignés et visibles, mais rien ne prévient personne. SSO/SCIM et domaine personnalisé — attentes
+classiques d'un achat grand compte — ne sont pas faits et sont documentés comme recommandations dans
+`docs/AMELIORATIONS_SUGGEREES.md`.
+
+---
+
+## 2026-07-30 (suite) — Toutes les suggestions du document, un fichier de 1700 lignes découpé, et un second facteur
+
+Demande : mettre en œuvre les suggestions de `docs/AMELIORATIONS_SUGGEREES.md` (le document produit
+la veille), à l'exception de l'hébergement et de l'alerte Slack — les deux seules à exiger une
+infrastructure qui n'existe pas ici — avec une passe de design délibérée pour que l'interface reste
+lisible à mesure que les nouvelles surfaces s'ajoutent.
+
+### Ce que l'inventaire a révélé avant d'écrire une ligne
+
+Deux choses existaient déjà, à moitié. La première : les constantes `SOURCE_POLLER`/`SOURCE_CLI`
+vivaient dans `activity_log.py` depuis la veille, et personne ne les utilisait — le document de
+suggestions le relève lui-même, en les qualifiant de « raccordement trivial ». La seconde, plus
+subtile : `activity_log.purge_older_than()` savait déjà purger les événements sensibles à une
+échéance différente du bruit courant (`sensitive_days`), mais `retention.py` — le seul appelant réel
+en production — ne lui passait jamais ce paramètre. La fonctionnalité existait ; en pratique, elle
+ne se déclenchait jamais. Trouvé en écrivant les tests de cette passe, pas en relisant le code —
+exactement le genre d'écart entre « construit » et « branché » que ce projet trouve à chaque audit
+depuis le §16.0.
+
+Troisième constat, plus lourd : aucune des nouvelles surfaces demandées — la frise d'un lead, le
+bouton d'export PDF, l'inscription TOTP — n'avait d'endroit sensé où vivre dans l'ancien `ui.py`, un
+fichier unique qui avait grossi jusqu'à ~1700 lignes en portant à la fois la logique de session, le
+formulaire d'e-mail, le tableau de bord, l'historique, le journal d'activité et les réglages. La
+découpe en pages `st.navigation` — routeur fin (`ui.py`) + aides partagées (`aca/ui/shared.py`) +
+cinq pages (`app_pages/*.py`) — n'était donc pas une fin en soi : c'était la condition pour livrer
+le reste sans aggraver le fichier.
+
+### La restructuration : la partie la plus risquée, vérifiée à chaque étape
+
+Extraire le gate d'authentification en premier, avec une exécution `AppTest` (mot de passe correct
+puis incorrect) avant de toucher au reste. Puis les aides d'interaction avec le graphe
+(`advance_graph`, `sync_result`), vérifiées avec une analyse de démonstration complète bout en bout.
+Puis, seulement à ce stade, la découpe effective des cinq onglets en pages — en commençant par les
+plus simples (tableau de bord, historique) pour valider le schéma avant d'attaquer le plus gros et
+le plus risqué, la page « Nouvel e-mail » (analyse, clarification, validation, rejet). Chaque étape
+revérifiée avant la suivante, jamais l'inverse.
+
+Deux défauts trouvés précisément par cette prudence :
+
+1. **`st.navigation` n'exécute que la page sélectionnée.** Sous l'ancien `st.tabs()`, le corps de
+   *tous* les onglets tournait à chaque interaction — un résultat chargé depuis la barre latérale
+   apparaissait donc quel que soit l'onglet affiché. Une fois la découpe faite, cliquer « Ouvrir »
+   sur une analyse en file ne montrait plus rien tant qu'on ne cliquait pas soi-même sur « Nouvel
+   e-mail ». Corrigé par un `st.switch_page()` explicite après chaque chargement depuis la barre
+   latérale.
+
+2. **L'avertissement de session testait le mauvais instant.** Le premier jet vérifiait le temps
+   restant *après* avoir appelé `session.touch()` — qui repousse systématiquement le compteur
+   d'inactivité à sa valeur maximale. L'avertissement n'aurait donc jamais pu se déclencher en usage
+   réel. Un test écrit avant de supposer l'ordre correct l'a révélé immédiatement.
+
+Une découverte propre à l'outillage, sans rapport avec le code du projet, mais qui vaut d'être
+consignée : `streamlit.testing.v1` classe **tout** `st.expander(..., icon=...)` sous son type interne
+`Status` plutôt que `Expander` — un détail d'implémentation de cette version de Streamlit. `at.expander`
+n'en trouve donc aucun dans toute l'application (pas seulement les nouveaux composants) ; `at.status`
+est l'accessoire à utiliser. Sans ce constat, plusieurs vérifications auraient semblé échouer alors
+que l'interface elle-même fonctionnait parfaitement.
+
+### Vérifications réellement effectuées
+
+- Suite complète : **550 tests** (451 avant), hors ligne, ~19 s — les deux derniers ajoutés après
+  coup, quand le secret d'inscription TOTP est devenu un vrai QR code scannable (`segno`, pur
+  Python, sans dépendance) plutôt qu'un texte `otpauth://` brut, sur demande de suivi.
+- Balayage headless sur les trois rôles (`admin` avec inscription TOTP, `operator`, `viewer`) et
+  chacune des pages qu'ils peuvent atteindre : aucune exception.
+- Analyse de démonstration complète (classification → extraction → agents → proposition) puis
+  validation et rejet, sur la page restructurée : comportement identique à l'ancien fichier unique.
+- Boucle TOTP de bout en bout : mot de passe correct → inscription forcée (secret généré, code
+  erroné rejeté, code correct accepté et persisté) → deuxième connexion passant directement par la
+  vérification, sans réinscription.
+- `code_at()` vérifié contre les vecteurs de test officiels du RFC 4226 (Appendix D), pas seulement
+  contre les attentes du projet lui-même.
+- Export PDF : construction, réouverture avec `fitz`, extraction du texte — nom de l'entreprise,
+  contact, contenu du brouillon et mention de relecture humaine tous réellement présents dans le
+  document rendu.
+
+### Ce qui reste non fait, par choix explicite
+
+Hébergement et alerte Slack : exclus par la demande initiale, tous deux exigeant une infrastructure
+réelle absente ici. Du §5 du document de suggestions : raccourcis clavier (nécessite
+`st.components.v2`), traitement par lot (le document appelle lui-même à la prudence — diluerait la
+garantie de validation humaine), vue mobile (aucun appareil disponible pour la tester), recherche
+globale inter-pages — reportés sans avoir été commencés, faute de rapport effort/valeur suffisant
+dans le temps de cette passe.
+
+## 2026-07-31 — Trois demandes de suivi sur la découpe fraîchement livrée : QR code, style de la barre de navigation, bascule FR/EN
+
+Pas un nouvel item de la feuille de route : trois retours consécutifs sur ce qui venait d'être livré
+la veille (§18). D'abord une question de compréhension sur l'écran d'inscription TOTP, puis « fais-en
+un QR code » (le secret s'affichait jusque-là en texte brut `otpauth://`), puis, sur une capture
+d'écran de la barre de navigation et du bandeau de sécurité admin : « rends cette barre plus visible
+et animée », suivi de « centre les onglets et ajoute une option pour switcher entre français et
+anglais ».
+
+### QR code d'inscription
+
+`_totp_qr_png(uri)` (`aca/ui/shared.py`) encode l'URI `otpauth://` en PNG via `segno` — bibliothèque
+pure Python, zéro dépendance transitive, retenue justement pour éviter de dépendre de Pillow comme
+dépendance transitive non déclarée (le même écueil déjà repéré une fois pour `cryptography` via
+`google-auth`). Le rendu de l'image reste dans la couche UI, volontairement hors de `totp.py`, dont
+tout l'intérêt est de rester pur/stdlib pour le calcul cryptographique lui-même.
+
+### Barre de navigation : centrée, visible, animée — puis un vrai bug trouvé après coup
+
+Les vrais noms de classe internes de Streamlit (`stTopNavLinkContainer`, `stTopNavLink`) ne sont
+documentés nulle part — trouvés en grep-ant directement le bundle JS compilé plutôt qu'en devinant.
+Une fois ces sélecteurs en main : carte à dégradé autour de la rangée de navigation, centrée
+(`margin-inline: auto; width: max-content` sur le même sélecteur), effet de survol par lien, et une
+entrée animée à l'ouverture (contrôlée par le niveau d'animation existant de `branding.py`, donc
+toujours neutralisée si le client a désactivé les animations ou si le système a demandé moins de
+mouvement). Le bandeau de sécurité admin reçoit en plus un halo pulsé lent — seulement aux niveaux
+animés, pour ne pas laisser un signal d'alerte qui bouge tout seul chez un client sans animations.
+Les anciennes règles `.stTabs [data-baseweb=…]` étaient mortes (confirmé par grep : plus aucun appel
+à `st.tabs()` depuis la découpe en pages) — supprimées plutôt que laissées à côté des nouvelles.
+
+**Ce premier essai ne fonctionnait en fait pas.** L'utilisateur a signalé, capture d'écran à
+l'appui, que la barre restait ni visible ni centrée. Plutôt que de retoucher le CSS à l'aveugle une
+deuxième fois, un vrai navigateur a été monté pour l'occasion (Playwright + Chromium, installés
+dans le venv le temps de la vérification) contre une instance Streamlit isolée (compte `operator`
+jetable, bases de données temporaires) et le DOM **réellement rendu** a été inspecté par script
+(`getComputedStyle`, `getBoundingClientRect`, chaîne des ancêtres). Résultat : `*:has(> [data-
+testid="stTopNavLinkContainer"])` cible bien le bon testid, mais capture son parent *direct* — un
+`div` privé à Streamlit qui n'enveloppe qu'**un seul** lien à la fois, jamais la rangée qui les
+aligne tous. Le fond, la bordure et le `margin-inline: auto` de centrage tombaient donc chacun sur
+quatre petites boîtes séparées, quasi invisibles côte à côte — exactement ce que l'utilisateur
+avait sous les yeux. Le vrai conteneur flexbox, confirmé par l'inspection, vient de `rc-overflow`,
+la bibliothèque tierce de liste que Streamlit utilise pour cette rangée — `.rc-overflow`/
+`.rc-overflow-item` sont des classes stables (posées par la bibliothèque elle-même, pas hachées par
+Streamlit à chaque version), une cible plus fiable que deviner la profondeur exacte de `:has()`.
+Trouvaille annexe pendant la même inspection : l'animation « échelonnée » des liens ne l'était
+jamais réellement — `:nth-child(N)` appliqué à un élément qui est toujours l'unique enfant de son
+parent vaut toujours `:nth-child(1)`, donc les quatre liens recevaient tous le même délai
+d'entrée. Les deux corrigés ensemble en ciblant `.rc-overflow`/`.rc-overflow-item`, revérifiés en
+direct (captures d'écran avant/après, `justify-content`/fond/ombre lus sur l'élément réel) : la
+barre est maintenant une carte unique, visible, et les quatre onglets sont centrés dedans.
+
+### Bascule de langue FR/EN
+
+Avant d'écrire quoi que ce soit, question posée à l'utilisateur : traduire tout le projet (des
+centaines de chaînes sur ~15 fichiers) ou seulement le chrome principal ? Réponse : le chrome
+principal seulement — navigation, en-têtes/légendes de page, boutons/étiquettes premiers, messages
+clés. Les écrans de curation admin (base de connaissances, comptes, jetons de marque), le détail du
+journal d'activité, l'export PDF et les logs console restent en français, par choix assumé et non
+par oubli.
+
+Un dictionnaire fait main (`aca/core/i18n.py`), pas une bibliothèque i18n (Babel, gettext) : la
+surface traduite tient dans quelques dizaines d'entrées statiques, sans pluriel ni date localisée —
+une dépendance entière pour ça aurait reproduit exactement le travers que ce projet évite ailleurs
+(`totp.py`, `slack_verify.py`, stdlib par principe). `translate(key, lang, **kwargs)` ne lève jamais :
+une clé inconnue renvoie la clé elle-même (un bug visible à l'écran, jamais une page qui plante), une
+langue inconnue replie sur le français. La lecture/écriture de la langue courante
+(`st.session_state["_lang"]`, portée à la session, pas persistée par utilisateur ni par tenant) vit
+dans `aca/ui/shared.py` (`current_language()`/`t()`/`language_switcher()`), pas dans `i18n.py`
+lui-même — même posture que `session.py`/`branding.py` : un module pur, testable hors ligne, sans
+import Streamlit.
+
+Un vrai bug trouvé par la vérification, avant qu'il ne devienne visible en usage réel : le sélecteur
+de langue avait d'abord été placé dans la barre latérale de `ui.py` *après* la porte
+`check_auth()`/`st.stop()` — qui arrête le script avant d'atteindre le reste si la personne n'est pas
+connectée. Résultat : le sélecteur ne s'affichait jamais sur l'écran de connexion, exactement l'écran
+où une personne anglophone en aurait le plus besoin. Corrigé en déplaçant le bloc avant
+`prod_check.enforce()`.
+
+### Vérifications
+
+Suite complète : 550 → **561 tests** (`tests/test_i18n.py`, 11 tests — `translate()` ne lève jamais
+sur une clé/langue inconnue, chaque clé déclarée porte réellement les deux langues non vides,
+formatage `{placeholder}` correct dans les deux langues, et un échantillon de clés qui diffèrent
+réellement entre français et anglais, pour qu'une future clé copiée-collée à l'identique dans les
+deux langues ne neutralise pas silencieusement le sélecteur). Balayage `AppTest` en direct : connexion
+d'un compte admin fraîchement créé (inscription TOTP forcée complétée avec le vrai code calculé à
+partir du secret généré), bascule vers l'anglais en cours de session, puis passage sur les cinq
+pages (`1_inbox.py` à `5_settings.py`) — aucune exception, et la légende propre à chaque page
+(`dashboard.caption`, `history.caption`, `activity.caption`) vérifiée comme réellement traduite dans
+la langue active, pas seulement l'absence d'erreur.

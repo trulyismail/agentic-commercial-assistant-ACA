@@ -33,9 +33,10 @@ import argparse
 import logging
 import os
 import time
+from datetime import datetime
 from dotenv import load_dotenv
 
-from aca.storage import schedule_store
+from aca.storage import activity_log, schedule_store
 
 load_dotenv()
 
@@ -88,6 +89,40 @@ def _job_billing() -> None:
     billing.report_usage(days=30)
 
 
+ARCHIVE_DIR = os.getenv("ACA_ARCHIVE_DIR", "data/archives")
+
+
+def _last_completed_month(now: datetime = None) -> tuple:
+    """
+    Dernier mois civil ENTIÈREMENT écoulé par rapport à `now` (injectable, donc testable sans
+    horloge) — jamais le mois en cours, qui n'a pas fini de recevoir des lignes.
+    """
+    now = now or datetime.now()
+    return (now.year, now.month - 1) if now.month > 1 else (now.year - 1, 12)
+
+
+def _job_archive() -> None:
+    """
+    Archive mensuelle signée du journal d'activité (§18) — cf. `activity_log.archive_period()`.
+
+    « Mensuelle » au sens métier, pas au sens de la cadence du planificateur : `default_hours`
+    ci-dessous ne fait que régler la fréquence à laquelle on VÉRIFIE qu'une archive manque ;
+    `archive_period()` est idempotent (une archive déjà présente n'est jamais réécrite), donc une
+    vérification en trop — un `--force`, un redémarrage le même jour — n'écrit rien de plus.
+    """
+    from aca.storage import activity_log
+
+    year, month = _last_completed_month()
+    result = activity_log.archive_period(ARCHIVE_DIR, year, month)
+    if result.get("skipped"):
+        logger.info("Archive %04d-%02d déjà présente (%s).", year, month, result["path"])
+    else:
+        logger.info(
+            "Archive %04d-%02d écrite : %s (%s ligne(s)).",
+            year, month, result["path"], result["lines"],
+        )
+
+
 # Table déclarative des travaux — ajouter un travail périodique = une entrée ici, rien d'autre
 # (même esprit que `ROUTING_DESTINATIONS` dans app.py). `env` permet de régler l'intervalle sans
 # toucher au code ; `0` ou une valeur négative **désactive** le travail (dégradation gracieuse
@@ -116,6 +151,13 @@ JOBS = {
         "env": "ACA_SCHEDULE_BILLING_HOURS",
         "default_hours": 720,  # ~mensuel
         "label": "Remontée de consommation",
+    },
+    "archive": {
+        "fn": _job_archive,
+        "env": "ACA_SCHEDULE_ARCHIVE_HOURS",
+        "default_hours": 720,  # ~mensuel — le mois archivé est déterminé par _last_completed_month,
+                                # pas par cette cadence de vérification
+        "label": "Archive mensuelle du journal d'activité",
     },
 }
 
@@ -175,10 +217,23 @@ def run_job(job: str, now: float = None) -> bool:
         spec["fn"]()
         schedule_store.record_run(job, now, status="ok")
         logger.info("Travail « %s » terminé.", job)
+        # §18 — trace machine du planificateur lui-même : distincte de ce que chaque travail
+        # journalise en son propre nom (`ACTION_DATA_PURGED`/`ACTION_FOLLOWUP_DRAFTED`) — celle-ci
+        # répond à « le planificateur a-t-il seulement tourné », visible même pour les travaux qui
+        # n'ont rien à journaliser eux-mêmes (maintenance, billing).
+        activity_log.log(
+            activity_log.ACTION_JOB_RAN, actor="(scheduler)", target_type="job", target_id=job,
+            source=activity_log.SOURCE_CLI, details={"label": spec["label"]},
+        )
         return True
     except Exception as e:
         schedule_store.record_run(job, now, status="error")
         logger.exception("Échec du travail « %s » : %s", job, e)
+        activity_log.log(
+            activity_log.ACTION_JOB_RAN, actor="(scheduler)", target_type="job", target_id=job,
+            source=activity_log.SOURCE_CLI, outcome=activity_log.OUTCOME_FAILURE,
+            details={"label": spec["label"], "erreur": str(e)},
+        )
         return False
 
 

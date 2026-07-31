@@ -104,27 +104,45 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Lance le palier Solo d'ACA (API + Streamlit + poller + planificateur), sans n8n.",
     )
-    parser.add_argument("--only", help="ne lancer que ces services (séparés par des virgules)")
-    parser.add_argument("--without", help="lancer tout sauf ces services (séparés par des virgules)")
+    # `action="append"` : sans lui, `--without scheduler --without poller` ne retenait QUE la
+    # dernière occurrence, et le service prétendument exclu démarrait quand même — en silence.
+    # Constaté en vrai le 2026-07-28 : le planificateur a démarré ainsi et lancé « relance », qui
+    # écrit de vrais brouillons Gmail à de vrais prospects. Un drapeau qui se lit comme répétable
+    # doit l'être, ou refuser de l'être bruyamment.
+    parser.add_argument("--only", action="append", default=[],
+                        help="ne lancer que ces services (virgules et/ou option répétée)")
+    parser.add_argument("--without", action="append", default=[],
+                        help="lancer tout sauf ces services (virgules et/ou option répétée)")
     parser.add_argument("--api-host", default="127.0.0.1",
                         help="interface d'écoute de l'API (défaut : 127.0.0.1, boucle locale — "
                              "cf. docs/DEPLOYMENT_HARDENING.md avant d'exposer publiquement)")
     parser.add_argument("--api-port", type=int, default=8000)
     parser.add_argument("--ui-port", type=int, default=8501)
     parser.add_argument("--no-color", action="store_true", help="désactive les couleurs ANSI")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="afficher les services qui seraient lancés, sans rien lancer")
     args = parser.parse_args()
+
+    def _split(values: list[str]) -> list[str]:
+        """Aplatit `["api,ui", "poller"]` en `["api", "ui", "poller"]` — virgules ET répétitions."""
+        return [s.strip() for value in values for s in value.split(",") if s.strip()]
 
     services = _services(args)
     selected = list(services)
-    if args.only:
-        selected = [s.strip() for s in args.only.split(",") if s.strip()]
-    if args.without:
-        excluded = {s.strip() for s in args.without.split(",") if s.strip()}
+    only = _split(args.only)
+    excluded = _split(args.without)
+    if only:
+        selected = only
+    if excluded:
         selected = [s for s in selected if s not in excluded]
 
-    unknown = [s for s in selected if s not in services]
+    # Les noms exclus sont validés au même titre que les noms retenus : sans cela, une faute de
+    # frappe (`--without schedular`) n'excluait rien du tout et démarrait le service que l'on
+    # croyait avoir écarté — échec silencieux, le pire des deux mondes pour un service qui écrit.
+    unknown = [s for s in (*selected, *excluded) if s not in services]
     if unknown:
-        print(f"Service(s) inconnu(s) : {', '.join(unknown)}. Connus : {', '.join(services)}.")
+        print(f"Service(s) inconnu(s) : {', '.join(sorted(set(unknown)))}. "
+              f"Connus : {', '.join(services)}.")
         return 2
     if not selected:
         print("Aucun service à lancer.")
@@ -142,6 +160,14 @@ def main() -> int:
             selected = [s for s in selected if s not in skipped]
         if not selected:
             return 2
+
+    # Vérifier CE QUI serait lancé sans rien lancer. `poller` et `scheduler` agissent sur le monde
+    # réel (brouillons Gmail envoyés à de vrais prospects, purge RGPD) : pouvoir confirmer la
+    # sélection avant de la subir n'est pas un luxe. C'est précisément ce qui manquait le
+    # 2026-07-28, quand `--without` a silencieusement gardé le planificateur.
+    if args.dry_run:
+        print(f"[simulation] Services qui seraient lancés : {', '.join(selected)}")
+        return 0
 
     env = dict(os.environ)
     # La sortie des enfants est redirigée dans un tuyau : sous Windows elle repasserait en cp1252 et

@@ -121,6 +121,28 @@ def record_edit(thread_id: str, original: str, edited: str, org_id: str = None) 
 
 
 @with_sqlite_retry
+def get_draft_edit(thread_id: str, org_id: str = None) -> dict:
+    """
+    Dernière paire (original, édité) enregistrée pour ce thread, ou `None` — §18, recap #5/§4 item 2.
+
+    `record_edit()` n'a délibérément pas de contrainte d'unicité sur `thread_id` ; cette fonction lit
+    donc la ligne la plus récente (`rowid` décroissant), celle qui correspond à la validation
+    effectivement envoyée. Alimente `ui_kit.diff()` dans la frise chronologique d'un lead : le §17 ne
+    consignait que des longueurs de caractères (« 340 → 412 »), qui ne disent rien de CE QUI a
+    changé — le texte complet vivait déjà dans cette table, il ne manquait que la lecture.
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT original, edited, edited_at FROM draft_edits "
+            "WHERE thread_id = ? AND org_id = ? ORDER BY rowid DESC LIMIT 1",
+            (thread_id, org_id or current_org_id()),
+        ).fetchone()
+    if row is None:
+        return None
+    return {"original": row[0], "edited": row[1], "edited_at": row[2]}
+
+
+@with_sqlite_retry
 def record_tokens(thread_id: str, input_tokens: int, output_tokens: int, org_id: str = None) -> None:
     """
     Enregistre la consommation de tokens Groq d'une analyse complète (tous les appels LLM du

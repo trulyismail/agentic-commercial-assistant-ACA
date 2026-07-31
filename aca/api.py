@@ -45,7 +45,7 @@ from aca.core import app as aca_graph, prod_check
 from aca.core.slack_verify import verify_slack_signature
 from aca.core.tenant import current_org_id
 from aca.integrations import webhook
-from aca.storage import analytics_store, audit_log, config_store, queue_store
+from aca.storage import activity_log, analytics_store, audit_log, config_store, queue_store
 
 # §15.1.5 : en `ACA_ENV=production`, refuse de démarrer si une protection requise manque (clé API,
 # limite de débit, /metrics ouvert…). En développement — le défaut — no-op total.
@@ -466,7 +466,8 @@ def clarify_thread(thread_id: str, payload: ClarificationIn) -> dict:
 
 
 def _do_validate(thread_id: str, validated_by: Optional[str] = None,
-                 edited_draft: Optional[str] = None) -> dict:
+                 edited_draft: Optional[str] = None,
+                 source: str = activity_log.SOURCE_API) -> dict:
     """
     Logique partagée de validation — le SEUL chemin qui déclenche l'écriture CRM (`action_node`).
     Appelé par `POST /threads/{id}/valider` (dashboard/n8n) ET par `POST /slack/interactions`
@@ -489,6 +490,19 @@ def _do_validate(thread_id: str, validated_by: Optional[str] = None,
         thread_id, validated_by, state_snapshot["classification"], state_snapshot["sender"],
     )
     analytics_store.record_validation(thread_id)
+    # §17 — même validation dans le journal d'activité, avec `source` distinguant l'API du clic
+    # Slack. Sans ça, une validation déclenchée depuis Slack ou n8n restait invisible du journal
+    # que l'administrateur consulte dans Streamlit, alors qu'elle écrit tout autant dans le CRM.
+    # Aucun contexte de poste ici : un client HTTP n'a ni navigateur ni adresse à consigner
+    # honnêtement (celle du proxy n'apprendrait rien), et inventer une empreinte machine dans un
+    # journal d'audit serait pire que de laisser la colonne vide.
+    activity_log.log(
+        activity_log.ACTION_LEAD_VALIDATED, actor=validated_by, source=source,
+        target_type="thread", target_id=thread_id,
+        details={"classification": state_snapshot["classification"],
+                 "expéditeur": state_snapshot["sender"],
+                 "brouillon_modifié": bool(edited_draft)},
+    )
     # §16.1.2 : émis APRÈS l'écriture CRM et la comptabilité — un abonné n8n qui déclenche une
     # suite (facture, tâche, message d'équipe) doit pouvoir considérer le lead comme réellement
     # enregistré. `validated_by` est joint : c'est l'information qu'un workflow d'entreprise veut.
@@ -498,7 +512,8 @@ def _do_validate(thread_id: str, validated_by: Optional[str] = None,
     return state_snapshot
 
 
-def _do_reject(thread_id: str) -> dict:
+def _do_reject(thread_id: str, rejected_by: Optional[str] = None,
+               source: str = activity_log.SOURCE_API) -> dict:
     """
     Logique partagée de rejet (sans écriture CRM) — appelée par `POST /threads/{id}/rejeter` et par
     le bouton « Rejeter » de Slack. `action_node` n'est jamais invoqué ; le thread est simplement
@@ -510,6 +525,13 @@ def _do_reject(thread_id: str) -> dict:
         raise HTTPException(400, "Ce thread n'est pas en attente de validation.")
     queue_store.mark_rejected(thread_id)
     rejected = {**_snapshot(thread_id), "rejected": True}
+    # §17 — le rejet n'était consigné nulle part : `audit_log` ne connaît que les validations, donc
+    # un lead écarté depuis Slack était indistinguable d'un lead jamais traité.
+    activity_log.log(
+        activity_log.ACTION_LEAD_REJECTED, actor=rejected_by, source=source,
+        target_type="thread", target_id=thread_id,
+        details={"classification": rejected["classification"], "expéditeur": rejected["sender"]},
+    )
     webhook.emit(webhook.EVENT_REJECTED, rejected)
     return rejected
 
@@ -571,11 +593,14 @@ async def slack_interactions(request: Request) -> dict:
 
     try:
         if action_id == "aca_approve":
-            _do_validate(thread_id, validated_by=user)
+            _do_validate(thread_id, validated_by=user, source=activity_log.SOURCE_SLACK)
             return {"replace_original": True,
                     "text": f":white_check_mark: Lead validé par {user} — écrit au CRM."}
         if action_id == "aca_reject":
-            _do_reject(thread_id)
+            # `user` vient du champ `user` de la charge utile Slack, dont la signature HMAC a déjà
+            # été vérifiée ci-dessus : l'attribution est donc au moins aussi fiable que le secret
+            # de signature, ce qui est le maximum atteignable pour un clic hors de notre UI.
+            _do_reject(thread_id, rejected_by=user, source=activity_log.SOURCE_SLACK)
             return {"replace_original": True,
                     "text": f":x: Lead rejeté par {user} — non écrit au CRM."}
     except HTTPException as e:
@@ -623,9 +648,20 @@ def update_settings(payload: SettingsIn) -> dict:
     unknown = sorted(set(payload.values) - set(config_store.SETTINGS_SCHEMA))
     if unknown:
         raise HTTPException(422, f"Réglage(s) inconnu(s) : {', '.join(unknown)}.")
+    before = config_store.get_all_settings()
+    changed = {}
     for key, value in payload.values.items():
         if value and value.strip():
             config_store.set_setting(key, value.strip())
+            changed[key] = {"avant": before.get(key) or "(non réglé)", "après": value.strip()}
+    if changed:
+        # §17 — cette route peut rediriger les alertes commerciales vers une autre adresse ; elle
+        # doit laisser la même trace que le formulaire équivalent de `ui.py`, sinon il suffit de
+        # passer par l'API pour modifier la configuration sans apparaître au journal.
+        activity_log.log(
+            activity_log.ACTION_SETTINGS_CHANGED, source=activity_log.SOURCE_API,
+            target_type="réglages", target_id=", ".join(sorted(changed)), details=changed,
+        )
     return {"schema": config_store.SETTINGS_SCHEMA, "values": config_store.get_all_settings()}
 
 

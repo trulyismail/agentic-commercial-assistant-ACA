@@ -16,7 +16,7 @@ import traceback
 from dotenv import load_dotenv
 from langchain_core.callbacks import UsageMetadataCallbackHandler
 
-from aca.storage import analytics_store, queue_store
+from aca.storage import activity_log, analytics_store, queue_store
 from aca.core import app as aca_graph
 from aca.integrations import gmail_reader
 
@@ -58,6 +58,16 @@ def process_one(service, summary: dict) -> None:
     usage_handler = UsageMetadataCallbackHandler()
     config = {"configurable": {"thread_id": thread_id}, "callbacks": [usage_handler]}
     final_state = aca_graph.app.invoke(_initial_state(email), config)
+
+    # §18 — trace machine : jusqu'ici seul le formulaire manuel de ui.py journalisait le lancement
+    # d'une analyse (`ACTION_ANALYSIS_STARTED`, source=streamlit) ; la même action existe pour
+    # l'intake automatique, seule la source change (`SOURCE_POLLER`) — sans acteur humain, `actor`
+    # nomme le processus lui-même, comme le fait déjà `retention.py`/`relance.py` ailleurs.
+    activity_log.log(
+        activity_log.ACTION_ANALYSIS_STARTED, actor="(poller)", target_type="thread",
+        target_id=thread_id, source=activity_log.SOURCE_POLLER,
+        details={"expéditeur": email["sender"], "objet": email["subject"], "source": "poller"},
+    )
 
     # Tableau de bord (P2 §11.4 item 16) : le graphe a déjà tourné jusqu'à la pause dans ce
     # process, donc classification et éventuelle proposition sont connues dès maintenant — pas
