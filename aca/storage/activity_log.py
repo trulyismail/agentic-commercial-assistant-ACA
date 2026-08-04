@@ -116,6 +116,12 @@ ACTION_DATA_PURGED = "data.purged"
 # le formulaire manuel, seule la `source` change) ; ces deux-là sont propres aux travaux planifiés.
 ACTION_FOLLOWUP_DRAFTED = "lead.followup_drafted"
 ACTION_JOB_RAN = "scheduler.job_ran"
+# §19 — tâches datées posées par un humain (envoi programmé, rappel). Tracées séparément de
+# `ACTION_JOB_RAN` : celui-ci dit « le planificateur est passé », ceux-ci disent « telle personne a
+# décidé qu'un message partirait à telle heure » — une décision imputable, pas un tick de boucle.
+ACTION_TASK_SCHEDULED = "task.scheduled"
+ACTION_TASK_CANCELLED = "task.cancelled"
+ACTION_TASK_EXECUTED = "task.executed"
 
 # Libellés français affichés dans l'onglet « Journal d'activité » — un journal qu'un manager ne sait
 # pas lire n'est pas consulté, donc pas un contrôle.
@@ -148,6 +154,9 @@ ACTION_LABELS = {
     ACTION_DATA_PURGED: "Données purgées (rétention ou effacement RGPD)",
     ACTION_FOLLOWUP_DRAFTED: "Relance automatique créée (brouillon)",
     ACTION_JOB_RAN: "Travail planifié exécuté",
+    ACTION_TASK_SCHEDULED: "Tâche programmée (envoi ou rappel)",
+    ACTION_TASK_CANCELLED: "Tâche programmée annulée",
+    ACTION_TASK_EXECUTED: "Tâche programmée exécutée",
 }
 
 # Actions qu'un administrateur doit voir en priorité : elles changent qui peut faire quoi, où
@@ -159,6 +168,10 @@ SENSITIVE_ACTIONS = frozenset({
     ACTION_USER_ROLE_CHANGED, ACTION_USER_DISABLED, ACTION_USER_ENABLED,
     ACTION_USER_PASSWORD_RESET, ACTION_KNOWLEDGE_INGESTED, ACTION_KNOWLEDGE_APPROVED,
     ACTION_DATA_EXPORTED, ACTION_DATA_PURGED,
+    # §19 : programmer un envoi, c'est décider qu'un message partira vers un prospect en l'absence
+    # de son auteur. Cette trace-là doit survivre à la purge courante, au même titre qu'un
+    # changement de rôle — d'où sa présence ici plutôt que dans le bruit d'usage quotidien.
+    ACTION_TASK_SCHEDULED, ACTION_TASK_CANCELLED,
 })
 
 # Ordre des champs entrant dans l'empreinte chaînée. C'EST le contrat d'intégrité de cette table :

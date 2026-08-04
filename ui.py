@@ -1,8 +1,13 @@
+import time
+from datetime import datetime
+
 import streamlit as st
-from aca.storage import activity_log, queue_store, user_store
+from aca.storage import activity_log, queue_store, task_store, user_store
 from aca.core import branding
 from aca.core import demo
+from aca.core import intake_window
 from aca.core import prod_check
+from aca.core import ui_kit
 from aca.ui.shared import (
     DEV_USERNAME,
     audit as _audit,
@@ -131,6 +136,48 @@ with st.sidebar:
             _audit(activity_log.ACTION_LOGOUT)
             st.session_state.session = None
             st.rerun()
+    # §19 — rappels échus, affichés DANS l'application. Slack et l'e-mail restent les canaux qui
+    # atteignent quelqu'un parti de son poste ; celui-ci est le seul qui fonctionne sans aucun
+    # service externe, ce qui en fait le canal utile d'une installation locale non déployée.
+    # Il ne se fie pas à `status` (le planificateur passe un rappel à « effectué » dès qu'il l'a
+    # poussé, donc en une minute) mais à `acknowledged_at`, que seul un humain renseigne : le
+    # rappel reste donc affiché tant que personne ne l'a réellement vu.
+    _due_reminders = task_store.list_due_reminders(time.time())
+    # Un rappel qui n'apparaît que dans la barre latérale suppose qu'on la regarde. Le toast
+    # l'amène à l'œil au moment où il devient dû, sans interrompre : même procédé que
+    # l'avertissement d'expiration de session (`aca/ui/shared.py::_warn_before_expiry`). Chaque
+    # rappel n'est annoncé QU'UNE FOIS par session — Streamlit rejoue tout le script à chaque
+    # interaction, donc sans cette mémoire le toast reparaîtrait à chaque clic et deviendrait le
+    # genre de notification qu'on apprend à ignorer.
+    _toasted = st.session_state.setdefault("_reminder_toasts", set())
+    for _reminder in _due_reminders:
+        if _reminder["id"] in _toasted:
+            continue
+        _toasted.add(_reminder["id"])
+        st.toast(
+            t("sidebar.reminder_toast",
+              note=(_reminder["note"] or t("sidebar.reminder_no_note"))[:80]),
+            icon=":material/alarm:",
+        )
+
+    if _due_reminders:
+        st.divider()
+        st.subheader(t("sidebar.reminders_header", n=len(_due_reminders)), anchor=False)
+        for _reminder in _due_reminders:
+            with st.container(border=True):
+                st.markdown(f"**{_reminder['note'] or t('sidebar.reminder_no_note')}**")
+                _origin = _reminder["label"] or _reminder["thread_id"] or ""
+                st.caption(" · ".join(x for x in (_reminder["due_at"], _origin) if x))
+                if st.button(t("sidebar.reminder_ack"), icon=":material/check:",
+                             key=f"ack_{_reminder['id']}"):
+                    task_store.acknowledge(_reminder["id"])
+                    _audit(
+                        activity_log.ACTION_TASK_EXECUTED, target_type="reminder",
+                        target_id=str(_reminder["id"]),
+                        details={"acquitté": "depuis l'interface"},
+                    )
+                    st.rerun()
+
     st.divider()
     pending_queue = queue_store.list_pending()
     st.subheader(t("sidebar.queue_header", n=len(pending_queue)), anchor=False)
@@ -139,10 +186,30 @@ with st.sidebar:
         if st.button(t("sidebar.mark_seen"), icon=":material/done_all:"):
             st.session_state["_seen_pending_count"] = _pending_count
             st.rerun()
-    st.caption(
-        "E-mails traités automatiquement par le poller en arrière-plan (`poller.py`), en attente "
-        "de validation humaine."
-    )
+    # §19 — l'ancienne légende décrivait le MÉCANISME (« traités par le poller en arrière-plan
+    # (`poller.py`) ») : un nom de fichier que personne dans une équipe commerciale ne peut situer,
+    # et qui ne disait rien de ce que la personne contrôle. Remplacée par ce que c'est, en une
+    # phrase, puis un relevé de l'état réel — en marche ou non, et quand a lieu la prochaine
+    # relève. Une personne gère une réception d'e-mails, pas un processus nommé « poller ».
+    _intake_cfg = intake_window.current_config()
+    _intake_on = _intake_cfg["enabled"]
+    _now = datetime.now()
+    _open_now = _intake_on and intake_window.is_open(_now, _intake_cfg)
+    st.caption(t("sidebar.queue_explainer"))
+
+    _readout = [(
+        t("sidebar.intake_state"),
+        t("sidebar.intake_on") if _open_now
+        else (t("sidebar.intake_paused") if _intake_on else t("sidebar.intake_off")),
+        "on" if _open_now else "off",
+    )]
+    if _intake_on and not _open_now:
+        _nxt = intake_window.next_opening(_now, _intake_cfg)
+        _readout.append((t("sidebar.intake_next"),
+                         _nxt.strftime("%d/%m %H:%M") if _nxt else "—", ""))
+    st.html(ui_kit.readout(_readout))
+    st.caption(intake_window.describe(_intake_cfg))
+
     if not pending_queue:
         st.caption(t("sidebar.queue_empty"))
     for item in pending_queue:

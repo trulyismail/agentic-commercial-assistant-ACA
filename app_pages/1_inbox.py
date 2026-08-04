@@ -1,6 +1,7 @@
 """Onglet « Nouvel e-mail » (§18) — extrait de `ui.py`. Voir `aca/ui/shared.py` pour le contexte
 de la découpe en pages `st.navigation`. Page par défaut du routeur."""
 import uuid
+from datetime import datetime, time as dt_time, timedelta
 
 import streamlit as st
 from langgraph.types import Command
@@ -9,7 +10,9 @@ from aca.core import app as aca_graph
 from aca.core import demo
 from aca.core import ui_kit
 from aca.integrations import pdf_export
-from aca.storage import activity_log, analytics_store, audit_log, followup_store, queue_store, user_store
+from aca.storage import (
+    activity_log, analytics_store, audit_log, followup_store, queue_store, task_store, user_store,
+)
 from aca.ui.shared import (
     CATEGORY_STYLE,
     DEV_USERNAME,
@@ -287,9 +290,76 @@ if "result" in st.session_state:
         st.subheader(t("inbox.validation_header"), anchor=False)
         st.caption(t("inbox.validation_caption"))
 
+        # §19 — le cartouche de signature. Il remplace deux boutons posés sous une zone de texte,
+        # qui ne disaient rien de ce que la validation engage NI de qui l'engage. Les effets sont
+        # énoncés avant le geste : valider sans savoir ce que ça écrit n'est pas un consentement
+        # éclairé, et c'est justement la garantie que ce produit revendique.
+        _signer = _current_user().get("username") or "—"
+        _sender_label = res.get("email_raw", {}).get("sender", "")
+        _lead_label = (info.get("entreprise") or _sender_label or "Lead sans entreprise")
+        _has_gmail = bool(res.get("gmail_message_id"))
+        _effects = [("cloud_upload", "Écriture de la fiche dans le CRM (Sheets, et HubSpot si actif)")]
+        if _has_gmail:
+            _effects.append(("drafts", "Création du brouillon de réponse dans le fil Gmail d'origine"))
+            _effects.append(("mark_email_read", "Marquage de l'e-mail d'origine comme traité"))
+        else:
+            _effects.append(("edit_note", "Saisie manuelle : aucun brouillon Gmail ne sera créé"))
+        st.html(ui_kit.signoff(
+            _lead_label, _signer, datetime.now().strftime("%d/%m/%Y à %H:%M"), _effects,
+        ))
+
+        # §19 — « programmer un envoi ». Ce n'est PAS une entorse à la promesse du produit : la
+        # personne lit le brouillon, le corrige si besoin, puis décide elle-même qu'il partira à
+        # telle heure. L'autorisation humaine existe, elle est simplement antérieure à l'exécution
+        # — comme l'envoi différé de n'importe quelle messagerie. Ce qui part est le brouillon
+        # Gmail créé à la validation, donc exactement le texte relu ; s'il est modifié ou supprimé
+        # dans Gmail entre-temps, c'est la volonté de l'humain qui l'emporte (cf. gmail_reader.
+        # send_draft).
+        _send_mode = t("inbox.send_now")
+        _due_epoch = None
+        if _can(user_store.PERM_VALIDATE_LEAD) and _has_gmail:
+            _send_mode = st.radio(
+                t("inbox.send_mode_label"),
+                options=[t("inbox.send_now"), t("inbox.send_scheduled")],
+                horizontal=True, key=f"send_mode_{st.session_state.thread_id}",
+                help=t("inbox.send_mode_help"),
+            )
+            if _send_mode == t("inbox.send_scheduled"):
+                # Proposition par défaut : demain 9 h. Un envoi commercial différé vise presque
+                # toujours le prochain créneau ouvrable, pas « dans une heure » ; proposer l'heure
+                # la plus probable évite trois manipulations dans le cas courant.
+                _default = (datetime.now() + timedelta(days=1)).replace(
+                    hour=9, minute=0, second=0, microsecond=0,
+                )
+                _col_d, _col_h = st.columns(2)
+                _d = _col_d.date_input(
+                    t("inbox.send_date"), value=_default.date(),
+                    min_value=datetime.now().date(),
+                    key=f"send_date_{st.session_state.thread_id}",
+                )
+                _h = _col_h.time_input(
+                    t("inbox.send_time"), value=dt_time(9, 0), step=900,
+                    key=f"send_time_{st.session_state.thread_id}",
+                )
+                _due = datetime.combine(_d, _h)
+                _due_epoch = _due.timestamp()
+                if _due <= datetime.now():
+                    # Refus explicite plutôt que « on envoie tout de suite » : une date passée est
+                    # presque toujours une saisie erronée, et deviner à la place de la personne
+                    # ferait partir un message qu'elle croyait avoir différé.
+                    st.warning(t("inbox.send_past_warning"), icon=":material/schedule:")
+                    _due_epoch = None
+                else:
+                    st.caption(t("inbox.send_confirm", when=_due.strftime("%d/%m/%Y à %H:%M")))
+
+        _validate_label = (
+            t("inbox.validate_and_schedule_button") if _due_epoch
+            else t("inbox.validate_button")
+        )
+
         if not _can(user_store.PERM_VALIDATE_LEAD):
             st.info(t("inbox.no_validate_permission"), icon=":material/lock:")
-        elif st.button(t("inbox.validate_button"), type="primary", icon=":material/check_circle:"):
+        elif st.button(_validate_label, type="primary", icon=":material/check_circle:"):
             # Le brouillon édité est comparé AVANT la reprise du graphe : après `invoke`,
             # l'état porte déjà la version modifiée et la comparaison ne dirait plus rien.
             _draft_was_edited = edited_draft != original_draft
@@ -353,6 +423,31 @@ if "result" in st.session_state:
                         res.get("email_raw", {}).get("sender", ""),
                         res.get("email_raw", {}).get("subject", ""),
                     )
+                    # §19 — l'envoi programmé est créé APRÈS la reprise du graphe, parce que
+                    # `action_node` est ce qui crée le brouillon Gmail : son identifiant n'existe
+                    # pas avant. Programmer l'envoi d'un brouillon inexistant produirait une tâche
+                    # condamnée à échouer à l'échéance, sans que personne le sache d'ici là.
+                    _draft_id = final.get("gmail_draft_id")
+                    if _due_epoch and _draft_id:
+                        task_store.schedule_send(
+                            _due_epoch, thread_id=st.session_state.thread_id,
+                            gmail_draft_id=_draft_id,
+                            gmail_thread_id=res.get("gmail_thread_id"),
+                            label=_lead_label, created_by=validated_by,
+                        )
+                        _when = datetime.fromtimestamp(_due_epoch).strftime("%d/%m/%Y à %H:%M")
+                        st.success(t("inbox.send_scheduled_ok", when=_when),
+                                   icon=":material/schedule_send:")
+                        _audit(
+                            activity_log.ACTION_TASK_SCHEDULED, actor=validated_by or None,
+                            target_type="envoi", target_id=st.session_state.thread_id,
+                            details={"échéance": _when, "destinataire": _sender_label},
+                        )
+                    elif _due_epoch and not _draft_id:
+                        # Le cas se produit si la création du brouillon Gmail a échoué juste avant
+                        # (quota, jeton expiré). Le dire tout de suite : sinon la personne repart
+                        # convaincue que son message partira demain matin.
+                        st.warning(t("inbox.send_scheduled_no_draft"), icon=":material/error:")
                     # On efface le résultat pour passer au suivant
                     st.session_state.gmail_attachments_raw = []
                     st.session_state.gmail_message_id = None
@@ -397,3 +492,60 @@ if "result" in st.session_state:
             st.session_state.pending_clarification = None
             del st.session_state.result
             st.info(t("inbox.rejected_info"), icon=":material/cancel:")
+
+        # §19 — rappel personnel daté sur ce lead. Délibérément INDÉPENDANT de la validation :
+        # « je m'en occupe mardi » est une intention qui existe qu'on valide, qu'on rejette ou
+        # qu'on laisse en attente. Le lier au bouton Valider l'aurait rendu inaccessible dans
+        # exactement les cas où il sert le plus (un lead qu'on ne sait pas encore trancher).
+        # Ce n'est pas une relance : rien ne part vers le prospect, la notification revient à
+        # l'équipe (cf. `relance.py` pour la relance commerciale, qui est un autre objet).
+        if "result" in st.session_state:
+            with st.expander(t("inbox.reminder_expander"), icon=":material/alarm:"):
+                st.caption(t("inbox.reminder_caption"))
+                # `st.form` plutôt que trois widgets libres : les trois champs décrivent UNE seule
+                # intention (« rappelle-moi ceci, à ce moment »), et hors formulaire chacun
+                # déclenche un rerun à la moindre frappe — la validation par Entrée dans la note
+                # relançait le script et repliait l'accordéon avant qu'on ait pu cliquer.
+                # Trouvé en vérifiant le parcours dans un vrai navigateur, pas en relisant le code.
+                with st.form(f"reminder_form_{st.session_state.thread_id}"):
+                    _note = st.text_input(
+                        t("inbox.reminder_note"),
+                        placeholder=t("inbox.reminder_placeholder"),
+                    )
+                    _rc1, _rc2 = st.columns(2)
+                    _rd = _rc1.date_input(
+                        t("inbox.reminder_date"),
+                        value=(datetime.now() + timedelta(days=2)).date(),
+                        min_value=datetime.now().date(),
+                    )
+                    _rh = _rc2.time_input(
+                        t("inbox.reminder_time"), value=dt_time(9, 0), step=900,
+                    )
+                    _rem_submitted = st.form_submit_button(
+                        t("inbox.reminder_button"), icon=":material/add_alert:",
+                    )
+                if _rem_submitted:
+                    _when_dt = datetime.combine(_rd, _rh)
+                    if not _note.strip():
+                        # Un rappel sans texte arriverait dans deux jours sans dire de quoi il
+                        # s'agit : autant ne pas le créer.
+                        st.warning(t("inbox.reminder_needs_note"), icon=":material/edit:")
+                    elif _when_dt <= datetime.now():
+                        st.warning(t("inbox.reminder_past"), icon=":material/schedule:")
+                    else:
+                        task_store.add_reminder(
+                            _when_dt.timestamp(), _note.strip(),
+                            thread_id=st.session_state.thread_id,
+                            label=(info.get("entreprise")
+                                   or res.get("email_raw", {}).get("sender", "")),
+                            created_by=_current_user().get("username") or "",
+                        )
+                        _audit(
+                            activity_log.ACTION_TASK_SCHEDULED, target_type="rappel",
+                            target_id=st.session_state.thread_id,
+                            details={"échéance": _when_dt.strftime("%d/%m/%Y à %H:%M")},
+                        )
+                        st.success(
+                            t("inbox.reminder_ok", when=_when_dt.strftime("%d/%m/%Y à %H:%M")),
+                            icon=":material/check_circle:",
+                        )

@@ -264,6 +264,45 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   over-eager check. Also logs `ACTION_JOB_RAN` to `activity_log` for **every** job on every tick
   (success or failure) — the piece that answers "did the scheduler even run today", visible even for
   jobs (`maintenance`, `billing`) that have nothing of their own to log.
+- [intake_window.py](aca/core/intake_window.py) — §19: **when automatic intake is allowed to run**.
+  `poller.py` looped bare — `time.sleep(POLL_INTERVAL_SECONDS)` and nothing else — with two
+  consequences: an email arriving at 3am was analysed at 3am (burning quota and firing an alert for
+  a team that would only see it at 9am, and making the analysis *look* stale by the time anyone
+  could act), and the interval was read **at import**, so changing it meant editing `.env` and
+  restarting. Pure, with `now` always injected (same posture as `auth_lockout.py`/`session.py`/
+  `scheduler.is_due`), so it is testable without touching the clock or Gmail. **Naive local time,
+  deliberately**: a sales team states its hours as office hours, not UTC, and the process runs on
+  that team's machine (Solo tier, `run_solo.py`), so the local clock *is* the right reference.
+  Handles the **overnight window** (22:00 → 06:00), which naive `start <= t <= end` silently turns
+  into an empty range — the allowed day is the one the window *opens* on, else a Monday-night
+  on-call setting would stop dead at midnight. Every parser is deliberately forgiving
+  (`parse_days`/`parse_time`/`parse_interval` never raise, falling back to "every day"/default):
+  these values come from a form, and a malformed entry that killed the loop would mean **no** email
+  ever gets collected — far worse than the bad setting that caused it. Defaults reproduce the exact
+  pre-§19 behaviour (always open, 60s), honouring the project's "absent = feature skipped"
+  contract. Settings resolve `config_store` → env → default, so the "Réglages → Réception
+  automatique" panel takes effect on the next cycle **without a restart**. `describe()` lives here
+  rather than in the page because the same sentence appears in the sidebar and in settings, and two
+  divergent wordings for one setting make a person doubt which screen tells the truth.
+- [task_store.py](aca/storage/task_store.py) — §19: **dated tasks a human placed on a lead** —
+  scheduled sends and reminders. Distinct from the two neighbouring registries, and the distinction
+  is why it exists: `schedule_store.py` records when a *system* job last ran (no per-lead rows, no
+  chosen deadline, nothing to cancel); `followup_store.py` tracks leads eligible for the
+  *automatic* `relance.py` cadence (the machine picks the moment; no free text, no chosen hour).
+  This stores what a **person decided**, for **one lead**, at **a moment they chose** — a different
+  business object with its own lifecycle (cancellable, traceable, named author). Two kinds in one
+  table on purpose: a scheduled send and a reminder have the same shape and lifecycle, and two
+  tables would mean two purges, two lists, and a second "what's overdue" query that eventually
+  diverges from the first. **The scheduled send does not weaken the product's central guarantee**:
+  the person read the draft, corrected it if needed, then explicitly said "leave at 9am" — the
+  human authorisation exists, it is merely *prior* to execution, exactly like any mail client's
+  send-later. What is scheduled is the **already-created Gmail draft** (`gmail_draft_id`), so if
+  they edit or delete it in Gmail before the deadline, their version goes out or nothing does; the
+  human keeps the last word (see `gmail_reader.send_draft`). `_set_status` carries
+  `status = 'pending'` **inside the SQL clause**, so it is atomic: without it a slow scheduler and
+  a simultaneous human cancellation could cross, and a cancelled task would flip to "done" — an
+  email going out after someone explicitly stopped it. `purge_older_than` deliberately spares
+  *pending* tasks regardless of age, since a distant deadline is still a valid intention.
 - [schedule_store.py](aca/storage/schedule_store.py) — §16.0: when each periodic job last ran
   (`data/schedule.sqlite`, `ACA_SCHEDULE_DB`). Without it `scheduler.py` would replay every job on
   each process restart — a retention purge and a burst of Gmail follow-up drafts on every
@@ -1069,7 +1108,7 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   96% (48/50) pre-migration — both prior errors were on deliberately ambiguous cases. Run via
   `python -m aca.eval.eval_classifier`; re-run once real emails are available to track accuracy
   under real conditions instead of the synthetic set.
-- [tests/](tests/) — automated pytest suite (**561 tests**, offline, ~19s — see Known gaps for full
+- [tests/](tests/) — automated pytest suite (**606 tests**, offline, ~19s — see Known gaps for full
   coverage list): [conftest.py](tests/conftest.py) (env isolation + `FakeLLM`/`ExplodingLLM`, now
   also blanking `ACA_ORG_ID`/`STRIPE_API_KEY`, redirecting `ACA_CONFIG_DB`/`ACA_USERS_DB`, and
   neutralising every §15 security switch — `ACA_ENV=development`, empty `ACA_API_KEY`/
@@ -1152,7 +1191,7 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   file**: [test_i18n.py](tests/test_i18n.py) (11 tests — `translate()` never raising on an unknown
   key/language, every declared key genuinely non-empty in both languages, `{placeholder}` formatting,
   and a sample-key check that FR and EN actually differ, so a future key copy-pasted identically into
-  both languages can't silently defeat the switcher). **561 tests total**, offline, ~19s. Run via
+  both languages can't silently defeat the switcher). **606 tests total**, offline, ~19s. Run via
   `python -m pytest tests/` (pytest pinned in requirements.txt).
 
 ## Stack
@@ -1564,6 +1603,46 @@ afterward.
   `4_activity.py`'s own translated caption text (not just the absence of an exception) actually
   appears in the rendered page — the check that would have caught a switcher that flips the
   selector without the page underneath actually changing language.
+- ✅ **Fixed (2026-08-03)** — §19 "header overlap, distinctive design, scheduled sends, reminders,
+  parametrable intake". Four requests in one pass. **(1) The overlap was real and measurable**:
+  Streamlit's header is `position: absolute`, `z-index: 999990`, transparent, **52.5px** tall, and
+  the branding CSS had replaced `.block-container`'s top padding with a flat `var(--aca-top)` =
+  **30.8px** — so the first ~22px of *every* page sat underneath it. Found by measuring the live
+  DOM with Playwright rather than eyeballing; fixed with `padding-top: max(var(--aca-top),
+  calc(var(--aca-header-h) + 1rem))` (a floor, so the "aérée" density can still add air but never
+  drop below the clearance) plus a real opaque background on the header, which also stops it
+  reading as a pill floating over nothing. **(2) Design.** The diagnosis wasn't the hue, it was
+  that *gradient was applied to everything* — hero, primary buttons, metric cards, nav — and an
+  effect applied everywhere ranks nothing; that, plus one uniform radius and a single type role, is
+  what reads as templated. Now: gradient survives in exactly **one** place in the whole stylesheet,
+  the decision block. Default palette moved off Fluent blue + violet (`#0078D4`/`#8764B8`) to deep
+  petrol + burnt amber on cool paper, encoding a thesis that is actually true of the product —
+  **the machine's work is cool, the human decision is warm** — with amber reserved solely for "this
+  awaits a person". Three earned type roles: a display serif for the document's voice
+  (`BRAND_FONT_DISPLAY`, Fraunces default — a token, so a client can still override), the client's
+  sans for the tool's voice, and IBM Plex Mono, **not** parametrable, for machine values, because
+  tabular figures in a queue need to align. Signature element: **`ui_kit.signoff()`**, a "Bon pour
+  accord" cartouche naming who is responsible, when, and — before the gesture — exactly what
+  validating will write. **(3) Scheduled sends + reminders** ([task_store.py](aca/storage/task_store.py),
+  `gmail_reader.send_draft`, a new `tasks` scheduler job): the honest reading is that scheduling is
+  not autonomous action — the human read and approved the draft, they merely chose a later moment,
+  and what goes out is the Gmail draft itself, so editing or deleting it in Gmail still wins.
+  Reminders are deliberately independent of validation ("I'll deal with it Tuesday" is an intention
+  that exists whether you validate, reject, or defer). **(4) Intake**
+  ([intake_window.py](aca/core/intake_window.py)): the sidebar had explained the *mechanism*
+  ("traités par le poller en arrière-plan (`poller.py`)" — a filename nobody in a sales team can
+  place) and nothing was adjustable; now it says what it does in one sentence, shows a live
+  readout, and a settings panel controls on/off, days, hours and frequency, re-read every cycle
+  with no restart. Suite: 561 → **606 tests**. Two things verification caught rather than review:
+  the reminder's three fields each triggered a rerun, so pressing Enter in the note collapsed the
+  expander before the button could be clicked (now an `st.form`, which is what those three fields
+  always were — one intention); and an existing test's promise that `BRAND_FONT="Système"` emits
+  **no** CDN call, which the new display/mono `@import`s had quietly broken — the fix suppresses
+  all three imports, since that setting is a promise about the network, not about a font. Not
+  verified live, and stated plainly: the scheduled send has never fired against a real Gmail
+  account (the branch is exercised through `AppTest` with a seeded `gmail_message_id`, and
+  `send_draft` is covered only by its graceful-degradation contract), because demo mode produces
+  manual entries with no Gmail thread — the same limit as every other Gmail-dependent path here.
 
 
 ## Status vs. the 8-week roadmap

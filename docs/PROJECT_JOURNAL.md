@@ -1800,3 +1800,116 @@ partir du secret généré), bascule vers l'anglais en cours de session, puis pa
 pages (`1_inbox.py` à `5_settings.py`) — aucune exception, et la légende propre à chaque page
 (`dashboard.caption`, `history.caption`, `activity.caption`) vérifiée comme réellement traduite dans
 la langue active, pas seulement l'absence d'erreur.
+
+## 2026-08-03 — Un chevauchement mesuré, une identité visuelle assumée, et trois manques que l'usage révélait
+
+Quatre demandes en une : corriger la barre d'en-tête qui recouvre le contenu, rendre l'interface
+moins générique, permettre de **programmer une réponse pour une heure choisie** et d'**écrire un
+rappel**, et enfin clarifier et rendre paramétrable la réception automatique des e-mails.
+
+### Le chevauchement : mesuré, pas deviné
+
+La barre d'en-tête de Streamlit est en `position: absolute`, `z-index: 999990`, fond transparent,
+et mesure **52,5 px**. La feuille de style de marque avait remplacé la marge haute de la page par
+une valeur fixe issue de la densité — **30,8 px**. L'écart de 22 px est exactement ce que montrait
+la capture d'écran : le haut de chaque page passait *sous* la navigation. Constat obtenu en
+inspectant le DOM réellement rendu avec un vrai navigateur, pas à l'œil.
+
+Deux corrections complémentaires : une marge exprimée en `max()`, pour que la densité « aérée »
+puisse ajouter de l'air mais jamais descendre sous le seuil de dégagement ; et un vrai fond opaque
+sur la barre, sans quoi le contenu défilerait en transparence derrière elle — et sans quoi, aussi,
+la barre continuait de se lire comme une pastille flottant sur rien.
+
+### L'identité visuelle : le diagnostic n'était pas la couleur
+
+Le défaut n'était pas la teinte, c'était que **le dégradé était appliqué à tout** : en-tête,
+boutons, cartes d'indicateurs, navigation. Un effet appliqué partout ne hiérarchise rien — et c'est
+précisément ce qui donne à une interface l'air d'être sortie d'un gabarit, avec un rayon d'angle
+unique et un seul rôle typographique.
+
+Désormais un seul dégradé subsiste dans toute la feuille de style : celui du bloc de décision. La
+palette par défaut quitte le bleu Fluent de Microsoft et son violet (`#0078D4` / `#8764B8`) pour un
+pétrole profond et un ambre brûlé sur papier froid, avec un parti pris qui dit quelque chose de
+vrai sur le produit — **le travail de la machine est froid, la décision humaine est chaude** —
+l'ambre étant réservé au seul moment où quelqu'un doit trancher. Trois rôles typographiques, chacun
+justifié : une serif de titrage pour la voix du **document** (ce produit fabrique des propositions
+commerciales qu'un client finit par signer), la sans du client pour la voix de l'**outil**, et un
+monospace non paramétrable pour les valeurs **machine**, parce que des chiffres tabulaires dans une
+file d'attente doivent s'aligner. Tout reste surchargeable par client : ce ne sont que des défauts.
+
+L'élément signature est le **cartouche « Bon pour accord »** : qui engage sa responsabilité, quand,
+et — énoncé *avant* le geste — ce que la validation va réellement écrire. Deux boutons posés sous
+une zone de texte ne portaient aucune de ces trois informations.
+
+### Programmer un envoi sans trahir la promesse du produit
+
+C'est la question qui demandait le plus de prudence : ACA revendique de ne jamais laisser partir un
+message qu'aucun humain n'a lu. Un envoi différé la contredit-il ? Non, à condition d'être précis :
+la personne lit le brouillon, le corrige, puis décide elle-même qu'il partira à telle heure.
+L'autorisation humaine existe bien, elle est simplement antérieure à l'exécution — comme l'envoi
+différé de n'importe quelle messagerie.
+
+Trois choix découlent de ce raisonnement. Ce qui est programmé est le **brouillon Gmail déjà créé**,
+donc exactement le texte relu, et non une regénération ultérieure du modèle. S'il est modifié ou
+supprimé dans Gmail avant l'échéance, c'est la volonté de l'humain qui l'emporte. Et l'annulation
+est protégée par une clause SQL (`status = 'pending'`) plutôt que par une vérification en Python :
+sans elle, un planificateur lent et une annulation humaine simultanée pourraient se croiser, et un
+e-mail partirait après qu'une personne a explicitement dit non.
+
+Les rappels sont volontairement **indépendants** de la validation : « je m'en occupe mardi » est une
+intention qui existe qu'on valide, qu'on rejette ou qu'on laisse en attente. Les lier au bouton
+Valider les aurait rendus inaccessibles exactement dans le cas où ils servent le plus.
+
+### La réception : dire ce que c'est, et laisser la régler
+
+La barre latérale annonçait « E-mails traités automatiquement par le poller en arrière-plan
+(`poller.py`) » — un nom de fichier en guise d'explication, que personne dans une équipe
+commerciale ne peut situer — et rien n'était réglable : ni l'activation, ni les horaires, ni la
+fréquence, l'intervalle étant même lu **à l'import**, donc figé jusqu'au redémarrage.
+
+Conséquence concrète, pas théorique : un e-mail arrivé à 3 h du matin était analysé à 3 h du matin,
+consommait du quota, déclenchait une alerte — pour une équipe qui ne la verrait qu'à 9 h, et avec
+une analyse qui paraîtrait « ancienne » alors que personne n'aurait pu la traiter plus tôt.
+
+La légende dit maintenant ce que fait le produit en une phrase, un relevé montre l'état réel, et un
+panneau de réglages contrôle marche/arrêt, jours, plage horaire et fréquence — relus à chaque cycle,
+sans redémarrage. Les heures sont locales et naïves, délibérément : une équipe énonce ses horaires
+en heure de bureau, pas en UTC. La fenêtre à cheval sur minuit (22 h → 6 h) est gérée, parce que
+c'est le cas que la comparaison naïve transforme silencieusement en plage vide. Et toutes les
+fonctions d'analyse des réglages sont tolérantes : ces valeurs viennent d'un formulaire, et une
+saisie erronée qui ferait tomber la boucle signifierait qu'**aucun** e-mail n'est plus relevé — une
+panne bien pire que le réglage raté qui l'a causée.
+
+### Ce que la vérification a trouvé, et que la relecture n'aurait pas vu
+
+1. **Le formulaire de rappel se repliait avant d'être validé.** Ses trois champs déclenchaient
+   chacun un rerun ; valider la note par Entrée relançait le script et refermait l'accordéon avant
+   qu'on ait pu cliquer. Corrigé en `st.form` — ce que ces trois champs auraient toujours dû être,
+   puisqu'ils décrivent une seule intention.
+2. **Un test existant a rattrapé une promesse cassée.** Le réglage « police Système » garantit
+   *aucun appel à un CDN* ; les nouveaux imports de titrage et de monospace la violaient
+   discrètement. La correction coupe les trois imports d'un coup : ce réglage est une promesse sur
+   le réseau, pas sur une police.
+3. **Une erreur dans mon propre outillage de sonde**, consignée par honnêteté : la variable de
+   redirection de base était restée à un ancien nom, si bien que l'application de test écrivait
+   dans le vrai `data/tasks.sqlite` du dépôt. Trois rappels de test y ont atterri avant que je le
+   remarque — supprimés, variable corrigée, et `conftest.py` complété pour que la suite ne puisse
+   jamais reproduire le problème.
+
+### Vérifications réellement effectuées
+
+- Suite complète : 561 → **606 tests**, hors ligne, ~20 s (`test_intake_window.py`,
+  `test_task_store.py`, plus des ajouts à `test_ui_kit.py`).
+- Mesure du DOM réel avant/après pour le chevauchement (52,5 px contre 30,8 px, puis 63 px).
+- Analyse complète dans un vrai navigateur : le cartouche de signature s'affiche, un rappel créé
+  depuis l'interface existe réellement en base, les deux panneaux de réglages sont présents.
+- Branche « envoi programmé » vérifiée via `AppTest` en semant la clé de session qu'un import Gmail
+  fournirait : l'option apparaît pour un lead Gmail, reste absente pour une saisie manuelle (il n'y
+  a alors aucun brouillon à expédier), et le bouton devient « Valider et programmer l'envoi ».
+
+### Ce qui reste non vérifié, dit clairement
+
+L'envoi programmé n'a **jamais été déclenché contre un vrai compte Gmail** : le mode démonstration
+ne produit que des saisies manuelles, sans fil Gmail. La branche d'interface est vérifiée, le
+stockage et l'annulation le sont par tests, mais `send_draft` n'est couvert que par son contrat de
+dégradation gracieuse — même limite que tous les autres chemins dépendant de Gmail dans ce projet.

@@ -2,11 +2,12 @@
 découpe en pages `st.navigation`. Accessible à tout rôle authentifié ; `_can(...)` contrôle
 localement ce qui est éditable (comme dans `ui.py` d'origine, pas de garde au niveau de la page)."""
 import os
+from datetime import datetime
 
 import streamlit as st
 
-from aca.core import branding, prod_check
-from aca.storage import activity_log, config_store, user_store
+from aca.core import branding, intake_window, prod_check, ui_kit
+from aca.storage import activity_log, config_store, task_store, user_store
 from aca.ui.shared import audit as _audit, audit_denied as _audit_denied, can as _can, safe_error as _safe_error, t
 
 BRAND = branding.resolve()
@@ -133,6 +134,116 @@ else:
         "indépendant) et à chaque analyse d'e-mail — pas besoin de redémarrer un process pour "
         "qu'un changement prenne effet."
     )
+
+# ── Réception automatique (§19) ─────────────────────────────────────────────────────────────
+# La barre latérale disait « traités automatiquement par le poller en arrière-plan (`poller.py`) »
+# et rien n'était réglable : ni l'activation, ni les horaires, ni la fréquence. C'était donc à la
+# fois opaque (un nom de fichier en guise d'explication) et figé (tout passait par `.env` puis un
+# redémarrage). Ce panneau expose les quatre choses qu'une équipe veut réellement décider — est-ce
+# que ça tourne, quels jours, quelles heures, à quelle fréquence — et `poller.py` les relit à
+# chaque cycle, donc un changement prend effet sans redémarrer quoi que ce soit.
+if _can(user_store.PERM_EDIT_SETTINGS):
+    st.divider()
+    st.subheader(t("settings.intake_header"), anchor=False)
+    st.caption(t("settings.intake_caption"))
+
+    _cfg = intake_window.current_config()
+    _now = datetime.now()
+    _open_now = intake_window.is_open(_now, _cfg)
+    _next = intake_window.next_opening(_now, _cfg)
+    st.html(ui_kit.readout([
+        (t("settings.intake_status"),
+         t("settings.intake_status_open") if _open_now else t("settings.intake_status_closed"),
+         "on" if _open_now else "off"),
+        (t("settings.intake_next"),
+         (t("settings.intake_now") if _open_now
+          else (_next.strftime("%d/%m %H:%M") if _next else "—")), ""),
+    ]))
+
+    with st.form("intake_form"):
+        _enabled = st.toggle(
+            t("settings.intake_enabled"), value=_cfg["enabled"],
+            help=t("settings.intake_enabled_help"),
+        )
+        _days = st.multiselect(
+            t("settings.intake_days"), options=list(range(7)), default=list(_cfg["days"]),
+            format_func=lambda d: intake_window.DAY_LABELS[d],
+            help=t("settings.intake_days_help"),
+        )
+        _c1, _c2, _c3 = st.columns(3)
+        _start = _c1.time_input(t("settings.intake_start"), value=_cfg["start"], step=900)
+        _end = _c2.time_input(t("settings.intake_end"), value=_cfg["end"], step=900)
+        # Exprimé en MINUTES dans l'interface, stocké en secondes : personne ne raisonne en
+        # « 300 secondes », tout le monde raisonne en « toutes les 5 minutes ».
+        _every = _c3.number_input(
+            t("settings.intake_every"),
+            min_value=max(1, intake_window.MIN_INTERVAL_SECONDS // 60),
+            max_value=intake_window.MAX_INTERVAL_SECONDS // 60,
+            value=max(1, _cfg["interval_seconds"] // 60), step=1,
+            help=t("settings.intake_every_help"),
+        )
+        if st.form_submit_button(t("settings.intake_save"), type="primary",
+                                 icon=":material/schedule:"):
+            _before = intake_window.describe(_cfg)
+            config_store.set_setting(intake_window.SETTING_ENABLED, "1" if _enabled else "0")
+            config_store.set_setting(
+                intake_window.SETTING_DAYS,
+                ",".join(str(d) for d in sorted(_days)) if _days else "",
+            )
+            config_store.set_setting(intake_window.SETTING_START, _start.strftime("%H:%M"))
+            config_store.set_setting(intake_window.SETTING_END, _end.strftime("%H:%M"))
+            config_store.set_setting(intake_window.SETTING_INTERVAL, str(int(_every) * 60))
+            # L'avant/après en clair : « qui a changé quelque chose » ne suffit pas quand le
+            # réglage décide si les e-mails entrants sont lus ou non.
+            _audit(
+                activity_log.ACTION_SETTINGS_CHANGED, target_type="réception",
+                target_id="intake",
+                details={"avant": _before, "après": intake_window.describe()},
+            )
+            st.success(t("settings.intake_saved"), icon=":material/check_circle:")
+            st.rerun()
+
+# ── Tâches programmées (§19) ────────────────────────────────────────────────────────────────
+# Un envoi différé qu'on ne peut pas retrouver est un envoi qu'on ne peut pas annuler : sans cette
+# liste, la seule façon d'empêcher un message programmé de partir serait de supprimer le brouillon
+# dans Gmail — en espérant se souvenir qu'il existe. Visible par tout rôle qui valide des leads,
+# pas seulement l'administrateur : c'est l'opérateur qui programme ces envois.
+if _can(user_store.PERM_VALIDATE_LEAD):
+    st.divider()
+    st.subheader(t("settings.tasks_header"), anchor=False)
+    st.caption(t("settings.tasks_caption"))
+
+    _pending_tasks = task_store.list_pending()
+    if not _pending_tasks:
+        st.caption(t("settings.tasks_empty"))
+    for _task in _pending_tasks:
+        with st.container(border=True):
+            _left, _right = st.columns([5, 1])
+            with _left:
+                # `chip_row` attend des DICTS (`chip(**item)`), contrairement à `readout` qui
+                # prend des tuples positionnels — deux conventions voisines dans le même module,
+                # d'où la confusion qui a produit ici un TypeError à l'affichage.
+                st.html(ui_kit.chip_row([
+                    {"label": _task["kind_label"], "tone": "info",
+                     "icon": ("schedule_send" if _task["kind"] == task_store.KIND_SEND
+                              else "alarm")},
+                    {"label": _task["due_at"], "tone": "warn", "icon": "event"},
+                ]))
+                st.markdown(f"**{_task['label'] or _task['thread_id'] or '—'}**")
+                if _task["note"]:
+                    st.caption(_task["note"])
+                if _task["created_by"]:
+                    st.caption(t("settings.tasks_by", who=_task["created_by"]))
+            with _right:
+                if st.button(t("settings.tasks_cancel"), key=f"cancel_task_{_task['id']}",
+                             icon=":material/cancel:"):
+                    task_store.cancel(_task["id"], "Annulé depuis les réglages.")
+                    _audit(
+                        activity_log.ACTION_TASK_CANCELLED, target_type=_task["kind"],
+                        target_id=str(_task["id"]),
+                        details={"échéance": _task["due_at"], "lead": _task["label"]},
+                    )
+                    st.rerun()
 
 # ── Apparence / marque blanche (§17) ────────────────────────────────────────────────────────
 if _can(user_store.PERM_EDIT_SETTINGS):

@@ -18,7 +18,7 @@ import os
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-from aca.storage import activity_log, followup_store, queue_store
+from aca.storage import activity_log, followup_store, queue_store, task_store
 from aca.integrations import sheets
 from .app import checkpointer
 
@@ -133,11 +133,21 @@ def purge_subject(sender: str) -> dict:
         except Exception as e:
             print(f"⚠️ Échec de la suppression du thread {thread_id} : {e}")
 
+    # §19 — annuler les tâches datées de chaque fil concerné. Un envoi programmé qui survivrait à
+    # un effacement RGPD expédierait un e-mail commercial à quelqu'un qui vient précisément de
+    # demander qu'on efface ses données : le pire moment possible pour que la machine parle encore.
+    tasks_cancelled = 0
+    for thread_id in threads:
+        tasks_cancelled += task_store.cancel_for_thread(
+            thread_id, "Effacement RGPD (article 17).",
+        )
+
     result = {
         "leads": purge_leads_by_sender(sender),
         "checkpoints": checkpoints_deleted,
         "queue": queue_store.purge_sender(sender),
         "followup": followup_store.purge_sender(sender),
+        "tasks": tasks_cancelled,
     }
     # §18 — un effacement RGPD explicite (article 17) mérite sa propre trace, distincte de la purge
     # d'ancienneté périodique de `run()` : c'est un événement rare et sensible qu'un administrateur
@@ -182,6 +192,13 @@ def run() -> None:
           f"(> {ACTIVITY_RETENTION_DAYS} jours, > {ACTIVITY_SENSITIVE_RETENTION_DAYS} jours pour "
           f"les événements sensibles — la chaîne d'empreintes repart de la plus ancienne ligne "
           f"restante, ce n'est pas une falsification).")
+    # §19 — les tâches TERMINÉES seulement : une note de rappel peut nommer un prospect, donc elle
+    # relève de la même politique de rétention que le reste. Les tâches encore en attente sont
+    # épargnées quelle que soit leur ancienneté (cf. `task_store.purge_older_than`) : une échéance
+    # lointaine reste une intention valide, et l'effacer ferait disparaître un envoi qu'une
+    # personne croit programmé.
+    n_tasks = task_store.purge_older_than(RETENTION_DAYS)
+    print(f"✅ {n_tasks} tâche(s) programmée(s) terminée(s) supprimée(s) (tasks.sqlite).")
     # §18 — trace machine de la purge périodique elle-même (distincte de `purge_old_activity`, qui
     # purge le JOURNAL — ici on trace le fait que Leads/checkpoints/file ont été purgés). Un seul
     # événement (pas un par emplacement) : c'est une seule décision de rétention exécutée d'un coup.

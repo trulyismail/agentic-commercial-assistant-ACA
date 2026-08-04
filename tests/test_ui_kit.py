@@ -125,6 +125,28 @@ def test_stat_row_compose_plusieurs_stats():
     assert "aca-stat--ok" in html
 
 
+def test_les_rangees_acceptent_aussi_des_tuples():
+    """
+    Régression : `chip_row`/`stat_row` n'acceptaient que des dicts, alors que `readout()` prend des
+    tuples — deux conventions voisines dans le même module. Le panneau « Tâches programmées » est
+    parti en `TypeError` illisible en production pour cette seule raison. Les deux écritures sont
+    désormais équivalentes ; ce test verrouille les deux formes en même temps.
+    """
+    en_dict = ui_kit.chip_row([{"label": "Envoi programmé", "tone": "info", "icon": "schedule_send"}])
+    en_tuple = ui_kit.chip_row([("Envoi programmé", "info", "schedule_send")])
+    assert en_dict == en_tuple
+    assert "aca-chip2--info" in en_tuple
+
+    assert ui_kit.stat_row([{"label": "A", "value": 1}]) == ui_kit.stat_row([("A", 1)])
+
+
+def test_chip_row_tuple_partiel_ne_leve_pas():
+    # Un tuple plus court doit rester valide : les champs absents gardent leur défaut.
+    html = ui_kit.chip_row([("Sans ton",)])
+    assert "Sans ton" in html
+    assert "aca-chip2--" not in html
+
+
 def test_chip_row_compose_plusieurs_chips():
     html = ui_kit.chip_row([{"label": "OK", "tone": "ok"}, {"label": "Attention", "tone": "warn"}])
     assert "aca-chip2--ok" in html
@@ -190,3 +212,67 @@ def test_key_hints_rend_chaque_paire():
     html = ui_kit.key_hints([("V", "Valider"), ("R", "Rejeter")])
     assert "<kbd>V</kbd>" in html and "Valider" in html
     assert "<kbd>R</kbd>" in html and "Rejeter" in html
+
+
+# ── Bloc de signature (§19) ───────────────────────────────────────────────────────────────────
+def test_signoff_porte_le_signataire_et_le_moment():
+    html = ui_kit.signoff("Entreprise Exemple", "operator", "03/08/2026 à 14:12")
+    assert "Entreprise Exemple" in html
+    assert "operator" in html
+    assert "03/08/2026 à 14:12" in html
+    assert "aca-signoff" in html
+
+
+def test_signoff_enumere_les_effets_avant_le_geste():
+    """
+    Les effets ne sont pas décoratifs : valider sans savoir ce que ça écrit n'est pas un
+    consentement éclairé, et c'est précisément la garantie que ce produit revendique.
+    """
+    html = ui_kit.signoff(
+        "Lead", "operator", "maintenant",
+        effects=[("cloud_upload", "Écriture CRM"), "Brouillon Gmail"],
+    )
+    assert "Écriture CRM" in html
+    assert "Brouillon Gmail" in html
+
+
+def test_signoff_echappe_un_nom_dentreprise_hostile():
+    # Le nom vient du LLM, qui l'a extrait d'un e-mail entrant : non fiable par construction.
+    html = ui_kit.signoff("<script>alert(1)</script>", "op", "maintenant")
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_signoff_sans_effets_reste_valide():
+    html = ui_kit.signoff("Lead", "op", "maintenant")
+    assert "aca-signoff__effects" not in html
+    assert "aca-signoff" in html
+
+
+# ── Relevé (§19) ──────────────────────────────────────────────────────────────────────────────
+def test_readout_rend_chaque_couple():
+    html = ui_kit.readout([("Réception", "en marche", "on"), ("prochaine", "05/08 08:00", "")])
+    assert "Réception" in html and "en marche" in html
+    assert "05/08 08:00" in html
+
+
+def test_readout_applique_le_ton_demande():
+    assert "aca-readout__v--on" in ui_kit.readout([("k", "v", "on")])
+    assert "aca-readout__v--off" in ui_kit.readout([("k", "v", "off")])
+    assert "aca-readout__v--due" in ui_kit.readout([("k", "v", "due")])
+
+
+def test_readout_ignore_un_ton_inconnu_sans_lever():
+    html = ui_kit.readout([("k", "v", "fuchsia")])
+    assert "aca-readout__v--fuchsia" not in html
+    assert "v" in html
+
+
+def test_readout_echappe_les_valeurs():
+    html = ui_kit.readout([("<b>k</b>", "<i>v</i>")])
+    assert "<b>" not in html and "<i>" not in html
+    assert "&lt;b&gt;" in html
+
+
+def test_readout_vide_ne_leve_pas():
+    assert "aca-readout" in ui_kit.readout([])

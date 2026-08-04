@@ -121,6 +121,11 @@ class AgentState(TypedDict):
     gmail_message_id: Optional[str]  # ID Gmail (sérialisable) pour marquer l'e-mail traité
     gmail_thread_id: Optional[str]   # Vrai threadId Gmail (relances, cf. relance.py) — hors graphe
     action_status: str         # Message de résultat de l'écriture CRM (rempli par action_node)
+    gmail_draft_id: Optional[str]    # §19 — ID du brouillon Gmail créé par action_node. Rendu au
+                                     # lieu d'être jeté : c'est l'objet qu'un envoi programmé
+                                     # expédiera le moment venu (cf. storage/task_store.py), donc
+                                     # exactement le texte que l'humain a relu — pas une
+                                     # regénération ultérieure du modèle.
     # ── Orchestration multi-agents (superviseur) ──
     next_agent: str            # Décision du superviseur : prochain worker ou "FINISH"
     completed_agents: Annotated[list, operator.add]  # Workers déjà exécutés (réducteur = concat)
@@ -757,6 +762,10 @@ def action_node(state: AgentState) -> dict:
     status = "Lead ajouté au CRM."
     if hubspot_deal_id:
         status += " Deal HubSpot créé."
+    # Initialisé avant les deux conditions qui l'alimentent : une saisie manuelle n'a pas de
+    # message Gmail, donc pas de brouillon, et l'état doit alors porter `None` explicitement
+    # plutôt que de faire lever un NameError au retour de la fonction.
+    draft_id = None
     msg_id = state.get("gmail_message_id")
     if msg_id:
         service = None
@@ -771,7 +780,12 @@ def action_node(state: AgentState) -> dict:
         draft_text = state.get("draft_response", "")
         if draft_text and service is not None:
             try:
-                gmail_reader.create_draft_reply(
+                # §19 : l'ID du brouillon était jusqu'ici jeté. Le conserver est ce qui rend
+                # l'envoi programmé possible ET honnête — la tâche différée expédiera CE
+                # brouillon-là, celui que l'humain vient de relire, au lieu de reconstruire un
+                # message plus tard. Si la personne le modifie ou le supprime dans Gmail
+                # entre-temps, c'est sa version qui part, ou rien.
+                draft_id = gmail_reader.create_draft_reply(
                     service, msg_id, to=email.get("sender", ""),
                     subject=email.get("subject", ""), body=draft_text,
                 )
@@ -779,7 +793,7 @@ def action_node(state: AgentState) -> dict:
             except Exception as e:
                 status += f" (Échec de la création du brouillon Gmail : {e})"
     print(f"   → {status}")
-    return {"action_status": status}
+    return {"action_status": status, "gmail_draft_id": draft_id}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

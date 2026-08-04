@@ -89,6 +89,82 @@ def _job_billing() -> None:
     billing.report_usage(days=30)
 
 
+def _job_tasks() -> None:
+    """
+    Exécute les tâches datées posées par un humain (§19) : envois programmés et rappels.
+
+    Deux natures, deux effets, une seule boucle — cf. `storage/task_store.py` pour la raison d'une
+    table unique. Chaque tâche est traitée isolément dans son propre `try` : une adresse Gmail
+    injoignable sur un lead ne doit pas empêcher le rappel du lead suivant de partir (même principe
+    que la boucle `for` de `poller.poll_once()`).
+
+    Le service Gmail n'est construit **qu'en présence d'un envoi réellement dû** : l'immense
+    majorité des passages ne trouve rien à faire, et ouvrir une session Gmail à chaque tick pour
+    repartir aussitôt reviendrait à payer un appel réseau par minute pour rien.
+    """
+    from aca.storage import task_store
+
+    due = task_store.list_due(time.time())
+    if not due:
+        return
+
+    service = None
+    for task in due:
+        try:
+            if task["kind"] == task_store.KIND_SEND:
+                from aca.integrations import gmail_reader
+
+                if not task["gmail_draft_id"]:
+                    # Sans brouillon, il n'y a rien à envoyer et il n'y en aura jamais : marquer en
+                    # échec plutôt que laisser la tâche « en attente » éternellement à retenter.
+                    task_store.mark_failed(task["id"], "Aucun brouillon Gmail associé.")
+                    continue
+                if service is None:
+                    service = gmail_reader.get_gmail_service()
+                sent_id = gmail_reader.send_draft(service, task["gmail_draft_id"])
+                if sent_id:
+                    task_store.mark_done(task["id"], f"Message {sent_id} envoyé.")
+                    logger.info("Envoi programmé effectué (tâche %s).", task["id"])
+                else:
+                    # `send_draft` ne lève pas : un brouillon supprimé dans Gmail est une annulation
+                    # humaine légitime, pas un incident. On la consigne sans la crier.
+                    task_store.mark_failed(
+                        task["id"], "Brouillon introuvable ou envoi refusé par Gmail.",
+                    )
+            else:
+                from aca.integrations import notify
+
+                label = task["label"] or task["thread_id"] or "lead"
+                # `send_all` et non `send` : un rappel personnel doit arriver sur TOUS les canaux
+                # configurés. `send()` s'arrête au premier succès, donc dès que Slack fonctionnait
+                # l'e-mail n'était jamais envoyé — silencieusement, alors que c'est justement le
+                # canal qu'on retrouve le lendemain matin dans sa boîte.
+                channels = notify.send_all(
+                    f"⏰ Rappel — {label}\n\n{task['note']}",
+                    subject=f"Rappel ACA — {label}",
+                )
+                # L'application est un canal à part entière : le rappel reste dans la barre
+                # latérale jusqu'à ce qu'un humain clique « Vu » (`acknowledged_at`). Il n'y a donc
+                # plus de cas « n'a atteint personne » — c'est ce qui distingue cette version de la
+                # précédente, qui marquait un échec faute de Slack ou d'e-mail. Le fait qu'un
+                # humain ait RÉELLEMENT vu le rappel n'est pas porté par `status` mais par
+                # `acknowledged_at`, qui reste vide tant que personne ne l'a acquitté.
+                task_store.mark_done(
+                    task["id"],
+                    "Rappel poussé vers " + (", ".join(channels + ["l'application"])),
+                )
+
+            activity_log.log(
+                activity_log.ACTION_TASK_EXECUTED,
+                actor=task["created_by"] or "(planificateur)", target_type=task["kind"],
+                target_id=str(task["id"]), source=activity_log.SOURCE_CLI,
+                details={"échéance": task["due_at"], "lead": task["thread_id"]},
+            )
+        except Exception as e:
+            logger.warning("Tâche %s en échec : %s", task.get("id"), e)
+            task_store.mark_failed(task.get("id"), str(e)[:200])
+
+
 ARCHIVE_DIR = os.getenv("ACA_ARCHIVE_DIR", "data/archives")
 
 
@@ -158,6 +234,18 @@ JOBS = {
         "default_hours": 720,  # ~mensuel — le mois archivé est déterminé par _last_completed_month,
                                 # pas par cette cadence de vérification
         "label": "Archive mensuelle du journal d'activité",
+    },
+    "tasks": {
+        "fn": _job_tasks,
+        "env": "ACA_SCHEDULE_TASKS_HOURS",
+        # 1/60 h = 60 s, soit un passage par tick. Seul travail de cette table dont la cadence est
+        # sub-horaire, et c'est justifié : les autres traitent des échéances en jours ou en mois,
+        # celui-ci exécute une heure choisie par un humain. Une vérification horaire ferait partir
+        # à 15 h 00 un message demandé pour 14 h 15 — un décalage que personne n'accepterait d'un
+        # envoi différé. Le vrai contrôle d'échéance est `task_store.list_due()` ; ce travail se
+        # contente de la consulter souvent, et ne coûte rien quand elle est vide.
+        "default_hours": 1 / 60,
+        "label": "Envois programmés et rappels",
     },
 }
 

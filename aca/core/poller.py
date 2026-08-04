@@ -13,15 +13,19 @@ POLL_INTERVAL_SECONDS (défaut : 60).
 import os
 import time
 import traceback
+from datetime import datetime
 from dotenv import load_dotenv
 from langchain_core.callbacks import UsageMetadataCallbackHandler
 
 from aca.storage import activity_log, analytics_store, queue_store
-from aca.core import app as aca_graph
+from aca.core import app as aca_graph, intake_window
 from aca.integrations import gmail_reader
 
 load_dotenv()
 
+# Conservé pour les déploiements existants dont le `.env` porte cette variable : `intake_window`
+# la lit comme valeur de repli quand aucun intervalle n'a été réglé depuis l'interface. La cadence
+# effective vient désormais de `intake_window.current_config()`, relue à chaque tour de boucle.
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "60"))
 
 
@@ -106,15 +110,51 @@ def poll_once() -> None:
 
 
 def run_forever() -> None:
+    """
+    Boucle de réception, encadrée par la fenêtre horaire réglée dans « Réglages » (§19).
+
+    Trois changements par rapport à la boucle nue d'origine, tous pour la même raison — un réglage
+    affiché dans l'interface doit être vrai, pas décoratif :
+
+    1. **La fenêtre est respectée.** Hors plage, Gmail n'est pas contacté du tout. Analyser à 3 h du
+       matin consommait du quota et déclenchait une alerte pour une équipe qui ne la verrait qu'à
+       9 h — et faisait paraître « ancienne » une analyse que personne n'aurait pu traiter plus tôt.
+    2. **L'intervalle est relu à chaque tour**, jamais figé à l'import : changer la cadence depuis
+       l'interface prend effet au cycle suivant, sans redémarrer le processus.
+    3. **L'attente hors plage est plafonnée à une minute.** Dormir jusqu'à la prochaine ouverture
+       serait plus économe, mais le réglage peut changer pendant ce sommeil : quelqu'un qui
+       réactive la réception à 14 h ne doit pas attendre le lendemain matin parce que la boucle
+       s'était endormie pour douze heures.
+    """
     queue_store.init_db()
-    print(f"[Poller] Démarré — intervalle {POLL_INTERVAL_SECONDS}s. Ctrl+C pour arrêter.")
+    print(f"[Poller] Démarré — {intake_window.describe()} Ctrl+C pour arrêter.")
+
+    was_open = None
     while True:
-        try:
-            poll_once()
-        except Exception as e:
-            print(f"⚠️ [Poller] Erreur de cycle (connexion Gmail ?) : {e}")
-            traceback.print_exc()
-        time.sleep(POLL_INTERVAL_SECONDS)
+        config = intake_window.current_config()
+        now = datetime.now()
+        open_now = intake_window.is_open(now, config)
+
+        if open_now:
+            if was_open is False:
+                print(f"[Poller] Ouverture de la fenêtre de réception ({now:%H:%M}).")
+            try:
+                poll_once()
+            except Exception as e:
+                print(f"⚠️ [Poller] Erreur de cycle (connexion Gmail ?) : {e}")
+                traceback.print_exc()
+            delay = config["interval_seconds"]
+        else:
+            if was_open is not False:
+                # Une seule ligne au moment de la fermeture, pas une par tour : un journal qui
+                # répète « fermé » toutes les minutes devient illisible et noie les vraies lignes.
+                nxt = intake_window.next_opening(now, config)
+                when = f"jusqu'au {nxt:%d/%m à %H:%M}" if nxt else "(aucune ouverture programmée)"
+                print(f"[Poller] Hors plage de réception — en veille {when}.")
+            delay = min(60, config["interval_seconds"])
+
+        was_open = open_now
+        time.sleep(delay)
 
 
 if __name__ == "__main__":

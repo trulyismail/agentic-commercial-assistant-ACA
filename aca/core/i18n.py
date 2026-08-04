@@ -40,7 +40,24 @@ TRANSLATIONS = {
     # ── Barre latérale (ui.py) ───────────────────────────────────────────────────────────────
     "sidebar.logout": {"fr": "Se déconnecter", "en": "Sign out"},
     "sidebar.queue_header": {"fr": "File d'attente ({n})", "en": "Queue ({n})"},
+    # §19 — remplace « traités automatiquement par le poller en arrière-plan (`poller.py`) ».
+    "sidebar.queue_explainer": {
+        "fr": "ACA relève votre boîte de réception et prépare une analyse pour chaque e-mail. "
+              "Rien n'atteint le CRM avant votre validation.",
+        "en": "ACA checks your inbox and prepares an analysis for each email. Nothing reaches "
+              "the CRM before you validate it.",
+    },
+    "sidebar.intake_state": {"fr": "Réception", "en": "Intake"},
+    "sidebar.intake_on": {"fr": "en marche", "en": "running"},
+    "sidebar.intake_paused": {"fr": "hors plage", "en": "outside hours"},
+    "sidebar.intake_off": {"fr": "désactivée", "en": "off"},
+    "sidebar.intake_next": {"fr": "reprise", "en": "resumes"},
     "sidebar.mark_seen": {"fr": "Marquer comme vu", "en": "Mark as seen"},
+    # §19 — rappels échus affichés dans l'application (canal sans aucun service externe).
+    "sidebar.reminders_header": {"fr": "Rappels à traiter ({n})", "en": "Reminders due ({n})"},
+    "sidebar.reminder_ack": {"fr": "Vu", "en": "Got it"},
+    "sidebar.reminder_toast": {"fr": "Rappel : {note}", "en": "Reminder: {note}"},
+    "sidebar.reminder_no_note": {"fr": "(rappel sans note)", "en": "(reminder with no note)"},
     "sidebar.new_since_login_caption": {"fr": "{n} nouvelle(s) depuis votre connexion.",
                                         "en": "{n} new since you signed in."},
     "sidebar.queue_empty": {"fr": "Aucune analyse en attente pour le moment.",
@@ -229,6 +246,68 @@ TRANSLATIONS = {
     "inbox.reject_button": {"fr": "Rejeter (ne pas envoyer au CRM)", "en": "Reject (do not send to CRM)"},
     "inbox.rejected_info": {"fr": "Lead rejeté — non envoyé au CRM.", "en": "Lead rejected — not sent to CRM."},
 
+    # ── §19 — envoi programmé et rappels (app_pages/1_inbox.py) ─────────────────────────────
+    # Libellés écrits du point de vue de la personne : « Envoi de la réponse » plutôt que
+    # « déclencher la tâche », « De quoi faut-il se souvenir ? » plutôt que « note ». Le
+    # vocabulaire d'une interface est la signalétique de ceux qui s'y déplacent.
+    "inbox.send_mode_label": {"fr": "Envoi de la réponse", "en": "Sending the reply"},
+    "inbox.send_now": {"fr": "Brouillon Gmail seulement", "en": "Gmail draft only"},
+    "inbox.send_scheduled": {"fr": "Programmer l'envoi", "en": "Schedule the send"},
+    "inbox.send_mode_help": {
+        "fr": "Par défaut, ACA prépare un brouillon dans le fil Gmail et vous l'envoyez vous-même. "
+              "« Programmer l'envoi » expédie ce même brouillon à l'heure choisie — vous pouvez "
+              "encore le corriger ou le supprimer dans Gmail d'ici là.",
+        "en": "By default ACA prepares a draft in the Gmail thread and you send it yourself. "
+              "\"Schedule the send\" sends that same draft at the chosen time — you can still "
+              "edit or delete it in Gmail before then.",
+    },
+    "inbox.send_date": {"fr": "Date d'envoi", "en": "Send date"},
+    "inbox.send_time": {"fr": "Heure d'envoi", "en": "Send time"},
+    "inbox.send_past_warning": {
+        "fr": "Cette date est déjà passée. Choisissez un moment à venir.",
+        "en": "That date has already passed. Pick a future moment.",
+    },
+    "inbox.send_confirm": {
+        "fr": "Le brouillon partira le {when}, sauf si vous le supprimez dans Gmail d'ici là.",
+        "en": "The draft will go out on {when}, unless you delete it in Gmail before then.",
+    },
+    "inbox.validate_and_schedule_button": {
+        "fr": "Valider et programmer l'envoi", "en": "Validate and schedule the send",
+    },
+    "inbox.send_scheduled_ok": {
+        "fr": "Envoi programmé pour le {when}.", "en": "Send scheduled for {when}.",
+    },
+    "inbox.send_scheduled_no_draft": {
+        "fr": "Le lead est validé, mais le brouillon Gmail n'a pas pu être créé : "
+              "l'envoi n'a donc pas été programmé.",
+        "en": "The lead is validated, but the Gmail draft could not be created, so no send "
+              "was scheduled.",
+    },
+    "inbox.reminder_expander": {"fr": "Se faire rappeler ce lead", "en": "Remind me about this lead"},
+    "inbox.reminder_caption": {
+        "fr": "Une note datée pour vous et votre équipe. Rien n'est envoyé au prospect — c'est un "
+              "rappel interne, pas une relance.",
+        "en": "A dated note for you and your team. Nothing is sent to the prospect — this is an "
+              "internal reminder, not a follow-up.",
+    },
+    "inbox.reminder_note": {"fr": "De quoi faut-il se souvenir ?", "en": "What should you remember?"},
+    "inbox.reminder_placeholder": {
+        "fr": "Rappeler le prix révisé avant la réunion",
+        "en": "Mention the revised price before the meeting",
+    },
+    "inbox.reminder_date": {"fr": "Date du rappel", "en": "Reminder date"},
+    "inbox.reminder_time": {"fr": "Heure du rappel", "en": "Reminder time"},
+    "inbox.reminder_button": {"fr": "Créer le rappel", "en": "Create reminder"},
+    "inbox.reminder_needs_note": {
+        "fr": "Écrivez ce dont il faut se souvenir — un rappel vide n'apprend rien le jour venu.",
+        "en": "Write what to remember — an empty reminder tells you nothing on the day.",
+    },
+    "inbox.reminder_past": {
+        "fr": "Ce moment est déjà passé. Choisissez une date à venir.",
+        "en": "That moment has already passed. Pick a future date.",
+    },
+    "inbox.reminder_ok": {"fr": "Rappel créé pour le {when}.", "en": "Reminder created for {when}."},
+
     # ── Onglet « Tableau de bord » (app_pages/2_dashboard.py) ───────────────────────────────
     "dashboard.caption": {
         "fr": "Calculé à partir de `analytics_store.py` — TOUTES les analyses (y compris SPAM/AUTRE/"
@@ -318,6 +397,60 @@ TRANSLATIONS = {
               "configuration below, but not change it.",
     },
     "settings.save_button": {"fr": "Enregistrer les réglages", "en": "Save settings"},
+
+    # ── §19 — réception automatique et tâches programmées ───────────────────────────────────
+    "settings.intake_header": {"fr": "Réception automatique", "en": "Automatic intake"},
+    "settings.intake_caption": {
+        "fr": "Quand ACA relève votre boîte de réception. Hors de cette plage, aucun e-mail n'est "
+              "lu ni analysé — utile pour éviter qu'une alerte parte la nuit ou le week-end. Les "
+              "e-mails ne sont pas perdus : ils sont traités à la réouverture.",
+        "en": "When ACA checks your inbox. Outside these hours no email is read or analysed — "
+              "handy to avoid alerts firing at night or over the weekend. Nothing is lost: "
+              "emails are processed when the window reopens.",
+    },
+    "settings.intake_status": {"fr": "État", "en": "Status"},
+    "settings.intake_status_open": {"fr": "en marche", "en": "running"},
+    "settings.intake_status_closed": {"fr": "en veille", "en": "idle"},
+    "settings.intake_next": {"fr": "prochaine relève", "en": "next check"},
+    "settings.intake_now": {"fr": "en continu", "en": "continuous"},
+    "settings.intake_enabled": {"fr": "Activer la réception automatique", "en": "Enable automatic intake"},
+    "settings.intake_enabled_help": {
+        "fr": "Désactivée, ACA n'ouvre plus votre boîte de réception. Vous pouvez toujours "
+              "importer un e-mail à la main depuis la barre latérale.",
+        "en": "When off, ACA no longer opens your inbox. You can still import an email by hand "
+              "from the sidebar.",
+    },
+    "settings.intake_days": {"fr": "Jours de réception", "en": "Days"},
+    "settings.intake_days_help": {
+        "fr": "Aucun jour coché = tous les jours.",
+        "en": "No day selected = every day.",
+    },
+    "settings.intake_start": {"fr": "À partir de", "en": "From"},
+    "settings.intake_end": {"fr": "Jusqu'à", "en": "Until"},
+    "settings.intake_every": {"fr": "Vérifier toutes les (min)", "en": "Check every (min)"},
+    "settings.intake_every_help": {
+        "fr": "Un délai court repère les e-mails plus vite mais interroge Gmail plus souvent. "
+              "Cinq minutes conviennent à la plupart des équipes.",
+        "en": "A short delay spots emails sooner but queries Gmail more often. Five minutes "
+              "suits most teams.",
+    },
+    "settings.intake_save": {"fr": "Enregistrer la réception", "en": "Save intake settings"},
+    "settings.intake_saved": {
+        "fr": "Réception mise à jour — prise en compte au prochain cycle, sans redémarrage.",
+        "en": "Intake updated — applied on the next cycle, no restart needed.",
+    },
+    "settings.tasks_header": {"fr": "Tâches programmées", "en": "Scheduled tasks"},
+    "settings.tasks_caption": {
+        "fr": "Envois différés et rappels à venir. Annuler un envoi ici l'empêche de partir ; le "
+              "brouillon reste dans Gmail.",
+        "en": "Upcoming scheduled sends and reminders. Cancelling a send here stops it going "
+              "out; the draft stays in Gmail.",
+    },
+    "settings.tasks_empty": {
+        "fr": "Rien de programmé pour le moment.", "en": "Nothing scheduled right now.",
+    },
+    "settings.tasks_by": {"fr": "Programmé par {who}", "en": "Scheduled by {who}"},
+    "settings.tasks_cancel": {"fr": "Annuler", "en": "Cancel"},
     "settings.appearance_header": {"fr": "Apparence et identité visuelle", "en": "Appearance and branding"},
     "settings.apply_appearance_button": {"fr": "Appliquer l'identité visuelle", "en": "Apply branding"},
     "settings.accounts_header": {"fr": "Comptes et rôles", "en": "Accounts and roles"},

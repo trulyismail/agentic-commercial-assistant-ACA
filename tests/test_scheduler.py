@@ -16,9 +16,20 @@ from aca.storage import schedule_store
 
 @pytest.fixture(autouse=True)
 def _clean_schedule_db(tmp_path, monkeypatch):
-    """Base de planification neuve pour chaque test (isolation entre cas)."""
+    """
+    Bases neuves pour chaque test (isolation entre cas).
+
+    `task_store` est réinitialisé au même titre que `schedule_store` : `conftest.py` ne redirige
+    `ACA_TASK_DB` que pour la SESSION, si bien que les tâches créées par un test restaient visibles
+    du suivant. Invisible tant que chaque cas n'affirmait que sur la tâche qu'il venait de créer,
+    mais faux dès qu'un test porte sur le contenu global d'une liste (« quels rappels sont dus ? »).
+    """
+    from aca.storage import task_store
+
     monkeypatch.setattr(schedule_store, "DB_PATH", str(tmp_path / "schedule.sqlite"))
+    monkeypatch.setattr(task_store, "DB_PATH", str(tmp_path / "tasks.sqlite"))
     schedule_store.init_db()
+    task_store.init_db()
 
 
 # ── Intervalles : lecture dynamique de l'environnement ────────────────────────────────────────
@@ -144,7 +155,11 @@ def test_run_due_jobs_runs_only_due_ones(monkeypatch):
     executed = scheduler.run_due_jobs(now)
 
     assert "relance" not in executed
-    assert set(executed) == {"maintenance", "retention", "billing", "archive"}
+    # Dérivé de `JOBS` plutôt qu'écrit en dur : la liste en dur a cassé à chaque nouveau travail
+    # (« archive » au §18, « tasks » au §19) alors que le comportement testé — « tout ce qui est
+    # échu tourne, sauf ce qui vient de tourner » — n'avait pas changé. La version dérivée exprime
+    # cette intention et échoue toujours si `run_due_jobs` en oublie un.
+    assert set(executed) == set(scheduler.JOBS) - {"relance"}
     assert "relance" not in ran
 
 
@@ -277,3 +292,180 @@ def test_archive_job_declared_like_the_others():
     assert spec["env"] == "ACA_SCHEDULE_ARCHIVE_HOURS"
     assert spec["default_hours"] > 0
     assert spec["label"]
+
+
+# ── §19 — envois programmés et rappels : le travail qui ENVOIE réellement ─────────────────────
+# Le registre (`task_store`) est testé à part ; ce qui suit vérifie le maillon manquant, celui qui
+# transforme une tâche échue en e-mail effectivement expédié. Sans ces tests, « l'envoi
+# automatique fonctionne » n'était qu'une intention exprimée dans du code jamais exécuté.
+class _FakeDrafts:
+    def __init__(self, store):
+        self.store = store
+
+    def send(self, userId=None, body=None):          # noqa: N803 (signature de l'API Gmail)
+        self.store.append(body["id"])
+        return type("R", (), {"execute": lambda _self: {"id": "msg-42"}})()
+
+
+class _FakeGmail:
+    """Doublure minimale du service Gmail : `service.users().drafts().send(...).execute()`."""
+
+    def __init__(self):
+        self.sent = []
+
+    def users(self):
+        return self
+
+    def drafts(self):
+        return _FakeDrafts(self.sent)
+
+
+def test_un_envoi_programme_echu_part_reellement(monkeypatch):
+    from aca.integrations import gmail_reader
+    from aca.storage import task_store
+
+    fake = _FakeGmail()
+    monkeypatch.setattr(gmail_reader, "get_gmail_service", lambda: fake)
+
+    task_id = task_store.schedule_send(
+        time.time() - 60, thread_id="t-send", gmail_draft_id="draft-1", created_by="operator",
+    )
+    scheduler._job_tasks()
+
+    assert fake.sent == ["draft-1"]                     # le brouillon relu par l'humain, lui-même
+    task = task_store.get_task(task_id)
+    assert task["status"] == task_store.STATUS_DONE
+    assert "msg-42" in task["detail"]
+
+
+def test_une_tache_non_echue_reste_intacte(monkeypatch):
+    from aca.integrations import gmail_reader
+    from aca.storage import task_store
+
+    fake = _FakeGmail()
+    monkeypatch.setattr(gmail_reader, "get_gmail_service", lambda: fake)
+
+    task_id = task_store.schedule_send(
+        time.time() + 3600, thread_id="t-futur", gmail_draft_id="draft-futur",
+    )
+    scheduler._job_tasks()
+
+    assert fake.sent == []
+    assert task_store.get_task(task_id)["status"] == task_store.STATUS_PENDING
+
+
+def test_une_tache_annulee_nest_jamais_envoyee(monkeypatch):
+    """La propriété qui compte le plus : annuler doit empêcher le départ, pas seulement le masquer."""
+    from aca.integrations import gmail_reader
+    from aca.storage import task_store
+
+    fake = _FakeGmail()
+    monkeypatch.setattr(gmail_reader, "get_gmail_service", lambda: fake)
+
+    task_id = task_store.schedule_send(
+        time.time() - 60, thread_id="t-annule", gmail_draft_id="draft-annule",
+    )
+    task_store.cancel(task_id)
+    scheduler._job_tasks()
+
+    assert fake.sent == []
+    assert task_store.get_task(task_id)["status"] == task_store.STATUS_CANCELLED
+
+
+def test_un_brouillon_supprime_dans_gmail_echoue_proprement(monkeypatch):
+    """
+    Supprimer le brouillon dans Gmail est une annulation humaine légitime : `send_draft` renvoie
+    `None` sans lever, et la tâche passe en échec plutôt que d'être retentée indéfiniment.
+    """
+    from aca.integrations import gmail_reader
+    from aca.storage import task_store
+
+    monkeypatch.setattr(gmail_reader, "get_gmail_service", lambda: _FakeGmail())
+    monkeypatch.setattr(gmail_reader, "send_draft", lambda service, draft_id: None)
+
+    task_id = task_store.schedule_send(
+        time.time() - 60, thread_id="t-perdu", gmail_draft_id="draft-disparu",
+    )
+    scheduler._job_tasks()
+
+    assert task_store.get_task(task_id)["status"] == task_store.STATUS_FAILED
+
+
+def test_un_rappel_echu_notifie_lequipe_sans_toucher_a_gmail(monkeypatch):
+    from aca.integrations import gmail_reader, notify
+    from aca.storage import task_store
+
+    envoyes = []
+    monkeypatch.setattr(
+        notify, "send_all", lambda message, **kw: envoyes.append(message) or ["Slack", "e-mail"],
+    )
+
+    def _interdit():
+        raise AssertionError("un rappel ne doit jamais ouvrir de session Gmail")
+
+    monkeypatch.setattr(gmail_reader, "get_gmail_service", _interdit)
+
+    task_id = task_store.add_reminder(
+        time.time() - 60, "Rappeler Dupont", thread_id="t-rappel", label="Entreprise Exemple",
+    )
+    scheduler._job_tasks()
+
+    assert len(envoyes) == 1
+    assert "Rappeler Dupont" in envoyes[0]
+    assert task_store.get_task(task_id)["status"] == task_store.STATUS_DONE
+
+
+def test_un_rappel_part_sur_tous_les_canaux_pas_seulement_le_premier(monkeypatch):
+    """
+    `send()` s'arrête au premier succès : dès que Slack marchait, l'e-mail n'était jamais envoyé.
+    Pour un rappel personnel c'est le mauvais comportement — la personne veut le retrouver AUSSI
+    dans sa boîte. Ce test verrouille l'usage de `send_all` plutôt que `send`.
+    """
+    from aca.integrations import notify
+    from aca.storage import task_store
+
+    canaux = []
+    monkeypatch.setattr(notify, "_notify_slack",
+                        lambda message, webhook_url=None, blocks=None: canaux.append("Slack") or True)
+    monkeypatch.setattr(notify, "_notify_email",
+                        lambda message, to=None, subject=None: canaux.append("e-mail") or True)
+
+    task_id = task_store.add_reminder(time.time() - 60, "Deux canaux", thread_id="t-deux")
+    scheduler._job_tasks()
+
+    assert canaux == ["Slack", "e-mail"]                 # les DEUX, pas seulement Slack
+    detail = task_store.get_task(task_id)["detail"]
+    assert "Slack" in detail and "e-mail" in detail and "application" in detail
+
+
+def test_un_rappel_sans_canal_externe_reste_visible_dans_lapplication(monkeypatch):
+    """
+    Sans Slack ni NOTIFY_EMAIL, le rappel n'est PAS un échec : il reste affiché dans la barre
+    latérale jusqu'à ce qu'un humain clique « Vu ». C'est `acknowledged_at`, et non `status`, qui
+    porte l'information « quelqu'un l'a réellement vu » — d'où un `status` « effectué » assorti
+    d'un détail honnête sur le canal réellement emprunté.
+    """
+    from aca.integrations import notify
+    from aca.storage import task_store
+
+    monkeypatch.setattr(notify, "send_all", lambda message, **kw: [])
+
+    task_id = task_store.add_reminder(time.time() - 60, "Visible en local", thread_id="t-x")
+    scheduler._job_tasks()
+
+    task = task_store.get_task(task_id)
+    assert task["status"] == task_store.STATUS_DONE
+    assert "application" in task["detail"]
+    assert task["acknowledged_at"] is None               # personne ne l'a encore vu
+    assert [r["id"] for r in task_store.list_due_reminders(time.time())] == [task_id]
+
+
+def test_le_travail_tasks_tourne_a_chaque_tick():
+    """
+    Seule cadence sub-horaire de la table, et c'est justifié : une vérification horaire ferait
+    partir à 15 h 00 un message demandé pour 14 h 15.
+    """
+    spec = scheduler.JOBS["tasks"]
+    assert callable(spec["fn"])
+    assert spec["env"] == "ACA_SCHEDULE_TASKS_HOURS"
+    assert spec["default_hours"] * 3600 <= 60

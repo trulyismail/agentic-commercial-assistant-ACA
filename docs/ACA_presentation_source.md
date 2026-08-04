@@ -150,12 +150,18 @@ START → classifier (Llama-8B + confidence score) → memory_lookup (returning 
   knowledge-gap warnings, a prospect card, the agents' reasoning trace, and an **editable** draft.
 - One button — **"Valider"** — which is the *only* path to writing the lead into
   Google Sheets + HubSpot and creating the Gmail reply draft.
+- At that same moment, two optional decisions about **timing**: send the approved reply
+  **now or at a chosen date and time**, and leave a **dated reminder** on the lead.
 - A **dashboard tab**: volumes by category, daily trend, conversion funnel, response times,
   edit rate, tokens per analysis.
+- A **settings screen** that controls when the assistant reads the inbox (days, hours, frequency)
+  and lists every scheduled send and reminder, each cancellable.
 
 > **Key talking points:** "It drafts and waits." The AI does 90 % of the preparation; the human
 > keeps 100 % of the decision. Every risky spot (vague need, low confidence, risk clause, missing
-> knowledge) is *surfaced*, not silently guessed.
+> knowledge) is *surfaced*, not silently guessed. Scheduling does not weaken that: the person has
+> already read and approved the text — they are choosing the *moment*, exactly like send-later in
+> any mail client, and what goes out is the Gmail draft they can still edit or delete.
 
 ---
 
@@ -189,9 +195,17 @@ START → classifier (Llama-8B + confidence score) → memory_lookup (returning 
 | FR-23 | Keep an audit trail of every validation (who, what, when) behind an optional password gate | ✅ |
 | FR-24 | Purge personal data past a retention window (GDPR) | ✅ |
 | FR-25 | Alert a human even for normally-silent categories when classification confidence is low | ✅ |
+| FR-26 | **Schedule the approved reply** for a chosen date and time; the scheduler sends the Gmail draft itself, so editing or deleting it in Gmail still wins | ✅ |
+| FR-27 | **Set a dated reminder** on a lead — delivered to Slack, email *and* in-app, and kept on screen until a human acknowledges it | ✅ |
+| FR-28 | **Choose when automatic intake runs** — on/off, days, opening hours, frequency — applied without restarting anything | ✅ |
+| FR-29 | Ship the interface in the client's own identity (name, logo, colours, typography) without touching code | ✅ |
+| FR-30 | Trace every human action — logins, failed logins, validations, rejections, settings and knowledge changes — in a tamper-evident journal, with 2FA on admin accounts | ✅ |
+| FR-31 | Export the proposal as a branded PDF; switch the interface between French and English | ✅ |
 
-> **Key talking points:** 25 functional requirements, all implemented and verified — most of them
-> live-tested against the real Gmail, Sheets, Slack, Tavily, and HubSpot services.
+> **Key talking points:** 31 functional requirements, all implemented and verified — most of them
+> live-tested against the real Gmail, Sheets, Slack, Tavily, and HubSpot services. FR-26 to FR-28
+> all answer the same operator question — *"and **when** does it happen?"* — which is what turns a
+> convincing demonstration into something a sales team can run its week on.
 
 ---
 
@@ -269,7 +283,7 @@ flowchart TB
 | Observability | **LangSmith** (free tier) + local analytics SQLite + token logging | Per-node traces; KPIs without paid infra |
 | Packaging | **Docker** (one image, four services) + **compose profiles** `solo` / `enterprise` | Same image both tiers; n8n added or removed by one word. Credentials mounted read-only, never baked into a layer; non-root user |
 | CI | **GitHub Actions** — tests on Python 3.11 + 3.14, `pip-audit`, derived-artifact drift check | Possible only because the suite is fully offline: it runs on a public runner with no secrets |
-| Testing | **pytest** — 352 offline tests (~13 s) + 50-email labeled eval set | Fake LLMs, temp DBs, full-graph integration tests; classifier measured at 100 % |
+| Testing | **pytest** — 620 offline tests (~21 s) + 50-email labeled eval set | Fake LLMs, temp DBs, full-graph integration tests; classifier measured at 100 % |
 
 ### Non-functional requirements (all implemented)
 
@@ -322,22 +336,29 @@ flowchart TB
 | **Two deployment tiers, n8n optional** | Solo (API + UI + poller + scheduler) is autonomous *without* n8n; Enterprise adds it for cross-system orchestration. Same image, same code — one word on the compose line. The distinction "automation ≠ orchestration" is itself the product argument |
 | **Event-driven integration, not polling** | 5 outbound HMAC-signed webhooks push state to n8n; the alternative would have been reimplementing our own poller inside n8n |
 | **Zero-credential demo mode** | The whole graph runs with no API key at all — real nodes, real supervisor, real pause, simulated model. Evaluators can *run* it, not just read it. CRM writes fail loudly rather than degrading quietly |
-| **Full measurement culture** | 352 automated tests, a 50-email labeled eval set (100 % accuracy), token-per-analysis logging, edit rate, response-time funnel, `pip-audit` in CI |
+| **Scheduling without giving up the gate** | The reply can leave at 9 a.m. tomorrow, yet nothing was ever sent unread: what is scheduled is the *Gmail draft the human approved*. Edit it in Gmail and your version goes; delete it and nothing does. Human authority stays intact — it is merely exercised earlier |
+| **Intake on the team's schedule** | The assistant reads the inbox during working hours, not at 3 a.m. — saving quota, avoiding night alerts, and keeping analyses fresh when someone can actually act on them |
+| **White-label by data, not by fork** | Name, logo, colours and typography are settings, so a client instance is configured rather than *modified* — no per-client branch to maintain |
+| **Full measurement culture** | 620 automated tests, a 50-email labeled eval set (100 % accuracy), token-per-analysis logging, edit rate, response-time funnel, `pip-audit` in CI |
 | **Critical audit of AI-generated advice** | Three external AI-written architecture documents were audited against the real code; good ideas were adopted, and **two factual errors were caught before being copied in** (a wrong hallucination-gate threshold and a mis-sized vector schema) |
 
 ### Measured results
 
 - Classifier accuracy: **100 %** (50/50) on the labeled eval set (96 % before structured-output migration).
-- Test suite: **352 tests, ~13 s, fully offline** — no key, no network, so it also runs on a public
+- Test suite: **620 tests, ~21 s, fully offline** — no key, no network, so it also runs on a public
   CI runner with zero secrets.
-- Live-verified integrations: Gmail, Google Sheets, Slack, Tavily, HubSpot, Supabase (pgvector +
-  cross-process checkpointing + RLS), LangSmith, Calendly link injection, GDPR purge/erasure.
+- Live-verified integrations: Gmail (including the **full scheduled-send round trip** — draft
+  created in-thread, visible in Gmail, sent by the scheduler, draft consumed), Google Sheets,
+  Slack, Tavily, HubSpot, Supabase (pgvector + cross-process checkpointing + RLS), LangSmith,
+  Calendly link injection, GDPR purge/erasure.
 - Dependency scan (`pip-audit`): **0 known vulnerabilities**.
 - Verification caught **real bugs before production**: a retry-swallowing anti-pattern, a
   cp1252 print crash that would have *duplicated CRM leads*, a silent pgvector
   misconfiguration, an IPv6-only database host, four raw-exception leaks in the UI, a dashboard
   session cookie that never expired server-side, a graph diagram silently out of sync with the
-  real graph, and an outbound event that was documented but never emitted.
+  real graph, an outbound event that was documented but never emitted, a reminder that reported
+  itself delivered when no channel was configured, and two test files sharing one database between
+  cases — invisible until a test asked "what is due *right now*?".
 
 > **Key talking points:** the innovation is not "we used an LLM" — it's the *governance around*
 > the LLM: guardrails, staging, self-critique, honesty flags, and measurement, at zero cost.
@@ -594,6 +615,8 @@ full 20-story detail is in `docs/ACAM_roadmap.md` §12–§16.*
 | **Run it anywhere** | Two packaged tiers — *Solo* (works alone) and *Enterprise* (adds n8n) | ✅ Packaged · image never built |
 | **Trust it with a real inbox** | Named accounts and roles, expiring sessions, a tamper-evident audit trail, GDPR erasure on request | ✅ Done |
 | **Try it in 30 seconds** | The whole product runs with no account and no API key at all | ✅ Done |
+| **Make it theirs** | The interface carries the client's name, logo, colours and typography — configured, not forked | ✅ Done |
+| **Decide when things happen** | Send an approved reply at a chosen time, leave dated reminders, and set the hours during which the inbox is read | ✅ Live-verified end to end |
 
 > **The finding worth telling in the defence.** The last phase began as a narrow technical
 > question. Auditing the code instead of answering from memory surfaced something bigger:
@@ -612,6 +635,7 @@ full 20-story detail is in `docs/ACAM_roadmap.md` §12–§16.*
 | S4 | 7–8 | 94 | 94 ✅ | Agent team, autonomy, measurement (largest sprint) |
 | **Total (internship)** | **8 weeks** | **160** | **160 ✅** | **Scope delivered in full** |
 | Extension | post-8w | 122 | ~114 ✅ | Commercialisation, security, packaging — pulled forward on request. Only usage billing left unverified |
+| Extension | post-8w | 46 | 46 ✅ | White-label identity, 2FA + activity journal, and operator control of *timing* (scheduled sends, reminders, intake hours) |
 
 ---
 

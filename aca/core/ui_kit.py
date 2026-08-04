@@ -67,6 +67,66 @@ def section(title: str, subtitle: str = "", icon: str = "", eyebrow: str = "") -
     return "".join(parts)
 
 
+# ── Bloc de signature (§19) ───────────────────────────────────────────────────────────────────
+def signoff(title: str, signer: str, moment: str, effects=(),
+            eyebrow: str = "Bon pour accord") -> str:
+    """
+    Cartouche de signature affiché juste avant les boutons de décision.
+
+    Reprend la pratique commerciale française du « Bon pour accord » parce qu'elle décrit
+    exactement ce que fait ce produit : une personne nommée engage sa responsabilité sur un
+    document avant qu'il produise le moindre effet. Deux boutons sous une zone de texte ne
+    portaient pas cette information.
+
+    `effects` énumère ce que la validation déclenchera — énoncé AVANT le geste. Valider sans savoir
+    ce que ça écrit n'est pas un consentement éclairé, et c'est précisément la garantie que ce
+    produit revendique.
+
+    Chaque valeur est échappée : `signer` vient d'un compte, `effects` peut nommer une entreprise
+    extraite par le LLM depuis un e-mail entrant — donc du contenu non fiable par construction.
+    """
+    parts = [
+        '<div class="aca-signoff">',
+        f'<span class="aca-signoff__eyebrow">{_icon("draw")}{_text(eyebrow)}</span>',
+        f'<div class="aca-signoff__title">{_text(title)}</div>',
+        f'<div class="aca-signoff__who">Sous la responsabilité de <strong>{_text(signer)}</strong>'
+        f" — {_text(moment)}</div>",
+    ]
+    if effects:
+        parts.append('<ul class="aca-signoff__effects">')
+        for effect in effects:
+            if isinstance(effect, (tuple, list)):
+                icon_name, text = (list(effect) + ["", ""])[:2]
+            else:
+                icon_name, text = "check_small", effect
+            parts.append(f"<li>{_icon(icon_name)}<span>{_text(text)}</span></li>")
+        parts.append("</ul>")
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def readout(entries) -> str:
+    """
+    Relevé façon cadran : suite de couples (libellé, valeur, ton) en police monospace.
+
+    Employé pour l'état de la réception automatique et les compteurs d'en-tête. Le monospace n'est
+    pas un effet de style : ces valeurs changent d'un rafraîchissement à l'autre, et des chiffres
+    tabulaires évitent que la mise en page sursaute à chaque variation.
+
+    `tone` accepte "on" / "off" / "due" — respectivement en marche, à l'arrêt, échéance atteinte.
+    """
+    parts = ['<div class="aca-readout">']
+    for entry in entries:
+        label, value, tone = (list(entry) + ["", "", ""])[:3]
+        suffix = f" aca-readout__v--{tone}" if tone in ("on", "off", "due") else ""
+        parts.append(
+            f'<span><span class="aca-readout__k">{_text(label)}</span> '
+            f'<span class="aca-readout__v{suffix}">{_text(value)}</span></span>'
+        )
+    parts.append("</div>")
+    return "".join(parts)
+
+
 # ── Rail de décision (composant signature) ────────────────────────────────────────────────────
 STEP_DONE = "done"
 STEP_ACTIVE = "active"
@@ -118,9 +178,28 @@ def stat(label: str, value, hint: str = "", tone: str = "") -> str:
     )
 
 
+def _kw(item, *names) -> dict:
+    """
+    Normalise un élément de rangée : dict passé tel quel, tuple interprété positionnellement.
+
+    Ajouté après un vrai `TypeError` en production : `chip_row`/`stat_row` n'acceptaient que des
+    dicts, alors que `readout()` (ajouté au §19 dans ce même module) prend des tuples. Deux
+    conventions voisines pour des composants voisins, et l'appelant se trompe — le message obtenu
+    étant de surcroît illisible (« argument after ** must be a mapping, not tuple »).
+
+    Accepter les deux formes ne masque aucune ambiguïté : un dict et un tuple sont distinguables
+    sans équivoque, et aucun appelant existant ne change de comportement. C'est le même parti pris
+    de tolérance que les analyseurs de `intake_window.py` — une trousse de composants internes doit
+    absorber les deux écritures plutôt que faire tomber une page sur une virgule.
+    """
+    return dict(item) if isinstance(item, dict) else dict(zip(names, item))
+
+
 def stat_row(stats) -> str:
-    """Rangée d'indicateurs. `stats` : séquence de dicts passés tels quels à `stat()`."""
-    return f'<div class="aca-stat-row">{"".join(stat(**item) for item in stats)}</div>'
+    """Rangée d'indicateurs. `stats` : séquence de dicts — ou de tuples `(label, value, hint, tone)`."""
+    return (f'<div class="aca-stat-row">'
+            f'{"".join(stat(**_kw(item, "label", "value", "hint", "tone")) for item in stats)}'
+            f"</div>")
 
 
 def chip(label: str, tone: str = "", icon: str = "") -> str:
@@ -130,8 +209,10 @@ def chip(label: str, tone: str = "", icon: str = "") -> str:
 
 
 def chip_row(chips) -> str:
-    """Rangée de pastilles. `chips` : séquence de dicts passés tels quels à `chip()`."""
-    return f'<div class="aca-chip-row">{"".join(chip(**item) for item in chips)}</div>'
+    """Rangée de pastilles. `chips` : séquence de dicts — ou de tuples `(label, tone, icon)`."""
+    return (f'<div class="aca-chip-row">'
+            f'{"".join(chip(**_kw(item, "label", "tone", "icon")) for item in chips)}'
+            f"</div>")
 
 
 # ── États vides ───────────────────────────────────────────────────────────────────────────────

@@ -69,6 +69,10 @@ _ENV_OVERRIDES = {
     "ACA_FOLLOWUP_DB": os.path.join(_TMP_DIR, "followup.sqlite"),
     "ACA_CONFIG_DB": os.path.join(_TMP_DIR, "config.sqlite"),
     "ACA_SCHEDULE_DB": os.path.join(_TMP_DIR, "schedule.sqlite"),
+    # §19 : sans cette redirection, un test qui programme un envoi écrirait dans le vrai
+    # `data/tasks.sqlite` — et le planificateur de la machine de développement finirait par
+    # exécuter une tâche née d'un test, c'est-à-dire par envoyer un e-mail pour de bon.
+    "ACA_TASK_DB": os.path.join(_TMP_DIR, "tasks.sqlite"),
 }
 os.environ.update(_ENV_OVERRIDES)
 

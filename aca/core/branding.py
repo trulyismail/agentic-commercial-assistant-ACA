@@ -69,55 +69,84 @@ TOKENS = {
         "help": "PNG, JPEG, SVG ou WebP, 512 Ko maximum. Vide = icône Material par défaut.",
     },
     # Couleurs
+    #
+    # §19 — palette par défaut refondue. L'ancienne (#0078D4 / #8764B8) était le bleu Fluent de
+    # Microsoft plus un violet : exactement le duo que produit n'importe quel gabarit de tableau de
+    # bord, donc rien qui distingue ce produit-ci. Le parti pris qui la remplace tient en une
+    # phrase : **le travail de la machine est froid, la décision humaine est chaude.** Le pétrole
+    # profond porte tout ce que la machine a préparé (chrome, liens, états actifs) ; l'ambre brûlé
+    # est réservé au moment où une personne doit trancher. La palette dit donc quelque chose de vrai
+    # sur le produit au lieu de le décorer. Le fond reste FROID, ce qui évite au passage le trio
+    # crème / serif / terracotta qu'on retrouve sur toutes les maquettes générées.
+    #
+    # Tout reste surchargeable par client : ce ne sont que des valeurs par défaut.
     "BRAND_PRIMARY": {
         "label": "Couleur principale", "kind": KIND_COLOR, "group": "Couleurs",
-        "default": "#0078D4",
+        "default": "#125E6B",
         "help": "Boutons d'action, liens, éléments actifs. Doit rester lisible sous du texte blanc.",
     },
     "BRAND_ACCENT": {
         "label": "Couleur d'accent", "kind": KIND_COLOR, "group": "Couleurs",
-        "default": "#8764B8",
-        "help": "Second ton des dégradés (en-tête, boutons). Choisir une teinte voisine ou "
-                "complémentaire de la principale.",
+        "default": "#B4622A",
+        "help": "Réservée au moment de décision (validation en attente). À garder distincte de la "
+                "couleur principale : c'est ce contraste qui fait ressortir l'action à mener.",
     },
     "BRAND_BACKGROUND": {
-        "label": "Fond principal", "kind": KIND_COLOR, "group": "Couleurs", "default": "#FFFFFF",
+        "label": "Fond principal", "kind": KIND_COLOR, "group": "Couleurs", "default": "#F1F4F5",
     },
     "BRAND_SURFACE": {
-        "label": "Fond des cartes", "kind": KIND_COLOR, "group": "Couleurs", "default": "#F5F7FA",
-        "help": "Doit se distinguer du fond principal, sinon les cartes disparaissent.",
+        "label": "Fond des cartes", "kind": KIND_COLOR, "group": "Couleurs", "default": "#FFFFFF",
+        "help": "Doit se distinguer du fond principal, sinon les cartes disparaissent. Ici les "
+                "cartes sont plus CLAIRES que la page : des documents posés sur un plan de travail.",
     },
     "BRAND_SIDEBAR": {
         "label": "Fond de la barre latérale", "kind": KIND_COLOR, "group": "Couleurs",
-        "default": "#F3F4F7",
+        "default": "#E9EEEF",
     },
     "BRAND_TEXT": {
-        "label": "Texte", "kind": KIND_COLOR, "group": "Couleurs", "default": "#1A1A1A",
+        "label": "Texte", "kind": KIND_COLOR, "group": "Couleurs", "default": "#12171C",
     },
     "BRAND_BORDER": {
-        "label": "Bordures", "kind": KIND_COLOR, "group": "Couleurs", "default": "#E2E5EA",
+        "label": "Bordures", "kind": KIND_COLOR, "group": "Couleurs", "default": "#D5DDE0",
     },
     "BRAND_SUCCESS": {
-        "label": "Succès", "kind": KIND_COLOR, "group": "Couleurs d'état", "default": "#107C10",
+        "label": "Succès", "kind": KIND_COLOR, "group": "Couleurs d'état", "default": "#1F6F4A",
     },
     "BRAND_WARNING": {
         "label": "Avertissement", "kind": KIND_COLOR, "group": "Couleurs d'état",
-        "default": "#D83B01",
+        "default": "#B4622A",
     },
     "BRAND_DANGER": {
         "label": "Erreur / risque", "kind": KIND_COLOR, "group": "Couleurs d'état",
-        "default": "#E81123",
+        "default": "#A32C1E",
     },
     "BRAND_INFO": {
-        "label": "Information", "kind": KIND_COLOR, "group": "Couleurs d'état", "default": "#00B7C3",
+        "label": "Information", "kind": KIND_COLOR, "group": "Couleurs d'état", "default": "#125E6B",
     },
     # Mise en forme
     "BRAND_FONT": {
-        "label": "Police", "kind": KIND_CHOICE, "group": "Mise en forme", "default": "Inter",
+        "label": "Police du texte", "kind": KIND_CHOICE, "group": "Mise en forme",
+        "default": "Inter",
         "choices": ["Inter", "Open Sans", "Roboto", "Lato", "Montserrat", "Poppins",
                     "IBM Plex Sans", "Source Sans 3", "Nunito", "Système"],
-        "help": "Chargée depuis Google Fonts. « Système » n'appelle aucun serveur externe — "
-                "à choisir si le réseau du client bloque les CDN.",
+        "help": "La voix de l'outil : formulaires, tableaux, corps de texte. Chargée depuis Google "
+                "Fonts. « Système » n'appelle aucun serveur externe — à choisir si le réseau du "
+                "client bloque les CDN.",
+    },
+    # §19 — un troisième rôle typographique, et il est mérité plutôt que décoratif. Ce produit
+    # fabrique des DOCUMENTS commerciaux qu'un client finit par signer : la serif porte la voix du
+    # document (titres, en-tête de marque), la sans porte la voix de l'outil (formulaires,
+    # tableaux), et le monospace porte les valeurs de la machine (compteurs, horodatages,
+    # identifiants — cf. `--aca-mono`, non paramétrable car ce n'est pas un choix de marque mais
+    # une exigence de lisibilité : des chiffres tabulaires dans une file d'attente s'alignent).
+    # Fraunces par défaut plutôt qu'une serif de gabarit : axes optiques et « wonk », donc une
+    # personnalité que Playfair ou Lora n'ont pas.
+    "BRAND_FONT_DISPLAY": {
+        "label": "Police des titres", "kind": KIND_CHOICE, "group": "Mise en forme",
+        "default": "Fraunces",
+        "choices": ["Fraunces", "Instrument Serif", "Archivo", "Space Grotesk", "Identique au texte"],
+        "help": "Employée uniquement en grand : en-tête de marque et titres de page. « Identique "
+                "au texte » supprime le contraste et donne une allure plus neutre.",
     },
     "BRAND_RADIUS": {
         "label": "Arrondi des angles", "kind": KIND_CHOICE, "group": "Mise en forme",
@@ -270,9 +299,27 @@ _GOOGLE_FONTS = {
     "IBM Plex Sans": "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap",
     "Source Sans 3": "https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&display=swap",
     "Nunito": "https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700&display=swap",
+    # §19 — familles de titrage. Séparées des précédentes dans `DISPLAY_FONTS` ci-dessous, mais
+    # présentes ici aussi pour que `config_toml()` sache résoudre une URL quelle que soit la famille.
+    "Fraunces": "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&display=swap",
+    "Instrument Serif": "https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap",
+    "Archivo": "https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&display=swap",
+    "Space Grotesk": "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap",
 }
 _SYSTEM_FONT_STACK = ("-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', "
                       "Arial, sans-serif")
+
+# Repli de titrage : une serif système, pour que le contraste titre/texte survive même si Google
+# Fonts est injoignable (réseau d'entreprise fermé) — sinon la hiérarchie s'effondre en silence.
+_DISPLAY_FALLBACK = "Georgia, 'Times New Roman', serif"
+
+# Face de données, NON paramétrable — contrairement aux deux autres, ce n'est pas un choix de
+# marque. Compteurs, horodatages, identifiants de fil et quotas sont des valeurs machine : elles
+# demandent des chiffres tabulaires qui s'alignent verticalement dans une file d'attente. Laisser
+# un client la remplacer par une display casserait cet alignement sans rien gagner.
+_MONO_IMPORT = ("https://fonts.googleapis.com/css2"
+                "?family=IBM+Plex+Mono:wght@400;500;600&display=swap")
+_MONO_STACK = "'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Consolas, monospace"
 
 # Densité -> (espacement vertical entre blocs, padding interne des cartes, marge haute de page).
 _DENSITY = {
@@ -561,10 +608,43 @@ def font_stack(tokens: dict) -> str:
     return f"'{family}', {_SYSTEM_FONT_STACK}"
 
 
+def display_font_stack(tokens: dict) -> str:
+    """
+    Pile de titrage. « Identique au texte » renvoie la pile de texte : un client dont la charte
+    n'a qu'une seule police doit pouvoir supprimer le contraste plutôt que de le subir.
+    """
+    family = tokens.get("BRAND_FONT_DISPLAY", "Fraunces")
+    if family in ("", "Identique au texte", None):
+        return font_stack(tokens)
+    return f"'{family}', {_DISPLAY_FALLBACK}"
+
+
 def font_import(tokens: dict) -> str:
-    """Règle `@import` Google Fonts, ou chaîne vide en police système (aucun appel réseau)."""
-    url = _GOOGLE_FONTS.get(tokens.get("BRAND_FONT", "Inter"))
-    return f"@import url('{url}');\n" if url else ""
+    """
+    Règles `@import` Google Fonts pour les trois rôles (texte, titrage, données).
+
+    Chaque famille n'est demandée qu'une fois, et « Système » / « Identique au texte » n'ajoutent
+    rien : sur un réseau qui bloque les CDN, la page reste lisible avec les piles de repli, et une
+    installation qui a choisi la police système ne doit émettre aucun appel réseau — c'était déjà
+    le contrat de cette fonction avant que le titrage et le monospace s'y ajoutent.
+    """
+    body = tokens.get("BRAND_FONT", "Inter")
+    # « Système » est une promesse sur le RÉSEAU, pas sur une police : elle est choisie quand le
+    # réseau du client bloque les CDN. Elle doit donc couper les trois imports, pas seulement celui
+    # du texte — sinon ajouter le titrage et le monospace (§19) rouvrirait discrètement deux appels
+    # externes sur les installations qui avaient précisément demandé qu'il n'y en ait aucun. Un test
+    # existant l'a attrapé immédiatement ; les piles de repli (serif système, monospace système)
+    # conservent la hiérarchie sans rien télécharger.
+    if body not in _GOOGLE_FONTS:
+        return ""
+
+    urls = []
+    for url in (_GOOGLE_FONTS.get(body),
+                _GOOGLE_FONTS.get(tokens.get("BRAND_FONT_DISPLAY", "Fraunces")),
+                _MONO_IMPORT):
+        if url and url not in urls:
+            urls.append(url)
+    return "".join(f"@import url('{url}');\n" for url in urls)
 
 
 def _variables(tokens: dict) -> str:
@@ -602,10 +682,19 @@ def _variables(tokens: dict) -> str:
   --aca-pad: {pad};
   --aca-top: {top};
   --aca-font: {font_stack(tokens)};
+  --aca-display: {display_font_stack(tokens)};
+  --aca-mono: {_MONO_STACK};
   --aca-on-primary: {readable_text_on(primary)};
+  --aca-on-accent: {readable_text_on(accent)};
   --aca-shadow: 0 1px 2px rgba(16, 24, 40, {"0.35" if dark else "0.06"}),
                 0 4px 16px rgba(16, 24, 40, {"0.30" if dark else "0.05"});
   --aca-shadow-lift: 0 10px 30px rgba(var(--aca-primary-rgb), {"0.30" if dark else "0.16"});
+  /* §19 — hauteur réservée à la barre d'en-tête de Streamlit. La barre est en `position:
+     absolute` avec un `z-index` de 999990 et un fond transparent : tout ce que la page place
+     au-dessus de cette hauteur passe DESSOUS. C'est la cause exacte du chevauchement signalé
+     (en-tête 52,5 px contre 30,8 px de marge haute). Exprimée en variable pour que la marge de la
+     page et le fond de la barre ne puissent plus diverger. */
+  --aca-header-h: 3.5rem;
 }}
 """
 
@@ -724,10 +813,46 @@ _ANIMATIONS_SUBTLE = """
 # donc en mode « aucune », où seul le bloc `prefers-reduced-motion` les réduit à zéro.
 _SURFACES = """
 [data-testid="stAppViewContainer"] { background: var(--aca-bg); }
-[data-testid="stMain"] .block-container { padding-top: var(--aca-top); max-width: 1500px; }
+
+/* §19 — CORRECTION DU CHEVAUCHEMENT. La barre d'en-tête de Streamlit (qui contient la navigation
+   haute) est `position: absolute`, `z-index: 999990`, fond transparent, et mesure ~52 px : elle est
+   donc DESSINÉE PAR-DESSUS le début de la page. L'ancienne marge haute valait `var(--aca-top)`,
+   soit 2,2 rem (~35 px) en densité confortable — plus courte que la barre, d'où l'en-tête de marque
+   passant sous la navigation (capture d'écran de l'utilisateur). Deux corrections complémentaires :
+
+   1. `max()` garantit un dégagement au moins égal à la hauteur de barre, quelle que soit la
+      densité choisie. Un `max()` plutôt qu'une valeur fixe : la densité « aérée » doit pouvoir
+      ajouter de l'air, jamais en retirer sous le seuil de sécurité.
+   2. La barre reçoit un vrai fond opaque. Sans lui, le contenu défilant passerait en transparence
+      derrière la navigation — et une barre sans matière lisait comme une pastille flottante posée
+      au hasard, ce qui est aussi un défaut de design, pas seulement de position. */
+[data-testid="stHeader"] {
+  background: var(--aca-bg);
+  border-bottom: 1px solid var(--aca-border);
+}
+[data-testid="stMain"] .block-container {
+  padding-top: max(var(--aca-top), calc(var(--aca-header-h) + 1rem));
+  max-width: 1500px;
+}
 [data-testid="stMain"] [data-testid="stVerticalBlock"] { gap: var(--aca-gap); }
 html, body, [data-testid="stAppViewContainer"], .stMarkdown, .stMarkdown p { font-family: var(--aca-font); }
-h1, h2, h3, h4, h5, h6 { font-family: var(--aca-font); letter-spacing: -.011em; }
+
+/* Trois rôles typographiques (§19). Les titres passent à la face de titrage : c'est le contraste
+   serif/sans qui porte la hiérarchie, plutôt qu'une simple différence de graisse dans une seule
+   famille — laquelle donne à toutes les pages le même aplat indifférencié. */
+h1, h2, h3 {
+  font-family: var(--aca-display);
+  letter-spacing: -.015em;
+  font-weight: 600;
+}
+h4, h5, h6 { font-family: var(--aca-font); letter-spacing: -.008em; }
+
+/* Valeurs machine en chiffres tabulaires : dans une file d'attente, des compteurs qui ne s'alignent
+   pas verticalement se comparent mal — c'est de la lisibilité, pas du style. */
+[data-testid="stMetricValue"], .aca-mono, code, [data-testid="stCode"] {
+  font-family: var(--aca-mono);
+  font-variant-numeric: tabular-nums;
+}
 
 /* Cartes : le conteneur borduré est l'unité de composition de cette application (fiche prospect,
    proposition, KPI, entrée de file d'attente). Une seule règle les met toutes d'accord. */
@@ -737,21 +862,29 @@ h1, h2, h3, h4, h5, h6 { font-family: var(--aca-font); letter-spacing: -.011em; 
 }
 [data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:hover { border-color: rgba(var(--aca-primary-rgb), .38); }
 
+/* §19 — dégradés retirés d'ici. Ils étaient partout (en-tête, boutons, cartes de KPI, navigation),
+   et un effet appliqué à tout ne hiérarchise rien : c'est la marque la plus reconnaissable d'une
+   interface produite au gabarit. Un seul dégradé subsiste dans toute l'application, sur le bloc de
+   décision (`.aca-signoff`) — le seul endroit où quelqu'un doit agir. */
 [data-testid="stMetric"] {
-  background: linear-gradient(160deg, var(--aca-surface), var(--aca-bg));
+  background: var(--aca-surface);
   border: 1px solid var(--aca-border); border-radius: var(--aca-radius-lg);
   padding: calc(var(--aca-pad) * .9) var(--aca-pad); position: relative; overflow: hidden;
   transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease;
 }
 [data-testid="stMetric"]::before {
-  content: ""; position: absolute; inset: 0 auto 0 0; width: 3px;
-  background: linear-gradient(180deg, var(--aca-primary), var(--aca-accent)); opacity: .9;
+  content: ""; position: absolute; inset: 0 auto 0 0; width: 2px;
+  background: var(--aca-primary); opacity: .55;
 }
-[data-testid="stMetric"]:hover { transform: translateY(-3px); box-shadow: var(--aca-shadow-lift); border-color: rgba(var(--aca-primary-rgb), .45); }
-[data-testid="stMetricValue"] { font-weight: 650; letter-spacing: -.02em; }
-[data-testid="stMetricLabel"] { color: var(--aca-muted); font-weight: 500; }
+[data-testid="stMetric"]:hover { transform: translateY(-2px); box-shadow: var(--aca-shadow); border-color: rgba(var(--aca-primary-rgb), .45); }
+[data-testid="stMetricValue"] { font-weight: 600; letter-spacing: -.02em; }
+[data-testid="stMetricLabel"] {
+  color: var(--aca-muted); font-weight: 500; font-size: .72rem;
+  text-transform: uppercase; letter-spacing: .07em;
+}
 
-/* Boutons */
+/* Boutons — aplats francs. La couleur principale suffit à désigner l'action ; le dégradé ne
+   faisait qu'ajouter du bruit à un élément déjà saillant par sa forme et son contraste. */
 .stButton button, .stFormSubmitButton button, .stDownloadButton button {
   border-radius: var(--aca-radius); font-weight: 550;
   transition: transform .16s ease, box-shadow .16s ease, background .16s ease, border-color .16s ease;
@@ -759,10 +892,12 @@ h1, h2, h3, h4, h5, h6 { font-family: var(--aca-font); letter-spacing: -.011em; 
 .stButton button:hover, .stFormSubmitButton button:hover, .stDownloadButton button:hover { transform: translateY(-1px); }
 .stButton button:active, .stFormSubmitButton button:active { transform: translateY(0); }
 .stButton button[kind="primary"], .stFormSubmitButton button[kind="primary"] {
-  background: linear-gradient(120deg, var(--aca-primary), var(--aca-accent));
-  border: none; color: var(--aca-on-primary); box-shadow: 0 2px 10px rgba(var(--aca-primary-rgb), .28);
+  background: var(--aca-primary);
+  border: none; color: var(--aca-on-primary); box-shadow: 0 1px 2px rgba(16,24,40,.16);
 }
-.stButton button[kind="primary"]:hover, .stFormSubmitButton button[kind="primary"]:hover { box-shadow: var(--aca-shadow-lift); }
+.stButton button[kind="primary"]:hover, .stFormSubmitButton button[kind="primary"]:hover {
+  background: var(--aca-primary-hover); box-shadow: 0 4px 14px rgba(var(--aca-primary-rgb), .30);
+}
 
 /* Barre de navigation supérieure (§18, `st.navigation(position="top")`) — remplace l'ancien
    `st.tabs()` du fichier unique pré-restructuration. `stTopNavLinkContainer`/`stTopNavLink` sont les
@@ -830,25 +965,54 @@ input:focus, textarea:focus, [data-baseweb="select"] > div:focus-within {
 """
 
 _HERO = """
+/* §19 — l'en-tête n'est plus un pavé dégradé à orbes floutées. C'était littéralement la réponse
+   type d'un gabarit (grand bloc coloré, titre, accroche, pastilles), et elle occupait le haut de
+   CHAQUE page sans jamais rien apprendre à personne après la première lecture.
+   Ce qui la remplace est un CARTOUCHE de document : filet vertical à gauche comme une marge de
+   dossier, titre en serif de titrage, et surtout des pastilles devenues des relevés — police
+   monospace, chiffres tabulaires — parce que « 2 analyses en attente » est une valeur qui change,
+   pas un ornement. Le produit est un poste de tri : son en-tête doit se lire comme un cadran, pas
+   comme une bannière marketing. */
 .aca-hero {
-  position: relative; overflow: hidden; border-radius: var(--aca-radius-lg);
-  padding: calc(var(--aca-pad) * 1.5) calc(var(--aca-pad) * 1.6);
-  margin-bottom: var(--aca-gap); color: var(--aca-on-primary);
-  background: linear-gradient(115deg, var(--aca-primary), var(--aca-accent), var(--aca-primary));
-  background-size: 220% 220%; box-shadow: var(--aca-shadow);
+  position: relative; overflow: hidden;
+  border-radius: var(--aca-radius);
+  border: 1px solid var(--aca-border);
+  border-left: 3px solid var(--aca-primary);
+  padding: calc(var(--aca-pad) * .95) calc(var(--aca-pad) * 1.15);
+  margin-bottom: var(--aca-gap);
+  color: var(--aca-text);
+  background: var(--aca-surface);
 }
-.aca-hero__title { font-size: 1.55rem; font-weight: 680; letter-spacing: -.02em; margin: 0; line-height: 1.2; }
-.aca-hero__tagline { margin: .45rem 0 0; opacity: .92; font-size: .94rem; max-width: 68ch; }
-.aca-hero__pills { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .9rem; }
+.aca-hero__title {
+  font-family: var(--aca-display);
+  font-size: 1.6rem; font-weight: 600; letter-spacing: -.02em; margin: 0; line-height: 1.15;
+  color: var(--aca-text);
+}
+.aca-hero__tagline {
+  margin: .3rem 0 0; font-size: .86rem; max-width: 74ch; color: var(--aca-muted);
+}
+.aca-hero__pills {
+  display: flex; flex-wrap: wrap; gap: .45rem; margin-top: .8rem;
+  padding-top: .7rem; border-top: 1px solid var(--aca-border);
+}
 .aca-hero__pill {
-  display: inline-flex; align-items: center; gap: .35rem; font-size: .76rem; font-weight: 600;
-  padding: .24rem .62rem; border-radius: 999px; background: rgba(255,255,255,.18);
-  border: 1px solid rgba(255,255,255,.28);
+  display: inline-flex; align-items: center; gap: .35rem;
+  font-family: var(--aca-mono); font-variant-numeric: tabular-nums;
+  font-size: .72rem; font-weight: 500; letter-spacing: .01em;
+  padding: .2rem .5rem; border-radius: 4px;
+  background: var(--aca-bg); color: var(--aca-muted);
+  border: 1px solid var(--aca-border);
 }
-.aca-hero__pill--alert { background: rgba(255,255,255,.92); color: var(--aca-danger); border-color: transparent; }
-.aca-hero__orb { position: absolute; border-radius: 50%; filter: blur(42px); opacity: .38; pointer-events: none; }
-.aca-hero__orb--a { width: 220px; height: 220px; top: -90px; right: -40px; background: #FFFFFF; }
-.aca-hero__orb--b { width: 180px; height: 180px; bottom: -110px; right: 130px; background: var(--aca-accent); }
+/* Une seule pastille peut réclamer l'attention, et elle le fait avec la couleur d'accent —
+   celle qui, dans toute l'application, ne signifie qu'une chose : quelque chose attend une
+   décision humaine. */
+.aca-hero__pill--alert {
+  background: color-mix(in srgb, var(--aca-accent) 14%, var(--aca-surface));
+  color: var(--aca-accent);
+  border-color: color-mix(in srgb, var(--aca-accent) 45%, transparent);
+  font-weight: 600;
+}
+.aca-hero__orb { display: none; }
 """
 
 _HERO_ANIMATED = """
@@ -857,18 +1021,34 @@ _HERO_ANIMATED = """
 .aca-hero__orb--b { animation: aca-float 15s ease-in-out infinite reverse; }
 """
 
+# Variantes d'en-tête. Depuis §19 la base est le cartouche sur papier ; ces deux blocs restent les
+# options qu'un client peut préférer — un bandeau plein à ses couleurs, ou rien du tout. Chacun
+# redéfinit la couleur du texte ET celle des pastilles : changer le fond sans elles produirait du
+# texte sombre sur fond sombre, c'est-à-dire un en-tête illisible réglable depuis l'interface.
 _HERO_FLAT = """
-.aca-hero { background: var(--aca-primary); }
-.aca-hero__orb { display: none; }
+.aca-hero {
+  background: var(--aca-primary); color: var(--aca-on-primary);
+  border-color: transparent; border-left-color: var(--aca-accent);
+}
+.aca-hero__title { color: var(--aca-on-primary); }
+.aca-hero__tagline { color: var(--aca-on-primary); opacity: .88; }
+.aca-hero__pills { border-top-color: rgba(255,255,255,.22); }
+.aca-hero__pill {
+  background: rgba(255,255,255,.14); color: var(--aca-on-primary);
+  border-color: rgba(255,255,255,.26);
+}
+.aca-hero__pill--alert {
+  background: var(--aca-accent); color: var(--aca-on-accent); border-color: transparent;
+}
 """
 
 _HERO_PLAIN = """
 .aca-hero {
-  background: var(--aca-surface); color: var(--aca-text); box-shadow: none;
-  border: 1px solid var(--aca-border); border-left: 4px solid var(--aca-primary);
+  background: transparent; color: var(--aca-text); box-shadow: none;
+  border: none; border-bottom: 1px solid var(--aca-border); border-radius: 0;
+  padding-left: 0; padding-right: 0;
 }
-.aca-hero__pill { background: var(--aca-bg); border-color: var(--aca-border); color: var(--aca-muted); }
-.aca-hero__orb { display: none; }
+.aca-hero__pill { background: var(--aca-surface); border-color: var(--aca-border); color: var(--aca-muted); }
 """
 
 # ── Trousse de composants (§18) ───────────────────────────────────────────────────────────────
@@ -1017,6 +1197,69 @@ _UI_KIT = """
 .aca-diff__line--hunk { color: var(--aca-primary); font-weight: 700; }
 .aca-diff__line--meta { color: var(--aca-muted); }
 .aca-diff__none { font-size: .82rem; color: var(--aca-muted); margin: .2rem 0; }
+
+/* ── Bloc de signature : LE moment du produit (§19) ────────────────────────────────────────────
+   Tout le reste de l'application est délibérément froid et sobre ; l'audace tient ici, et nulle
+   part ailleurs. C'est le seul dégradé de toute la feuille de style, et le seul emploi de la
+   couleur d'accent en aplat.
+
+   Pourquoi cette forme : la promesse du produit est qu'une PERSONNE NOMMÉE engage sa
+   responsabilité avant qu'un message parte ou qu'une ligne atteigne le CRM. Deux boutons flottant
+   sous une zone de texte ne disaient rien de cela. Le cartouche reprend la pratique commerciale
+   française du « Bon pour accord » : qui signe, quand, et ce que la signature déclenche. La forme
+   encode la responsabilité — elle ne la décore pas.
+
+   Le filet supérieur en accent fonctionne comme un onglet de dossier : on repère le bloc de
+   décision d'un coup d'œil en faisant défiler, même sans lire. */
+.aca-signoff {
+  position: relative; overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--aca-accent) 38%, var(--aca-border));
+  border-top: 3px solid var(--aca-accent);
+  border-radius: var(--aca-radius-lg);
+  padding: calc(var(--aca-pad) * .95) var(--aca-pad);
+  margin: .2rem 0 .1rem;
+  background: linear-gradient(168deg,
+              color-mix(in srgb, var(--aca-accent) 9%, var(--aca-surface)),
+              var(--aca-surface) 62%);
+}
+.aca-signoff__eyebrow {
+  display: flex; align-items: center; gap: .4rem;
+  font-family: var(--aca-mono); font-size: .68rem; font-weight: 600;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--aca-accent);
+}
+.aca-signoff__title {
+  font-family: var(--aca-display); font-size: 1.12rem; font-weight: 600;
+  letter-spacing: -.012em; color: var(--aca-text); margin: .3rem 0 .1rem;
+}
+.aca-signoff__who { font-size: .82rem; color: var(--aca-muted); }
+.aca-signoff__who strong { color: var(--aca-text); font-weight: 620; }
+/* Ce que la signature déclenche, énoncé AVANT le geste. Une validation dont on découvre les effets
+   après coup n'est pas un consentement éclairé. */
+.aca-signoff__effects {
+  list-style: none; margin: .6rem 0 0; padding: .55rem .7rem;
+  border-radius: var(--aca-radius); background: var(--aca-bg);
+  border: 1px solid var(--aca-border);
+}
+.aca-signoff__effects li {
+  display: flex; align-items: flex-start; gap: .4rem;
+  font-size: .78rem; color: var(--aca-muted); padding: .12rem 0;
+}
+.aca-signoff__effects li .aca-i { font-size: .95rem; color: var(--aca-primary); }
+.aca-signoff__effects li strong { color: var(--aca-text); font-weight: 600; }
+
+/* Relevé d'état en monospace (fenêtre de réception, dernière relève…). Les valeurs machine
+   partagent la même face partout dans l'application — c'est ce qui les rend reconnaissables
+   comme telles sans avoir à les étiqueter. */
+.aca-readout {
+  display: flex; flex-wrap: wrap; gap: .35rem .9rem; align-items: center;
+  font-family: var(--aca-mono); font-variant-numeric: tabular-nums;
+  font-size: .74rem; color: var(--aca-muted);
+}
+.aca-readout__k { text-transform: uppercase; letter-spacing: .08em; font-size: .66rem; opacity: .8; }
+.aca-readout__v { color: var(--aca-text); font-weight: 500; }
+.aca-readout__v--on { color: var(--aca-success); }
+.aca-readout__v--off { color: var(--aca-muted); }
+.aca-readout__v--due { color: var(--aca-accent); font-weight: 600; }
 
 /* Raccourcis clavier */
 .aca-keys { display: flex; flex-wrap: wrap; gap: .75rem; margin: .35rem 0 .1rem; }
