@@ -123,6 +123,20 @@ ACTION_TASK_SCHEDULED = "task.scheduled"
 ACTION_TASK_CANCELLED = "task.cancelled"
 ACTION_TASK_EXECUTED = "task.executed"
 
+# §20 — demandes de relecture (`review_store.py`). Distinctes des tâches ci-dessus : une tâche
+# s'exécute toute seule à l'échéance, une demande de relecture attend une DÉCISION d'une autre
+# personne. C'est précisément ce transfert de responsabilité qu'il faut pouvoir retrouver après
+# coup — « qui a demandé un second avis sur ce lead, et qui a tranché ».
+ACTION_REVIEW_REQUESTED = "review.requested"
+ACTION_REVIEW_RESOLVED = "review.resolved"
+ACTION_REVIEW_DISMISSED = "review.dismissed"
+
+# §20 — rapports d'activité PDF. Journalisé comme un export de données et non comme une simple
+# consultation : un rapport agrège des noms de prospects, des adresses et des volumes commerciaux
+# dans un fichier qui quitte l'application — exactement le raisonnement déjà appliqué à l'export CSV
+# du journal et au PDF de proposition (§18).
+ACTION_REPORT_GENERATED = "report.generated"
+
 # Libellés français affichés dans l'onglet « Journal d'activité » — un journal qu'un manager ne sait
 # pas lire n'est pas consulté, donc pas un contrôle.
 ACTION_LABELS = {
@@ -157,6 +171,10 @@ ACTION_LABELS = {
     ACTION_TASK_SCHEDULED: "Tâche programmée (envoi ou rappel)",
     ACTION_TASK_CANCELLED: "Tâche programmée annulée",
     ACTION_TASK_EXECUTED: "Tâche programmée exécutée",
+    ACTION_REVIEW_REQUESTED: "Relecture demandée à un administrateur",
+    ACTION_REVIEW_RESOLVED: "Demande de relecture traitée",
+    ACTION_REVIEW_DISMISSED: "Demande de relecture écartée",
+    ACTION_REPORT_GENERATED: "Rapport d'activité généré (PDF)",
 }
 
 # Actions qu'un administrateur doit voir en priorité : elles changent qui peut faire quoi, où
@@ -172,6 +190,12 @@ SENSITIVE_ACTIONS = frozenset({
     # de son auteur. Cette trace-là doit survivre à la purge courante, au même titre qu'un
     # changement de rôle — d'où sa présence ici plutôt que dans le bruit d'usage quotidien.
     ACTION_TASK_SCHEDULED, ACTION_TASK_CANCELLED,
+    # §20 : un rapport fait sortir de l'application des noms de prospects et des volumes
+    # commerciaux, au même titre qu'un export CSV. `ACTION_REVIEW_*` reste volontairement HORS de
+    # cet ensemble : demander une relecture est un geste de travail quotidien qu'on veut voir dans
+    # la frise d'un lead, pas un événement de sécurité à conserver deux fois plus longtemps — le
+    # marquer sensible noierait la poignée d'actions qui le sont réellement.
+    ACTION_REPORT_GENERATED,
 })
 
 # Ordre des champs entrant dans l'empreinte chaînée. C'EST le contrat d'intégrité de cette table :
@@ -490,6 +514,49 @@ def distinct_values(column: str, days: int = 90, org_id: str = None) -> list:
             (org_id or current_org_id(), _since(days)),
         ).fetchall()
     return [row[0] for row in rows]
+
+
+@with_sqlite_retry
+def action_counts(start: str, end: str, org_id: str = None) -> list:
+    """
+    Nombre d'événements par type d'action sur `[start, end)` — le « que s'est-il passé ce mois-ci »
+    du rapport d'activité (§20), décroissant.
+
+    Volontairement borné des deux côtés, alors que `list_recent(days=…)` ne l'est que d'un : un
+    rapport mensuel compare deux périodes closes, et une borne haute ouverte ferait entrer dans le
+    mois de juillet des événements d'août au fil de la lecture.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT action, COUNT(*) FROM activity WHERE org_id = ? AND occurred_at >= ? "
+            "AND occurred_at < ? GROUP BY action ORDER BY COUNT(*) DESC",
+            (org_id or current_org_id(), start, end),
+        ).fetchall()
+    return [
+        {"action": row[0], "action_label": ACTION_LABELS.get(row[0], row[0]), "count": row[1]}
+        for row in rows
+    ]
+
+
+@with_sqlite_retry
+def actors_between(start: str, end: str, org_id: str = None) -> list:
+    """Volume d'actions par personne sur `[start, end)` — « qui a travaillé, et combien »."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT actor, COUNT(*), "
+            "SUM(CASE WHEN action = ? THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN action = ? THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN outcome != ? THEN 1 ELSE 0 END) "
+            "FROM activity WHERE org_id = ? AND occurred_at >= ? AND occurred_at < ? "
+            "GROUP BY actor ORDER BY COUNT(*) DESC",
+            (ACTION_LEAD_VALIDATED, ACTION_LEAD_REJECTED, OUTCOME_SUCCESS,
+             org_id or current_org_id(), start, end),
+        ).fetchall()
+    return [
+        {"actor": row[0], "actions": row[1], "validations": row[2] or 0,
+         "rejets": row[3] or 0, "incidents": row[4] or 0}
+        for row in rows
+    ]
 
 
 @with_sqlite_retry

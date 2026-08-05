@@ -469,3 +469,80 @@ def test_le_travail_tasks_tourne_a_chaque_tick():
     assert callable(spec["fn"])
     assert spec["env"] == "ACA_SCHEDULE_TASKS_HOURS"
     assert spec["default_hours"] * 3600 <= 60
+
+
+# ── Rapport mensuel (§20) ─────────────────────────────────────────────────────────────────────
+def test_le_rapport_mensuel_ecrit_un_pdf_du_mois_ecoule(tmp_path, monkeypatch):
+    """
+    Le travail produit réellement un fichier, nommé d'après le dernier mois ENTIÈREMENT écoulé —
+    jamais le mois en cours, qui n'a pas fini de recevoir des lignes.
+    """
+    from aca.core import reporting
+
+    monkeypatch.setattr(scheduler, "REPORT_DIR", str(tmp_path / "reports"))
+    # Aucun canal configuré : `notify.send` retombe en silence, comme partout ailleurs.
+    scheduler._job_report()
+
+    annee, mois = reporting.last_completed_month()
+    attendu = tmp_path / "reports" / f"rapport-{annee:04d}-{mois:02d}.pdf"
+    assert attendu.exists()
+    assert attendu.read_bytes()[:4] == b"%PDF"
+
+
+def test_le_rapport_mensuel_ne_reecrit_pas_un_rapport_existant(tmp_path, monkeypatch):
+    """
+    Idempotence, même raison que `activity_log.archive_period` : si le travail repasse après une
+    purge de rétention, réécrire remplacerait un rapport complet par un rapport amputé portant le
+    même nom, sans que personne s'en aperçoive.
+    """
+    from aca.core import reporting
+
+    dossier = tmp_path / "reports"
+    monkeypatch.setattr(scheduler, "REPORT_DIR", str(dossier))
+    annee, mois = reporting.last_completed_month()
+    dossier.mkdir()
+    existant = dossier / f"rapport-{annee:04d}-{mois:02d}.pdf"
+    existant.write_bytes(b"%PDF-deja-la")
+
+    scheduler._job_report()
+    assert existant.read_bytes() == b"%PDF-deja-la"
+
+
+def test_un_echec_de_rendu_est_signale_pas_avale(tmp_path, monkeypatch):
+    """
+    `build_report_pdf` ne lève jamais et renvoie `None`. Si le travail se contentait de sortir, le
+    planificateur enregistrerait un passage « ok » et n'y reviendrait pas avant un mois : une
+    absence de rapport passerait pour un rapport à jour. Il doit donc échouer bruyamment —
+    `run_job` transforme cette exception en statut « error », sans faire tomber la boucle.
+    """
+    from aca.integrations import report_pdf
+
+    monkeypatch.setattr(scheduler, "REPORT_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(report_pdf, "build_report_pdf", lambda *a, **kw: None)
+
+    with pytest.raises(RuntimeError):
+        scheduler._job_report()
+    # Aucun fichier vide laissé derrière : sinon l'idempotence de `write_pdf` le prendrait pour un
+    # rapport déjà produit et bloquerait définitivement les tentatives suivantes.
+    assert not (tmp_path / "reports").exists() or not list((tmp_path / "reports").iterdir())
+
+    # Et le planificateur, lui, ne meurt pas : il enregistre l'échec et repart.
+    assert scheduler.run_job("report", time.time()) is False
+    assert schedule_store.get_last_run("report") is not None
+
+
+def test_une_notification_impossible_ne_transforme_pas_le_rapport_en_echec(tmp_path, monkeypatch):
+    """
+    Le rapport EXISTE : ne pas avoir su prévenir ne doit pas faire passer le travail pour un échec,
+    ce qui déclencherait une nouvelle tentative de génération à chaque tick.
+    """
+    from aca.integrations import notify
+
+    monkeypatch.setattr(scheduler, "REPORT_DIR", str(tmp_path / "reports"))
+
+    def _explose(*_args, **_kwargs):
+        raise RuntimeError("Slack injoignable")
+
+    monkeypatch.setattr(notify, "send", _explose)
+    scheduler._job_report()  # ne lève pas
+    assert list((tmp_path / "reports").iterdir())

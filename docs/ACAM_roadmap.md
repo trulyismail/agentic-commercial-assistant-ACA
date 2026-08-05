@@ -1519,3 +1519,147 @@ l'anglais en cours de session, puis les cinq pages confirmées sans exception av
 à chacune (`dashboard.caption`/`history.caption`/`activity.caption`) réellement traduite dans la
 langue active — pas seulement l'absence d'erreur. Détail complet :
 `docs/PROJECT_JOURNAL.md` (entrée du 2026-07-31).
+
+---
+
+## §20 — Relectures transmises, rapport mensuel, rapport paramétrable (2026-08-04)
+
+Trois demandes en une passe, formulées par l'utilisateur : (1) qu'un **opérateur puisse transmettre
+à l'administrateur des e-mails précis** à faire relire, plusieurs d'un seul geste, et que
+l'administrateur les voie en se connectant ; (2) qu'un **rapport PDF mensuel** raconte ce qui s'est
+passé, chiffres et graphiques compris, **en comparant au mois précédent** ; (3) que ce rapport soit
+**paramétrable au maximum** — choix des sections, des colonnes, des dates — « toujours avec le
+contexte » et « toujours avec un thème ».
+
+### 20.1 Le geste qui manquait : « je ne tranche pas, quelqu'un doit regarder »
+
+Un opérateur devant un lead qui le dépasse — clause inhabituelle, prix qu'il ne se sent pas
+d'arrêter seul, prospect stratégique — n'avait que trois issues : valider (donc écrire au CRM),
+rejeter (donc faire disparaître le lead de la file de tout le monde), ou ne rien faire et prévenir
+son responsable **hors de l'outil**, là où l'information cesse d'être traçable. Le troisième geste
+n'existait pas.
+
+[review_store.py](../aca/storage/review_store.py) l'enregistre. Registre **distinct** de
+`task_store.py`, et la distinction est la raison d'être du module — exactement le raisonnement qui
+avait déjà séparé `task_store` de `followup_store`/`schedule_store` au §19 :
+
+| | `task_store` (§19) | `review_store` (§20) |
+|---|---|---|
+| Déclencheur | une **échéance** (`list_due` interroge une horloge) | un **destinataire** (la connexion de la personne) |
+| Fin de vie | s'exécute toute seule | attend la **décision d'un humain**, qui peut répondre |
+| Question posée | « qu'est-ce qui est échu ? » | « qu'est-ce qui m'attend ? » |
+
+Les fusionner aurait imposé trois exceptions (`list_due` doit exclure ce type, le planificateur doit
+le sauter, la purge doit le traiter à part) au cœur d'une table dont la docstring vante justement
+l'uniformité.
+
+**Un lot, pas un envoi à l'unité.** Une demande porte sur un e-mail, mais la personne en désigne
+plusieurs d'un coup — c'était la demande explicite. Chaque e-mail a donc sa ligne (il se traite et
+se clôt individuellement), mais toutes les lignes d'un même geste partagent un `batch_id`, une note
+et une priorité : le destinataire lit « Marie vous a transmis 4 e-mails » et peut répondre au lot
+d'un seul clic, sans perdre la granularité quand il veut trancher au cas par cas.
+
+**Le destinataire est résolu à la lecture, pas à l'écriture.** `@admins` désigne la *fonction* : un
+administrateur recruté demain voit ce qui a été adressé à sa fonction hier. Écrire une ligne par
+administrateur au moment de l'envoi aurait figé la liste et multiplié les clôtures pour une seule
+demande.
+
+**« Vu » ≠ « traité »**, comme `acknowledged_at` au §19 : ouvrir une demande ne la retire pas de la
+file, sinon une relecture consultée puis oubliée serait perdue pour tout le monde.
+
+**« Quand l'admin se connecte, il les voit »** est porté par trois surfaces dans `ui.py` : une
+pastille d'alerte dans l'en-tête (en *alerte* et non en *normal* : contrairement à la file
+d'attente, cette demande bloque quelqu'un d'autre), un panneau dans la barre latérale, et un toast
+annoncé **une fois par lot et par session** — quatre toasts pour un seul geste d'un collègue
+seraient lus comme quatre demandes distinctes.
+
+### 20.2 Un seul moteur pour les deux rapports
+
+Le rapport mensuel automatique et le rapport paramétrable ne sont **pas deux mécanismes** : c'est
+[reporting.py](../aca/core/reporting.py) appelé avec deux spécifications. Le mensuel est une
+spécification figée (mois civil écoulé, presque toutes les sections, comparaison activée). Deux
+chemins auraient garanti qu'un jour l'un affiche un chiffre que l'autre ne connaît pas.
+
+Toutes les données existaient déjà — `analytics_store` compte les e-mails, `audit_log` les
+validations, `activity_log` les gestes, `task_store` les envois, `review_store` les relectures.
+Elles n'existaient qu'**à l'écran, en « N derniers jours », et jamais comparées** : personne ne
+pouvait répondre à « qu'est-ce que cet outil nous a apporté en juillet par rapport à juin ? », qui
+est pourtant la seule question qui justifie de reconduire l'outil. Un tableau de bord montre un
+état ; un rapport raconte une évolution.
+
+**Décisions structurantes, et pourquoi :**
+
+- **Séparation collecte / rendu.** `reporting.py` ignore ce qu'est un PDF : il produit des blocs
+  typés (`kpis`/`bars`/`line`/`table`/`text`) que
+  [report_pdf.py](../aca/integrations/report_pdf.py) dessine. Le contenu est donc testable sans
+  ouvrir un document, et un export HTML ou CSV ne demanderait pas de retoucher une requête.
+- **La comparaison porte sur la fenêtre de même durée qui précède**, pas sur « le mois d'avant ».
+  Comparer 31 jours à 28 ferait apparaître février en recul de 10 % chaque année sans qu'il s'y
+  passe quoi que ce soit.
+- **Bornes hautes exclues** partout (`analytics_store._window`). Sans cela l'événement tombant pile
+  à la frontière serait compté dans deux mois consécutifs, et la comparaison gonflerait des deux
+  côtés.
+- **Comparaison honnête** : chaque indicateur déclare le sens qui lui est favorable (`better`). Un
+  délai médian qui monte est une dégradation ; peindre toute hausse en vert produirait un rapport
+  flatteur et faux. Et une progression « de 0 à 3 » n'affiche **aucun** pourcentage, seulement
+  l'écart absolu — « +100 % » raconterait une croissance sans base.
+- **Un classement en quatre familles** (activité commerciale, qualité et intervention humaine,
+  traçabilité, exploitation), qui correspondent à quatre lecteurs différents. Quinze tableaux dans
+  l'ordre où le code les a produits ne se lisent pas. Chaque famille commence sur une page neuve :
+  c'est ce qui rend le document feuilletable.
+- **Toujours avec le contexte.** Chaque bloc porte une phrase qui dit d'où vient le chiffre et sur
+  quoi il porte, et la couverture liste les sections demandées — sans quoi un lecteur ne peut pas
+  distinguer « il ne s'est rien passé » de « cette section n'a pas été demandée ».
+- **Toujours à la marque, jamais illisible.** Le papier est forcé au clair et l'encre du client
+  n'est conservée que si son contraste tient (seuil WCAG AA 4.5) : un thème sombre est correct à
+  l'écran et désastreux sur un document imprimé puis transféré.
+- **Aucune dépendance nouvelle.** Les graphiques sont tracés avec les primitives de PyMuPDF, déjà
+  épinglé. Ajouter matplotlib pour quatre diagrammes aurait fait entrer des dizaines de mégaoctets,
+  une police à embarquer et un moteur de rendu de plus — pour produire des images matricielles
+  qu'il aurait fallu re-thématiser à la main de toute façon, puisque la palette vient du client.
+- **Le détail e-mail par e-mail est exclu du rapport mensuel automatique** : il peut faire des
+  dizaines de pages et recopie des adresses de prospects dans un fichier qui circulera. Il reste à
+  un clic dans le rapport paramétrable, où c'est une décision consciente.
+- **Les sections nominatives sont réservées aux administrateurs**, dans la page comme dans la liste
+  des rapports archivés : elles reproduisent le Journal d'activité, admin-only depuis le §17. Un
+  rapport qui les servirait sans la même garde serait un contournement pur et simple de cette règle.
+
+### 20.3 Deux défauts trouvés en regardant le document, pas en relisant le code
+
+1. **Chaque paragraphe en français débordait de la marge droite.** `fitz.get_text_length()`
+   sous-évalue gravement les caractères accentués (« ééééééééée » mesurait 22,8 points contre 45,6
+   pour « eeeeeeeeee ») : le calcul de retour à la ligne se croyait dans les clous et le texte se
+   faisait couper au bord de la page. Corrigé en mesurant via `fitz.Font(...).text_length()`.
+2. **« … » et « — » sortaient en points parasites**, dans chaque cellule tronquée et à chaque
+   valeur absente. Les polices Base-14 d'un PDF sont écrites avec un encodage Latin-1 : les glyphes
+   existent dans la police mais le document ne peut pas les désigner. Les lettres accentuées, elles,
+   sont dans Latin-1 et s'affichaient correctement — ce qui rendait le défaut d'autant plus facile à
+   ne pas voir. Corrigé **à la frontière du dessin** (un seul `_put`) plutôt qu'aux vingt-trois
+   points d'appel, même raisonnement que `console.py` pour l'encodage console. Le repli
+   `encode('latin-1', 'replace')` n'est pas de la ceinture-bretelle : un objet d'e-mail entrant peut
+   contenir n'importe quel caractère Unicode.
+
+Un troisième défaut a été trouvé par un test plutôt que par relecture : une faute de frappe dans un
+`BRAND_PRIMARY` d'un fichier `.env` faisait échouer tout le rendu (`build_report_pdf` renvoyait
+`None` conformément à son contrat), donc **plus aucun rapport mensuel n'était produit, en silence,
+la nuit**. Une couleur est un ornement ; elle ne décide plus si le document existe.
+
+### 20.4 Ce qui n'est pas fait, et pourquoi
+
+- Le rapport mensuel n'a **jamais tourné sur douze mois réels** : il est vérifié sur des données
+  synthétiques et par le travail planifié en test. Même limite que tout ce qui dépend du temps long
+  dans ce projet.
+- La notification de disponibilité du rapport passe par `notify.send()` — donc **rien n'est envoyé
+  si ni Slack ni `NOTIFY_EMAIL` ne sont configurés** (contrat inchangé). Le rapport reste visible
+  dans l'onglet « Rapports ».
+- Le PDF n'est **pas joint** à la notification : `notify.py` n'envoie que du texte, et lui ajouter
+  la gestion des pièces jointes dépassait la demande.
+- L'aperçu à l'écran est borné à 50 lignes par tableau ; le PDF, lui, les contient toutes.
+
+Suite : 620 → **697 tests** (`test_review_store.py` 21, `test_reporting.py` 27,
+`test_report_pdf.py` 25, plus 4 tests de planificateur pour le travail `report`). Vérifié en direct
+via `AppTest` : les deux nouvelles pages rendues pour les trois rôles, un parcours réel
+opérateur → administrateur (transmission d'un lot de 2, visible côté admin, invisible côté
+expéditeur), la garde admin-only des archives, et l'en-tête/barre latérale/toast de `ui.py` — un
+seul toast pour un lot de deux e-mails. Détail complet : `docs/PROJECT_JOURNAL.md`
+(entrée du 2026-08-04).

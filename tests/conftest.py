@@ -73,6 +73,15 @@ _ENV_OVERRIDES = {
     # `data/tasks.sqlite` — et le planificateur de la machine de développement finirait par
     # exécuter une tâche née d'un test, c'est-à-dire par envoyer un e-mail pour de bon.
     "ACA_TASK_DB": os.path.join(_TMP_DIR, "tasks.sqlite"),
+    # §20 : même raison que `ACA_TASK_DB` ci-dessus. Sans cette redirection, un test qui crée une
+    # demande de relecture écrirait dans le vrai `data/reviews.sqlite`, et un administrateur
+    # verrait apparaître à sa connexion des demandes fictives portant de faux prospects — dans
+    # l'écran même dont l'intérêt est de ne montrer que du travail réel.
+    "ACA_REVIEW_DB": os.path.join(_TMP_DIR, "reviews.sqlite"),
+    # Répertoire des rapports mensuels (§20). Redirigé pour la même raison que les bases : le
+    # travail planifié `report` écrit un PDF sur disque, et une exécution de la suite ne doit pas
+    # déposer de document dans `data/reports/` — ni, pire, en écraser un vrai.
+    "ACA_REPORT_DIR": os.path.join(_TMP_DIR, "reports"),
 }
 os.environ.update(_ENV_OVERRIDES)
 

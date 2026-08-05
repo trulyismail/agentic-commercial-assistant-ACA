@@ -455,6 +455,235 @@ TRANSLATIONS = {
     "settings.apply_appearance_button": {"fr": "Appliquer l'identité visuelle", "en": "Apply branding"},
     "settings.accounts_header": {"fr": "Comptes et rôles", "en": "Accounts and roles"},
     "settings.create_account_button": {"fr": "Créer le compte", "en": "Create account"},
+
+    # ── §20 — Relectures (app_pages/6_reviews.py) ────────────────────────────────────────────
+    "nav.reviews": {"fr": "Relectures", "en": "Reviews"},
+    "hero.reviews_pill": {"fr": "{n} relecture(s) à traiter", "en": "{n} review(s) to handle"},
+    "sidebar.reviews_header": {"fr": "Relectures demandées ({n})", "en": "Reviews requested ({n})"},
+    "sidebar.reviews_toast": {"fr": "{who} vous demande de relire {n} e-mail(s)",
+                              "en": "{who} asks you to review {n} email(s)"},
+    "sidebar.reviews_open": {"fr": "Voir les relectures", "en": "Open reviews"},
+    "reviews.caption": {
+        "fr": "Transmettez à un administrateur les e-mails que vous ne souhaitez pas trancher "
+              "seul(e) — plusieurs d'un seul geste. Rien n'est envoyé au prospect.",
+        "en": "Hand an administrator the emails you would rather not decide alone — several in a "
+              "single gesture. Nothing is sent to the prospect.",
+    },
+    "reviews.received_header": {"fr": "À relire ({n})", "en": "To review ({n})"},
+    "reviews.received_sub": {
+        "fr": "Ce que vos collègues vous ont transmis. Tant que rien n'est répondu, la demande "
+              "reste ouverte de leur côté.",
+        "en": "What your colleagues sent you. Until you answer, the request stays open on their "
+              "side.",
+    },
+    "reviews.received_empty_title": {"fr": "Rien à relire", "en": "Nothing to review"},
+    "reviews.received_empty_body": {
+        "fr": "Aucun collègue n'attend votre avis pour le moment. Les demandes apparaissent ici "
+              "dès leur envoi, et vous êtes prévenu(e) à la connexion.",
+        "en": "Nobody is waiting for your opinion right now. Requests show up here as soon as they "
+              "are sent, and you are notified when you sign in.",
+    },
+    "reviews.chip_from": {"fr": "De {who}", "en": "From {who}"},
+    "reviews.chip_count": {"fr": "{n} e-mail(s)", "en": "{n} email(s)"},
+    "reviews.open_lead": {"fr": "Ouvrir le lead", "en": "Open lead"},
+    "reviews.open_failed": {
+        "fr": "Ce lead n'est plus consultable (probablement purgé par la rétention)",
+        "en": "This lead can no longer be opened (most likely purged by retention)",
+    },
+    "reviews.resolve": {"fr": "Traiter", "en": "Resolve"},
+    "reviews.dismiss": {"fr": "Écarter", "en": "Dismiss"},
+    "reviews.answer_label": {"fr": "Réponse au demandeur", "en": "Answer to the requester"},
+    "reviews.answer_placeholder": {"fr": "Facultatif — ce que vous en pensez",
+                                   "en": "Optional — what you think"},
+    "reviews.answer_batch_placeholder": {"fr": "Réponse commune à tout le lot",
+                                         "en": "One answer for the whole batch"},
+    "reviews.resolve_batch": {"fr": "Traiter les {n} d'un coup", "en": "Resolve all {n} at once"},
+    "reviews.no_send_permission": {
+        "fr": "Votre rôle est en lecture seule : vous pouvez consulter, pas transmettre du travail.",
+        "en": "Your role is read-only: you can consult, not hand work to others.",
+    },
+    "reviews.send_header": {"fr": "Transmettre des e-mails", "en": "Hand over emails"},
+    "reviews.send_sub": {
+        "fr": "Sélectionnez une ou plusieurs lignes, puis choisissez qui doit les regarder.",
+        "en": "Select one or more rows, then choose who should look at them.",
+    },
+    "reviews.source_label": {"fr": "Parmi", "en": "From"},
+    "reviews.source_queue": {"fr": "File d'attente", "en": "Pending queue"},
+    "reviews.source_recent": {"fr": "E-mails des 30 derniers jours", "en": "Last 30 days"},
+    "reviews.no_candidates_title": {"fr": "Aucun e-mail à transmettre",
+                                    "en": "No email to hand over"},
+    "reviews.no_candidates_body": {
+        "fr": "La file d'attente est vide. Lancez une analyse ou attendez la prochaine relève de "
+              "la boîte de réception.",
+        "en": "The queue is empty. Run an analysis or wait for the next inbox check.",
+    },
+    "reviews.pick_hint": {
+        "fr": "Cochez les lignes à transmettre (plusieurs possibles).",
+        "en": "Tick the rows to hand over (several allowed).",
+    },
+    "reviews.recipient_label": {"fr": "Destinataire", "en": "Recipient"},
+    "reviews.recipient_all_admins": {"fr": "Tous les administrateurs", "en": "All administrators"},
+    "reviews.note_label": {"fr": "Pourquoi cette relecture ?", "en": "Why this review?"},
+    "reviews.note_placeholder": {
+        "fr": "Ex. : clause de pénalité inhabituelle, je préfère un second avis avant de valider.",
+        "en": "E.g. unusual penalty clause, I'd rather get a second opinion before validating.",
+    },
+    "reviews.priority_label": {"fr": "Marquer comme prioritaire", "en": "Mark as priority"},
+    "reviews.priority_help": {
+        "fr": "Remonte la demande en tête de la file du destinataire.",
+        "en": "Moves the request to the top of the recipient's queue.",
+    },
+    "reviews.send_button": {"fr": "Transmettre ({n})", "en": "Hand over ({n})"},
+    "reviews.none_picked": {
+        "fr": "Aucune ligne sélectionnée — cochez au moins un e-mail.",
+        "en": "No row selected — tick at least one email.",
+    },
+    "reviews.no_admin_account": {
+        "fr": "Aucun compte administrateur n'existe : personne ne verrait cette demande. Créez un "
+              "compte depuis « Réglages → Comptes et rôles ».",
+        "en": "No administrator account exists: nobody would see this request. Create one from "
+              "\"Settings → Accounts and roles\".",
+    },
+    "reviews.sent_ok": {"fr": "{n} e-mail(s) transmis à {who}.",
+                        "en": "{n} email(s) handed over to {who}."},
+    "reviews.sent_header": {"fr": "Ce que vous avez transmis", "en": "What you handed over"},
+    "reviews.sent_sub": {
+        "fr": "Pour savoir ce qui a été vu, ce qui a été tranché, et ce qui attend encore.",
+        "en": "So you know what was seen, what was decided, and what is still waiting.",
+    },
+    "reviews.sent_empty": {"fr": "Vous n'avez encore transmis aucun e-mail.",
+                           "en": "You have not handed over any email yet."},
+
+    # ── §20 — Rapports (app_pages/7_reports.py) ──────────────────────────────────────────────
+    "nav.reports": {"fr": "Rapports", "en": "Reports"},
+    "reports.no_permission": {
+        "fr": "Votre rôle ne donne pas accès aux rapports d'activité.",
+        "en": "Your role does not give access to activity reports.",
+    },
+    "reports.caption": {
+        "fr": "Composez un rapport PDF aux couleurs de la maison : choisissez la période, ce qu'il "
+              "contient, et jusqu'aux colonnes du détail. Chaque section explique ce qu'elle "
+              "montre.",
+        "en": "Build a PDF report in your own colours: choose the period, what goes in it, down to "
+              "the columns of the detail table. Every section explains what it shows.",
+    },
+    "reports.preset_label": {"fr": "Préréglage enregistré", "en": "Saved preset"},
+    "reports.preset_load": {"fr": "Charger", "en": "Load"},
+    "reports.preset_delete": {"fr": "Supprimer", "en": "Delete"},
+    "reports.period_header": {"fr": "Période", "en": "Period"},
+    "reports.period_sub": {
+        "fr": "La comparaison porte sur la période de même durée qui précède immédiatement.",
+        "en": "The comparison uses the immediately preceding window of the same length.",
+    },
+    "reports.period_label": {"fr": "Sur quelle période ?", "en": "Which period?"},
+    "reports.period_last_month": {"fr": "Mois dernier", "en": "Last month"},
+    "reports.period_this_month": {"fr": "Ce mois-ci", "en": "This month"},
+    "reports.period_last_days": {"fr": "{d} derniers jours", "en": "Last {d} days"},
+    "reports.period_custom": {"fr": "Dates précises", "en": "Exact dates"},
+    "reports.from_date": {"fr": "Du", "en": "From"},
+    "reports.to_date": {"fr": "Au (inclus)", "en": "To (included)"},
+    "reports.period_invalid": {
+        "fr": "La date de fin doit être postérieure à la date de début.",
+        "en": "The end date must be after the start date.",
+    },
+    "reports.readout_period": {"fr": "Période", "en": "Period"},
+    "reports.readout_compared": {"fr": "Comparée à", "en": "Compared to"},
+    "reports.content_header": {"fr": "Contenu du rapport", "en": "Report contents"},
+    "reports.content_sub": {
+        "fr": "Cochez ce qui doit figurer dans le document. Survolez un intitulé pour savoir ce "
+              "qu'il apporte.",
+        "en": "Tick what belongs in the document. Hover a label to see what it brings.",
+    },
+    "reports.no_section": {
+        "fr": "Aucune section sélectionnée — le rapport serait vide.",
+        "en": "No section selected — the report would be empty.",
+    },
+    "reports.email_options_header": {"fr": "Détail des e-mails : colonnes et filtres",
+                                     "en": "Email detail: columns and filters"},
+    "reports.email_options_sub": {
+        "fr": "C'est ici qu'on obtient « la catégorie et l'expéditeur seulement », ou au contraire "
+              "le détail complet.",
+        "en": "This is where you get \"category and sender only\", or the full detail instead.",
+    },
+    "reports.columns_label": {"fr": "Colonnes à afficher", "en": "Columns to show"},
+    "reports.filter_categories": {"fr": "Limiter aux catégories", "en": "Limit to categories"},
+    "reports.filter_sender": {"fr": "Expéditeur contenant", "en": "Sender containing"},
+    "reports.filter_validated": {"fr": "Leads validés uniquement", "en": "Validated leads only"},
+    "reports.max_rows": {"fr": "Lignes maximum", "en": "Maximum rows"},
+    "reports.max_rows_help": {
+        "fr": "Un rapport n'est pas un export de base : au-delà de quelques centaines de lignes, "
+              "il n'est plus lu.",
+        "en": "A report is not a database dump: past a few hundred rows nobody reads it.",
+    },
+    "reports.presentation_header": {"fr": "Présentation", "en": "Presentation"},
+    "reports.title_label": {"fr": "Titre du document", "en": "Document title"},
+    "reports.title_default": {"fr": "Rapport d'activité", "en": "Activity report"},
+    "reports.note_label": {"fr": "Note de contexte", "en": "Context note"},
+    "reports.note_placeholder": {
+        "fr": "Ex. : période marquée par la campagne de rentrée et deux semaines de congés.",
+        "en": "E.g. period marked by the back-to-school campaign and two weeks of leave.",
+    },
+    "reports.note_help": {
+        "fr": "Figure sur la couverture. Un chiffre inhabituel s'explique mieux sur le document "
+              "que trois semaines plus tard, de mémoire, en réunion.",
+        "en": "Printed on the cover. An unusual figure is better explained on the document than "
+              "three weeks later from memory in a meeting.",
+    },
+    "reports.compare_label": {"fr": "Comparer à la période précédente",
+                              "en": "Compare with the previous period"},
+    "reports.compare_help": {
+        "fr": "Désactivé, le document présente les chiffres bruts sans aucun écart — plus honnête "
+              "qu'une comparaison à une période vide.",
+        "en": "Turned off, the document shows raw figures with no deltas — more honest than "
+              "comparing against an empty period.",
+    },
+    "reports.build_button": {"fr": "Générer le rapport", "en": "Build the report"},
+    "reports.building": {"fr": "Collecte des données et mise en page…",
+                         "en": "Collecting data and laying out…"},
+    "reports.build_failed": {
+        "fr": "Le rendu PDF a échoué. Le détail technique est consigné côté serveur.",
+        "en": "PDF rendering failed. The technical detail is logged server-side.",
+    },
+    "reports.preset_save": {"fr": "Enregistrer ce réglage", "en": "Save this setup"},
+    "reports.preset_name": {"fr": "Nom du préréglage", "en": "Preset name"},
+    "reports.preset_save_button": {"fr": "Enregistrer", "en": "Save"},
+    "reports.preset_saved": {"fr": "Préréglage « {name} » enregistré.",
+                             "en": "Preset \"{name}\" saved."},
+    "reports.result_header": {"fr": "Aperçu", "en": "Preview"},
+    "reports.result_sub": {
+        "fr": "Ce que contiendra le PDF, section par section — avant de le télécharger.",
+        "en": "What the PDF will contain, section by section — before you download it.",
+    },
+    "reports.block_empty": {"fr": "Aucune donnée sur cette période.",
+                            "en": "No data for this period."},
+    "reports.table_truncated": {
+        "fr": "Aperçu limité à 50 lignes sur {n} — le PDF les contient toutes.",
+        "en": "Preview limited to 50 of {n} rows — the PDF has them all.",
+    },
+    "reports.download_button": {"fr": "Télécharger le PDF", "en": "Download the PDF"},
+    "reports.archive_header": {"fr": "Rapports mensuels", "en": "Monthly reports"},
+    "reports.archive_sub": {
+        "fr": "Produits automatiquement à chaque fin de mois par le planificateur.",
+        "en": "Produced automatically at the end of each month by the scheduler.",
+    },
+    "reports.archive_admin_only": {
+        "fr": "Les rapports mensuels contiennent l'activité nominative de chaque compte : ils sont "
+              "réservés aux administrateurs, comme le journal d'activité.",
+        "en": "Monthly reports contain each account's named activity: they are restricted to "
+              "administrators, like the activity log.",
+    },
+    "reports.archive_empty_title": {"fr": "Aucun rapport mensuel", "en": "No monthly report"},
+    "reports.archive_empty_body": {
+        "fr": "Le premier sera écrit dans {dir} au prochain passage du planificateur, une fois un "
+              "mois civil entièrement écoulé.",
+        "en": "The first one will be written to {dir} on the scheduler's next run, once a full "
+              "calendar month has elapsed.",
+    },
+    "reports.archive_unreadable": {"fr": "Fichier illisible", "en": "Unreadable file"},
+    "reports.archive_hint": {
+        "fr": "Répertoire : {dir} (variable ACA_REPORT_DIR). Cadence : ACA_SCHEDULE_REPORT_HOURS.",
+        "en": "Directory: {dir} (ACA_REPORT_DIR variable). Cadence: ACA_SCHEDULE_REPORT_HOURS.",
+    },
 }
 
 

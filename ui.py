@@ -2,7 +2,7 @@ import time
 from datetime import datetime
 
 import streamlit as st
-from aca.storage import activity_log, queue_store, task_store, user_store
+from aca.storage import activity_log, queue_store, review_store, task_store, user_store
 from aca.core import branding
 from aca.core import demo
 from aca.core import intake_window
@@ -71,6 +71,15 @@ if _signed_in.get("username") and _signed_in["username"] != DEV_USERNAME:
 _pending_count = len(queue_store.list_pending())
 if _pending_count:
     _pills.append((t("hero.pending_pill", n=_pending_count), "normal"))
+# §20 — « quand l'admin se connecte, il les voit ». La demande de relecture qu'un opérateur a
+# transmise doit sauter aux yeux dès la première page, sans que le destinataire ait à penser à
+# ouvrir un onglet : c'est tout l'intérêt d'une demande adressée. En pastille d'alerte (et non
+# « normal ») parce qu'elle bloque quelqu'un d'autre, contrairement à la file d'attente.
+_reviews_pending = review_store.list_for(
+    _signed_in.get("username") or "", _signed_in.get("role") or "",
+)
+if _reviews_pending:
+    _pills.append((t("hero.reviews_pill", n=len(_reviews_pending)), "alert"))
 # §5.5 des suggestions — notification dans l'application : « N nouvelles analyses depuis votre
 # dernière visite ». Le compteur existait déjà ; il manquait la notion de « déjà vu ». Portée
 # volontairement modeste (par session, pas par compte persistant) : `setdefault` ne fixe la
@@ -109,7 +118,11 @@ st.session_state.setdefault("gmail_thread_id", None)
 # qui n'est ni le besoin exprimé (« que l'admin voie ») ni acceptable vis-à-vis des personnes tracées.
 _pages = [
     st.Page("app_pages/1_inbox.py", title=t("nav.inbox"), icon=":material/mail:", default=True),
+    # §20 — placée juste après la boîte de réception : une relecture demandée est du travail en
+    # attente au même titre qu'un lead, pas une fonction annexe rangée en fin de barre.
+    st.Page("app_pages/6_reviews.py", title=t("nav.reviews"), icon=":material/rate_review:"),
     st.Page("app_pages/2_dashboard.py", title=t("nav.dashboard"), icon=":material/insights:"),
+    st.Page("app_pages/7_reports.py", title=t("nav.reports"), icon=":material/lab_profile:"),
     st.Page("app_pages/3_history.py", title=t("nav.history"), icon=":material/history:"),
 ]
 if _can(user_store.PERM_MANAGE_USERS):
@@ -159,6 +172,34 @@ with st.sidebar:
               note=(_reminder["note"] or t("sidebar.reminder_no_note"))[:80]),
             icon=":material/alarm:",
         )
+
+    # §20 — demandes de relecture adressées à cette personne. Même procédé que les rappels
+    # ci-dessus (pastille d'en-tête + toast annoncé une seule fois par session), pour la même
+    # raison : Streamlit rejoue tout le script à chaque interaction, donc sans cette mémoire le
+    # toast reparaîtrait à chaque clic et deviendrait un bruit qu'on apprend à ignorer. Annoncé
+    # par LOT et non par e-mail : quatre toasts pour un seul geste d'un collègue seraient perçus
+    # comme quatre demandes distinctes.
+    if _reviews_pending:
+        _review_batches = review_store.group_by_batch(_reviews_pending)
+        _review_toasted = st.session_state.setdefault("_review_toasts", set())
+        for _batch in _review_batches:
+            if _batch["batch_id"] in _review_toasted:
+                continue
+            _review_toasted.add(_batch["batch_id"])
+            st.toast(
+                t("sidebar.reviews_toast", who=_batch["requester"], n=len(_batch["items"])),
+                icon=":material/rate_review:",
+            )
+        st.divider()
+        st.subheader(t("sidebar.reviews_header", n=len(_reviews_pending)), anchor=False)
+        for _batch in _review_batches:
+            st.caption(
+                f":material/person: {_batch['requester']} · "
+                f"{t('reviews.chip_count', n=len(_batch['items']))}"
+                + (f" · {_batch['note'][:60]}" if _batch["note"] else "")
+            )
+        if st.button(t("sidebar.reviews_open"), icon=":material/rate_review:"):
+            st.switch_page("app_pages/6_reviews.py")
 
     if _due_reminders:
         st.divider()

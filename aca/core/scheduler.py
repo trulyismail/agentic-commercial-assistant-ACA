@@ -166,6 +166,7 @@ def _job_tasks() -> None:
 
 
 ARCHIVE_DIR = os.getenv("ACA_ARCHIVE_DIR", "data/archives")
+REPORT_DIR = os.getenv("ACA_REPORT_DIR", "data/reports")
 
 
 def _last_completed_month(now: datetime = None) -> tuple:
@@ -197,6 +198,60 @@ def _job_archive() -> None:
             "Archive %04d-%02d écrite : %s (%s ligne(s)).",
             year, month, result["path"], result["lines"],
         )
+
+
+def _job_report() -> None:
+    """
+    Rapport mensuel d'activité en PDF (§20) — cf. `aca/core/reporting.py`.
+
+    Même distinction que `_job_archive` ci-dessus : « mensuel » qualifie ce qui est produit (le
+    dernier mois civil ENTIÈREMENT écoulé), pas la fréquence à laquelle on vérifie qu'il manque.
+    `report_pdf.write_pdf` est idempotent, donc un `--force` ou un redémarrage le même jour ne
+    réécrit rien.
+
+    **La notification n'est pas un ornement.** Un rapport déposé dans un répertoire que personne
+    n'ouvre est exactement le manque que le §16.0 avait trouvé pour la planification elle-même :
+    du code écrit, testé, documenté... et sans effet réel parce que rien ne le déclenchait ni ne le
+    signalait. `notify.send()` retombe en silence s'il n'y a ni Slack ni e-mail configuré (contrat
+    inchangé), et le rapport reste de toute façon visible dans l'onglet « Rapports ».
+    """
+    from aca.core import reporting
+    from aca.integrations import report_pdf
+
+    year, month = reporting.last_completed_month()
+    spec = reporting.monthly_spec(year, month)
+    filename = reporting.report_filename(spec)
+
+    payload = report_pdf.build_report_pdf(reporting.collect(spec))
+    if not payload:
+        # `build_report_pdf` ne lève jamais et a déjà journalisé la cause. On s'arrête ici plutôt
+        # que d'écrire un fichier vide, qui serait ensuite considéré comme « déjà produit » par
+        # l'idempotence de `write_pdf` et empêcherait toute nouvelle tentative.
+        raise RuntimeError("Le rendu PDF du rapport mensuel a échoué (cf. journal ci-dessus).")
+
+    result = report_pdf.write_pdf(REPORT_DIR, filename, payload)
+    period = reporting.month_label(year, month)
+    if result["skipped"]:
+        logger.info("Rapport %s déjà présent (%s).", period, result["path"])
+        return
+
+    logger.info("Rapport %s écrit : %s (%d octets).", period, result["path"], result["bytes"])
+    activity_log.log(
+        activity_log.ACTION_REPORT_GENERATED, actor="(scheduler)", target_type="rapport",
+        target_id=filename, source=activity_log.SOURCE_CLI,
+        details={"période": period, "octets": result["bytes"], "chemin": result["path"]},
+    )
+    try:
+        from aca.integrations import notify
+
+        notify.send(
+            f"📄 Rapport d'activité de {period} disponible : {result['path']}",
+            subject=f"Rapport ACA — {period}",
+        )
+    except Exception as e:  # noqa: BLE001
+        # Le rapport EXISTE : ne pas avoir su prévenir ne doit pas faire passer le travail pour
+        # un échec, ce qui déclencherait une nouvelle tentative de génération à chaque tick.
+        logger.warning("Rapport %s produit mais notification impossible : %s", period, e)
 
 
 # Table déclarative des travaux — ajouter un travail périodique = une entrée ici, rien d'autre
@@ -234,6 +289,13 @@ JOBS = {
         "default_hours": 720,  # ~mensuel — le mois archivé est déterminé par _last_completed_month,
                                 # pas par cette cadence de vérification
         "label": "Archive mensuelle du journal d'activité",
+    },
+    "report": {
+        "fn": _job_report,
+        "env": "ACA_SCHEDULE_REPORT_HOURS",
+        "default_hours": 720,  # ~mensuel — comme `archive`, le mois couvert est fixé par
+                                # `reporting.last_completed_month()`, pas par cette cadence
+        "label": "Rapport mensuel d'activité (PDF)",
     },
     "tasks": {
         "fn": _job_tasks,

@@ -167,43 +167,79 @@ def _cutoff(days: int) -> str:
     return (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _as_text(moment) -> str:
+    """Accepte un `datetime` ou une chaîne déjà au format de la base, renvoie la chaîne."""
+    if moment is None:
+        return None
+    if isinstance(moment, datetime):
+        return moment.strftime("%Y-%m-%d %H:%M:%S")
+    return str(moment)
+
+
+def _window(column: str, days: int, start=None, end=None) -> tuple:
+    """
+    Fenêtre temporelle d'une lecture : renvoie `(fragment_sql, paramètres)`.
+
+    Le tableau de bord raisonne en « N derniers jours » ; les rapports (§20) doivent pouvoir viser
+    un mois civil précis ou une plage choisie à la main. Plutôt que de dupliquer chaque fonction en
+    une variante `*_between`, toutes acceptent désormais `start`/`end` (un `datetime` ou une chaîne
+    au format de la base) qui, **lorsqu'ils sont fournis, l'emportent sur `days`**. Aucun appel
+    existant ne change : sans ces arguments, la fenêtre est exactement celle d'avant.
+
+    La borne haute est **exclue**. Deux périodes consécutives ne doivent pas compter deux fois
+    l'événement qui tombe pile à la frontière — sinon la comparaison mois précédent / mois courant,
+    qui est la raison d'être du rapport, gonflerait des deux côtés au lieu de se répartir.
+    """
+    lower = _as_text(start) if start is not None else _cutoff(days)
+    fragment = f"{column} >= ?"
+    params = [lower]
+    upper = _as_text(end)
+    if upper:
+        fragment += f" AND {column} < ?"
+        params.append(upper)
+    return fragment, params
+
+
 @with_sqlite_retry
-def volume_by_category(days: int = 30, org_id: str = None) -> list[dict]:
-    """Nombre d'e-mails classés par catégorie du tenant courant sur les `days` derniers jours, décroissant."""
+def volume_by_category(days: int = 30, org_id: str = None, start=None, end=None) -> list[dict]:
+    """Nombre d'e-mails classés par catégorie du tenant courant sur la période, décroissant."""
+    window, params = _window("classified_at", days, start, end)
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT classification, COUNT(*) FROM events WHERE classified_at >= ? AND org_id = ? "
+            f"SELECT classification, COUNT(*) FROM events WHERE {window} AND org_id = ? "
             "GROUP BY classification ORDER BY COUNT(*) DESC",
-            (_cutoff(days), org_id or current_org_id()),
+            (*params, org_id or current_org_id()),
         ).fetchall()
     return [{"classification": r[0], "count": r[1]} for r in rows]
 
 
 @with_sqlite_retry
-def daily_volume(days: int = 30, org_id: str = None) -> list[dict]:
+def daily_volume(days: int = 30, org_id: str = None, start=None, end=None) -> list[dict]:
     """Volume quotidien total du tenant courant (toutes catégories confondues), pour un graphe de tendance."""
+    window, params = _window("classified_at", days, start, end)
     with _connect() as conn:
         rows = conn.execute(
             "SELECT substr(classified_at, 1, 10) AS jour, COUNT(*) FROM events "
-            "WHERE classified_at >= ? AND org_id = ? GROUP BY jour ORDER BY jour",
-            (_cutoff(days), org_id or current_org_id()),
+            f"WHERE {window} AND org_id = ? GROUP BY jour ORDER BY jour",
+            (*params, org_id or current_org_id()),
         ).fetchall()
     return [{"jour": r[0], "count": r[1]} for r in rows]
 
 
 @with_sqlite_retry
-def response_times(days: int = 30, org_id: str = None) -> list[dict]:
+def response_times(days: int = 30, org_id: str = None, start=None, end=None) -> list[dict]:
     """
     Durée (en minutes) entre classification et validation, pour chaque lead validé du tenant
     courant sur la période — matière première du graphe de latence (répondre < 1h vs > 24h, cf.
     ACAM_roadmap.md §11.4). Ignore les threads jamais validés (SPAM/AUTRE/SUPPORT routés, ou encore
     en attente).
     """
+    window, params = _window("classified_at", days, start, end)
     with _connect() as conn:
         rows = conn.execute(
             "SELECT thread_id, classification, classified_at, validated_at FROM events "
-            "WHERE validated_at IS NOT NULL AND classified_at >= ? AND org_id = ?",
-            (_cutoff(days), org_id or current_org_id()),
+            f"WHERE validated_at IS NOT NULL AND {window} AND org_id = ?",
+            (*params, org_id or current_org_id()),
         ).fetchall()
     results = []
     for thread_id, classification, classified_at, validated_at in rows:
@@ -220,62 +256,116 @@ def response_times(days: int = 30, org_id: str = None) -> list[dict]:
 
 
 @with_sqlite_retry
-def funnel_counts(days: int = 30, org_id: str = None) -> dict:
-    """Compte classé → proposition rédigée → validé du tenant courant, sur les `days` derniers jours."""
+def funnel_counts(days: int = 30, org_id: str = None, start=None, end=None) -> dict:
+    """Compte classé → proposition rédigée → validé du tenant courant, sur la période."""
+    window, params = _window("classified_at", days, start, end)
     with _connect() as conn:
-        cutoff = _cutoff(days)
         tenant = org_id or current_org_id()
         classified = conn.execute(
-            "SELECT COUNT(*) FROM events WHERE classified_at >= ? AND org_id = ?", (cutoff, tenant)
+            f"SELECT COUNT(*) FROM events WHERE {window} AND org_id = ?", (*params, tenant)
         ).fetchone()[0]
         drafted = conn.execute(
-            "SELECT COUNT(*) FROM events WHERE classified_at >= ? AND has_draft = 1 AND org_id = ?",
-            (cutoff, tenant),
+            f"SELECT COUNT(*) FROM events WHERE {window} AND has_draft = 1 AND org_id = ?",
+            (*params, tenant),
         ).fetchone()[0]
         validated = conn.execute(
-            "SELECT COUNT(*) FROM events WHERE classified_at >= ? AND validated_at IS NOT NULL AND org_id = ?",
-            (cutoff, tenant),
+            f"SELECT COUNT(*) FROM events WHERE {window} AND validated_at IS NOT NULL AND org_id = ?",
+            (*params, tenant),
         ).fetchone()[0]
     return {"classifiés": classified, "proposition rédigée": drafted, "validés": validated}
 
 
 @with_sqlite_retry
-def edit_rate(days: int = 30, org_id: str = None) -> dict:
+def edit_rate(days: int = 30, org_id: str = None, start=None, end=None) -> dict:
     """
-    % de brouillons validés qui ont été modifiés par un humain avant validation, sur `days` jours,
+    % de brouillons validés qui ont été modifiés par un humain avant validation, sur la période,
     pour le tenant courant — KPI "taux d'édition" du tableau de bord (§13 item 3). Le dénominateur
     est le nombre de leads VALIDÉS (pas classés) : seul un brouillon qui a atteint la validation
     pouvait être édité.
     """
+    events_window, events_params = _window("classified_at", days, start, end)
+    edits_window, edits_params = _window("edited_at", days, start, end)
     with _connect() as conn:
-        cutoff = _cutoff(days)
         tenant = org_id or current_org_id()
         validated = conn.execute(
-            "SELECT COUNT(*) FROM events WHERE classified_at >= ? AND validated_at IS NOT NULL AND org_id = ?",
-            (cutoff, tenant),
+            f"SELECT COUNT(*) FROM events WHERE {events_window} AND validated_at IS NOT NULL "
+            "AND org_id = ?",
+            (*events_params, tenant),
         ).fetchone()[0]
         edited = conn.execute(
-            "SELECT COUNT(DISTINCT thread_id) FROM draft_edits WHERE edited_at >= ? AND org_id = ?",
-            (cutoff, tenant),
+            f"SELECT COUNT(DISTINCT thread_id) FROM draft_edits WHERE {edits_window} AND org_id = ?",
+            (*edits_params, tenant),
         ).fetchone()[0]
     pct = round(100 * edited / validated, 1) if validated else 0.0
     return {"validés": validated, "édités": edited, "taux_pct": pct}
 
 
 @with_sqlite_retry
-def token_stats(days: int = 30, org_id: str = None) -> dict:
+def token_stats(days: int = 30, org_id: str = None, start=None, end=None) -> dict:
     """
-    Tokens Groq consommés sur `days` jours par le tenant courant : total entrée/sortie et moyenne
+    Tokens Groq consommés sur la période par le tenant courant : total entrée/sortie et moyenne
     par analyse — KPI "Quota Usage Tracker" du tableau de bord (§13 item 4). Purement informatif
     tant que Groq reste gratuit ; sert de base théorique de coût si la stack migre un jour vers un
     fournisseur payant (aussi la base du futur suivi de facturation par organisation, §12 item 4).
     """
+    window, params = _window("recorded_at", days, start, end)
     with _connect() as conn:
         rows = conn.execute(
             "SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0) "
-            "FROM token_usage WHERE recorded_at >= ? AND org_id = ?",
-            (_cutoff(days), org_id or current_org_id()),
+            f"FROM token_usage WHERE {window} AND org_id = ?",
+            (*params, org_id or current_org_id()),
         ).fetchone()
     count, total_in, total_out = rows
     avg = round((total_in + total_out) / count, 0) if count else 0
     return {"analyses": count, "total_entree": total_in, "total_sortie": total_out, "moyenne_par_analyse": avg}
+
+
+# ── Détail e-mail par e-mail (§20) ────────────────────────────────────────────────────────────
+# Toutes les fonctions ci-dessus AGRÈGENT ; le rapport paramétrable demande aussi de pouvoir
+# descendre à la ligne (« la classification et le nom des e-mails seulement »). La donnée existait
+# depuis toujours dans `events`, seule la lecture manquait — même forme de manque que
+# `get_draft_edit` au §18.
+EVENT_COLUMNS = {
+    "classified_at": "Date",
+    "sender": "Expéditeur",
+    "classification": "Catégorie",
+    "source": "Source",
+    "has_draft": "Proposition rédigée",
+    "validated_at": "Validé le",
+    "thread_id": "Identifiant d'analyse",
+}
+
+
+@with_sqlite_retry
+def list_events(days: int = 30, org_id: str = None, start=None, end=None, *,
+                classifications=None, sender_contains: str = "", validated_only: bool = False,
+                limit: int = 2000) -> list[dict]:
+    """
+    Les e-mails classés de la période, un dict par e-mail (toutes les colonnes d'`EVENT_COLUMNS`).
+
+    Le choix des colonnes à afficher appartient à l'appelant, pas à la requête : c'est lui qui sait
+    si la personne a demandé « catégorie et expéditeur seulement » ou le détail complet, et filtrer
+    ici obligerait à une requête par combinaison. `limit` est haut mais réel — un rapport n'est pas
+    un export de base, et une année entière de trafic ne tiendrait de toute façon pas dans un PDF
+    lisible ; la borne évite qu'un tenant volumineux fasse gonfler le document sans que personne
+    l'ait voulu.
+    """
+    window, params = _window("classified_at", days, start, end)
+    clauses = [window, "org_id = ?"]
+    params = [*params, org_id or current_org_id()]
+    if classifications:
+        clauses.append(f"classification IN ({','.join('?' * len(classifications))})")
+        params.extend(classifications)
+    if sender_contains:
+        clauses.append("sender LIKE ?")
+        params.append(f"%{sender_contains}%")
+    if validated_only:
+        clauses.append("validated_at IS NOT NULL")
+    params.append(limit)
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT {', '.join(EVENT_COLUMNS)} FROM events WHERE {' AND '.join(clauses)} "
+            "ORDER BY classified_at DESC LIMIT ?",
+            params,
+        ).fetchall()
+    return [dict(zip(EVENT_COLUMNS, row)) for row in rows]

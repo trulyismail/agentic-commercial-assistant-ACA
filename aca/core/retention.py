@@ -18,7 +18,7 @@ import os
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-from aca.storage import activity_log, followup_store, queue_store, task_store
+from aca.storage import activity_log, followup_store, queue_store, review_store, task_store
 from aca.integrations import sheets
 from .app import checkpointer
 
@@ -137,10 +137,16 @@ def purge_subject(sender: str) -> dict:
     # un effacement RGPD expédierait un e-mail commercial à quelqu'un qui vient précisément de
     # demander qu'on efface ses données : le pire moment possible pour que la machine parle encore.
     tasks_cancelled = 0
+    reviews_cancelled = 0
     for thread_id in threads:
         tasks_cancelled += task_store.cancel_for_thread(
             thread_id, "Effacement RGPD (article 17).",
         )
+        # §20 — même raisonnement pour les demandes de relecture : elles recopient l'objet et
+        # l'adresse de l'expéditeur (exprès, pour rester lisibles après une purge). Les laisser en
+        # attente conserverait le nom de la personne précisément à l'endroit où on vient de
+        # l'effacer, et afficherait sa demande à un administrateur le lendemain.
+        reviews_cancelled += review_store.cancel_for_thread(thread_id)
 
     result = {
         "leads": purge_leads_by_sender(sender),
@@ -148,6 +154,7 @@ def purge_subject(sender: str) -> dict:
         "queue": queue_store.purge_sender(sender),
         "followup": followup_store.purge_sender(sender),
         "tasks": tasks_cancelled,
+        "relectures": reviews_cancelled,
     }
     # §18 — un effacement RGPD explicite (article 17) mérite sa propre trace, distincte de la purge
     # d'ancienneté périodique de `run()` : c'est un événement rare et sensible qu'un administrateur
@@ -199,6 +206,12 @@ def run() -> None:
     # personne croit programmé.
     n_tasks = task_store.purge_older_than(RETENTION_DAYS)
     print(f"✅ {n_tasks} tâche(s) programmée(s) terminée(s) supprimée(s) (tasks.sqlite).")
+    # §20 — les demandes de relecture CLOSES seulement, pour la même raison que les tâches : elles
+    # recopient l'objet et l'adresse de l'expéditeur. Une demande encore en attente survit à la
+    # purge quelle que soit son ancienneté — c'est un lead que personne n'a tranché, et l'effacer
+    # ferait disparaître la trace du travail en souffrance en même temps que la donnée.
+    n_reviews = review_store.purge_older_than(RETENTION_DAYS)
+    print(f"✅ {n_reviews} demande(s) de relecture close(s) supprimée(s) (reviews.sqlite).")
     # §18 — trace machine de la purge périodique elle-même (distincte de `purge_old_activity`, qui
     # purge le JOURNAL — ici on trace le fait que Leads/checkpoints/file ont été purgés). Un seul
     # événement (pas un par emplacement) : c'est une seule décision de rétention exécutée d'un coup.
@@ -207,6 +220,7 @@ def run() -> None:
         details={
             "type": "ancienneté", "seuil_jours": RETENTION_DAYS, "leads": n_leads,
             "checkpoints": n_checkpoints, "file_attente": n_queue, "journal_activité": n_activity,
+            "tâches": n_tasks, "relectures": n_reviews,
         },
     )
 
