@@ -345,3 +345,231 @@ def test_palette_de_graphiques_commence_par_la_couleur_principale():
     palette = branding.chart_colors(tokens)
     assert palette[0] == "#123456"
     assert all(branding.is_valid_hex(color) for color in palette)
+
+
+def _declaration(css: str, selecteur: str) -> str:
+    """
+    Corps d'une règle CSS, commentaires retirés.
+
+    Une première version de ces tests découpait simplement 700 caractères après le sélecteur ; les
+    commentaires explicatifs de la feuille (volontairement longs — ils portent le « pourquoi » de
+    chaque choix) remplissaient toute la fenêtre et le test n'atteignait jamais la déclaration.
+    Retirer les commentaires d'abord rend l'assertion indépendante de leur longueur.
+    """
+    nettoye = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    debut = nettoye.index(selecteur) + len(selecteur)
+    return nettoye[debut:nettoye.index("}", debut)]
+
+
+# ── §21 — Ce que la passe de design a corrigé, et que rien ne surveillait ──────────────────────
+#
+# Chacun des défauts ci-dessous vivait dans une feuille de style RELUE plusieurs fois : ils n'ont
+# été trouvés qu'en mesurant le DOM réellement rendu. Une règle CSS morte ne lève aucune exception,
+# ne casse aucun test et ne se voit pas à la lecture — d'où ces tests, qui vérifient la feuille
+# émise plutôt que l'intention qu'on avait en l'écrivant.
+
+def test_le_titrage_serif_atteint_reellement_les_titres_de_page():
+    """
+    Régression : `h1, h2, h3 { font-family: var(--aca-display) }` a une spécificité de (0,0,1) et
+    perdait contre la règle interne de Streamlit `.st-emotion-cache-XXXX h1, … h6` (0,1,1). Mesuré
+    sur le DOM : un `h3` de page calculait « Segoe UI », jamais la serif. La moitié de la thèse
+    typographique de §19 n'existait donc que dans le fichier.
+    """
+    css = branding.css(branding.resolve())
+    assert '[data-testid="stMarkdownContainer"] h3' in css
+    assert '[data-testid="stHeadingWithActionElements"] h3' in css
+    # Sans `!important` : une montée de version doit pouvoir reprendre la main proprement.
+    assert "var(--aca-display) !important" not in css
+
+
+def test_la_barre_den_tete_reste_opaque():
+    """
+    Régression : une règle `[data-testid="stHeader"] { background: transparent; }` traînait en fin
+    de bloc et annulait, à spécificité égale, le fond opaque posé par §19 — le contenu défilait donc
+    sous un filet flottant sans matière derrière. Relevé sur le DOM : `rgba(0, 0, 0, 0)`.
+    """
+    css = branding.css(branding.resolve())
+    assert '[data-testid="stHeader"] { background: transparent; }' not in css
+    assert "background: var(--aca-bg)" in css
+
+
+def test_la_hauteur_den_tete_est_en_pixels():
+    """
+    `3.5rem` supposait une racine à 16 px, alors que `config.toml` fixe `baseFontSize = 14` : la
+    variable censée DÉCRIRE la hauteur de la barre (52,5 px mesurés) n'en valait que 49.
+    """
+    css = branding.css(branding.resolve())
+    assert re.search(r"--aca-header-h:\s*\d+px", css)
+    assert "--aca-header-h: 3.5rem" not in css
+
+
+@pytest.mark.parametrize("preset", list(branding.PRESETS))
+def test_le_gris_secondaire_reste_lisible_sur_toutes_les_palettes(preset):
+    """`--aca-muted` porte les accroches, les relevés et les libellés d'indicateurs, c'est-à-dire du
+    texte petit : exactement la taille pour laquelle le seuil AA de 4,5:1 existe."""
+    tokens = branding.resolve({branding.PRESET_KEY: preset})
+    muted = branding.mix(tokens["BRAND_TEXT"], tokens["BRAND_BACKGROUND"], 0.34)
+    assert branding.contrast_ratio(muted, tokens["BRAND_SURFACE"]) >= 4.5
+    assert branding.contrast_ratio(muted, tokens["BRAND_BACKGROUND"]) >= 4.5
+
+
+# ── Le signal de décision ─────────────────────────────────────────────────────────────────────
+def test_separation_de_signal_ignore_la_clarte_et_retient_la_teinte():
+    """
+    La propriété qui compte, et celle qu'une mesure de contraste WCAG donnait à l'envers : deux
+    bleus de clartés différentes restent « du bleu » (donc aucun signal), tandis que pétrole et
+    ambre se distinguent immédiatement malgré un contraste de luminance faible (1,66:1).
+    """
+    assert branding.signal_separation("#125E6B", "#125E6B") == 0.0
+    assert branding.signal_separation("#0F4C81", "#3E8FD0") < 0.25   # bleu foncé / bleu clair
+    assert branding.signal_separation("#125E6B", "#B4622A") > 0.6    # pétrole / ambre
+    # Un neutre n'a pas de teinte : c'est sa distance à l'origine chromatique qui le sépare.
+    assert branding.signal_separation("#171717", "#A8874B") > 0.25
+
+
+@pytest.mark.parametrize("preset", list(branding.PRESETS))
+def test_chaque_palette_livree_conserve_un_signal_de_decision(preset):
+    """
+    L'invariant visuel central du produit : l'accent ne sert QU'À signaler ce qui attend une
+    validation humaine. Quatre palettes livrées le perdaient (turquoise sur turquoise, bleu clair
+    sur bleu foncé) — l'écran restait beau et n'indiquait plus où agir.
+    """
+    tokens = branding.resolve({branding.PRESET_KEY: preset})
+    separation = branding.signal_separation(tokens["BRAND_PRIMARY"], tokens["BRAND_ACCENT"])
+    assert separation >= 0.25, f"{preset} : accent indistinguable de la couleur principale"
+
+
+def test_le_rapport_accessibilite_signale_un_accent_noye():
+    tokens = branding.resolve({"BRAND_PRIMARY": "#0F4C81", "BRAND_ACCENT": "#3E8FD0"})
+    assert any("accent" in problem.lower() for problem in branding.accessibility_report(tokens))
+
+
+@pytest.mark.parametrize("preset", list(branding.PRESETS))
+def test_la_palette_de_graphiques_na_aucun_doublon(preset):
+    """
+    Rien n'oblige les jetons sémantiques à être distincts — dans la palette par défaut `BRAND_INFO`
+    vaut `BRAND_PRIMARY` et `BRAND_WARNING` vaut `BRAND_ACCENT`, ce qui est JUSTE quant au sens.
+    Aplati en palette catégorielle, cela dessinait deux catégories du tableau de bord dans la même
+    couleur. Une palette catégorielle a une exigence propre : chaque série doit être séparable.
+    """
+    tokens = branding.resolve({branding.PRESET_KEY: preset})
+    palette = branding.chart_colors(tokens)
+    assert len(palette) == len({color.upper() for color in palette})
+
+
+# ── Mouvement ─────────────────────────────────────────────────────────────────────────────────
+def test_aucune_animation_dinterface_ne_depasse_300ms():
+    """
+    Au-delà d'environ 300 ms, un mouvement cesse d'être perçu comme une réponse et devient une
+    attente. Les boucles délibérément lentes (pouls, lueur d'alerte, dérive de l'en-tête, reflet)
+    sont exclues : elles signalent un état continu, elles n'accompagnent pas une action.
+    """
+    css = branding.css(branding.resolve())
+    # `aca-ring` rejoint la liste : c'est la respiration de l'étape EN COURS du rail de décision,
+    # un indicateur d'état continu au même titre que le pouls ou la lueur d'alerte — pas
+    # l'accompagnement d'un geste, donc la borne des 300 ms ne s'y applique pas.
+    lentes = ("aca-halo", "aca-warn-glow", "aca-drift", "aca-float", "aca-sheen", "aca-progress",
+              "aca-ring", "aca-ambient")
+    for ligne in css.splitlines():
+        if "animation:" not in ligne or any(nom in ligne for nom in lentes):
+            continue
+        for duree in re.findall(r"(\d*\.?\d+)s", ligne):
+            assert float(duree) <= 0.3, f"animation trop longue : {ligne.strip()}"
+
+
+def test_le_fond_dambiance_nemprunte_jamais_la_couleur_reservee():
+    """
+    La contrainte qui compte sur ce fond, et la raison pour laquelle il est admissible : l'ambre ne
+    signifie qu'une chose dans toute l'application — « une personne doit trancher ». Un décor qui
+    l'emploierait viderait le signal de son sens, c'est-à-dire referait le défaut corrigé sur quatre
+    palettes le même jour.
+    """
+    couche = _declaration(branding.css(branding.resolve()),
+                          '[data-testid="stAppViewContainer"]::before')
+    assert "--aca-primary" in couche
+    assert "--aca-accent" not in couche
+
+
+def test_le_fond_dambiance_se_dimensionne_sur_la_fenetre():
+    """
+    Régression signalée par l'utilisateur (« je ne vois pas l'animation de fond ») et confirmée à la
+    mesure : les rayons étaient exprimés en `rem`, donc figés à 588 px (racine à 14 px imposée par
+    `config.toml`). Sur un écran de 1892 px, six points de fond sur sept restaient rigoureusement
+    intacts et un seul coin portait la couleur. Une décoration de fond se mesure à la FENÊTRE, pas à
+    la taille du texte.
+    """
+    couche = _declaration(branding.css(branding.resolve()),
+                          '[data-testid="stAppViewContainer"]::before')
+    assert "vmax" in couche
+    assert "rem" not in couche
+
+
+def test_le_fond_dambiance_reste_derriere_le_contenu():
+    """Le voile est en `position: fixed` dans le même contexte d'empilement que la page : sans la
+    règle de superposition explicite il passerait DEVANT elle. C'est structurel, pas décoratif."""
+    css = branding.css(branding.resolve())
+    assert "pointer-events: none" in css
+    assert re.search(r'\[data-testid="stMain"\][^{]*\{[^}]*z-index: 1', css)
+
+
+def test_le_fond_dambiance_ne_bouge_quau_niveau_complet():
+    """Le dégradé (profondeur) reste à tous les niveaux ; seul le MOUVEMENT est conditionnel — un
+    client qui a demandé le calme garde un fond agréable au lieu d'un aplat."""
+    for niveau in ("complet", "sobre", "aucune"):
+        css = branding.css(branding.resolve({"BRAND_ANIMATIONS": niveau}))
+        assert '[data-testid="stAppViewContainer"]::before' in css
+        assert ("animation: aca-ambient" in css) is (niveau == "complet")
+
+
+def test_le_fond_dambiance_est_compose_par_le_gpu():
+    """Seule animation de la feuille qui ne s'arrête jamais : elle ne doit déclencher ni calcul de
+    disposition ni repeinture. `transform` seul le garantit, `background-position` ne l'aurait pas
+    fait."""
+    css = branding.css(branding.resolve())
+    corps = css[css.index("@keyframes aca-ambient"):]
+    corps = corps[:corps.index("}\n")]
+    assert "transform:" in corps
+    assert "background-position" not in corps
+
+
+def test_les_courbes_sont_des_jetons_partages_et_jamais_ease_in():
+    css = branding.css(branding.resolve())
+    assert "--aca-ease-out:" in css and "--aca-ease-in-out:" in css
+    # `ease-in` démarre lentement : il retarde exactement l'instant que l'œil regarde le plus.
+    assert not re.search(r":\s*ease-in[;\s,]", css)
+
+
+def test_les_boutons_donnent_un_retour_dappui():
+    """Un clic déclenche ici un rerun Streamlit complet : l'enfoncement est la seule confirmation
+    disponible avant que le serveur réponde."""
+    assert "scale(.97)" in branding.css(branding.resolve())
+
+
+def test_le_survol_est_reserve_aux_pointeurs_fins():
+    """Sur tactile, `:hover` se déclenche au toucher et RESTE actif : le bouton qu'on vient
+    d'utiliser garde l'air sélectionné."""
+    assert "@media (hover: hover) and (pointer: fine)" in branding.css(branding.resolve())
+
+
+def test_le_clavier_voit_ou_il_se_trouve():
+    """Sur l'écran de validation, ne pas voir le focus revient à ne pas savoir quel bouton on est
+    sur le point d'actionner."""
+    css = branding.css(branding.resolve())
+    assert ":focus-visible" in css
+    assert "outline: 2px solid var(--aca-primary)" in css
+
+
+def test_la_page_courante_est_plus_marquee_que_le_survol():
+    """
+    Relevé sur le DOM : l'onglet actif recevait un gris de Streamlit (`rgba(173,173,173,.25)`)
+    pendant que le survol recevait la couleur de marque, une élévation et une ombre — la hiérarchie
+    était donc inversée sur une barre à sept entrées.
+    """
+    css = branding.css(branding.resolve())
+    # On découpe sur le SÉLECTEUR, pas sur le mot : « aria-current » apparaît d'abord dans le
+    # commentaire qui explique la règle, et une première version de ce test inspectait donc la prose
+    # au lieu du CSS.
+    selecteur = '[data-testid="stTopNavLink"][aria-current]'
+    assert selecteur in css
+    actif = css.split(selecteur)[1][:300]
+    assert "background: var(--aca-primary)" in actif

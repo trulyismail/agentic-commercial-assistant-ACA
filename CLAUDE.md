@@ -264,6 +264,37 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   over-eager check. Also logs `ACTION_JOB_RAN` to `activity_log` for **every** job on every tick
   (success or failure) — the piece that answers "did the scheduler even run today", visible even for
   jobs (`maintenance`, `billing`) that have nothing of their own to log.
+- [reporting.py](aca/core/reporting.py) — §20: **what happened over a period, and how it differs
+  from the one before**. Every figure already existed — `analytics_store` counts emails, `audit_log`
+  the validations, `activity_log` each person's gestures, `task_store` the scheduled sends,
+  `review_store` the reviews — but only **on screen, in "last N days", and never compared**. Nobody
+  could answer "what did this tool bring us in July versus June", which is the only question a
+  manager actually asks and the only one that justifies renewing the tool: a dashboard shows a
+  state, a report tells a change. **One engine for both features**: the automatic monthly report
+  (`scheduler`'s `report` job) and the UI's customisable report are the same `collect(spec)` with
+  two specs — `monthly_spec()` is simply frozen (last completed calendar month, `MONTHLY_SECTIONS`,
+  comparison on). Two code paths would have guaranteed that one day one of them shows a number the
+  other doesn't know. **Collection is strictly separated from rendering**: this module doesn't know
+  what a PDF is, it emits typed blocks (`kpis`/`bars`/`line`/`table`/`text`) that
+  `report_pdf.py` draws — so content is testable without opening a document, and an HTML or CSV
+  export would need no query rewritten. `previous_period()` returns the **same-length** window
+  immediately before, not "the previous month": comparing 31 days to 28 would show February down
+  10% every year with nothing having happened. `last_completed_month()` never returns the current
+  month (same rule and reason as `scheduler._last_completed_month`). Every KPI declares which
+  direction is *favourable* (`better`) — a rising median response time is a degradation, and
+  painting every increase green would produce a flattering, false report; a 0→3 move reports the
+  absolute delta with **no** percentage, since "+100%" would claim growth from no base. `SECTIONS`
+  is a declarative registry (adding a section = one entry, same spirit as `ROUTING_DESTINATIONS`
+  and scheduler `JOBS`), grouped into four families matching four different readers; each block
+  carries a `context` sentence, because a report circulates away from its screen and a number
+  without its method of calculation is at best useless and at worst misleading. A section that
+  raises is replaced by a text block saying so rather than taking the report down — and rather than
+  staying silent, which would read as "nothing happened". `MONTHLY_SECTIONS` excludes the
+  email-by-email detail: it can run to dozens of pages and copies prospect addresses into a file
+  that will circulate, so it stays a conscious choice in the customisable report. Presets
+  (`save_preset`/`list_presets`/`delete_preset`) live in `config_store` under `REPORT_PRESET_<name>`
+  like §18's brand profiles, and deliberately store everything **except the dates** — a preset named
+  "Monthly management review" describes a *content*, not a month.
 - [intake_window.py](aca/core/intake_window.py) — §19: **when automatic intake is allowed to run**.
   `poller.py` looped bare — `time.sleep(POLL_INTERVAL_SECONDS)` and nothing else — with two
   consequences: an email arriving at 3am was analysed at 3am (burning quota and firing an alert for
@@ -303,6 +334,35 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   a simultaneous human cancellation could cross, and a cancelled task would flip to "done" — an
   email going out after someone explicitly stopped it. `purge_older_than` deliberately spares
   *pending* tasks regardless of age, since a distant deadline is still a valid intention.
+- [review_store.py](aca/storage/review_store.py) — §20: **review requests** — an operator hands an
+  admin specific emails they don't want to decide alone, several in one gesture
+  (`data/reviews.sqlite`, `ACA_REVIEW_DB`). The gap it closes: an operator facing a lead beyond
+  their authority had exactly three options — validate (writes to the CRM), reject (removes the lead
+  from *everyone's* queue), or do nothing and tell their manager through some other channel, where
+  the information leaves the product and stops being traceable. The third gesture — "I'm not
+  deciding this, someone must look" — did not exist. **Deliberately a separate registry from
+  `task_store.py`**, and the distinction is the module's reason to exist (the same reasoning that
+  separated `task_store` from `followup_store`/`schedule_store` at §19): a task is **dated** (the
+  scheduler fires it, `list_due()` queries a clock) and ends by itself; a review request is
+  **addressed** (the recipient's login surfaces it) and ends with a *human decision* that can carry
+  a written answer (`resolution_note`). The query is not "what's overdue" but "what's waiting for
+  me". Merging them would force `list_due` to exclude this kind, the scheduler to skip it and the
+  purge to treat it apart — three exceptions at the heart of a table whose docstring praises its
+  uniformity. **A batch, not one-at-a-time**: one row per email (each is resolved and commented
+  individually) but all rows of one gesture share a `batch_id`, note and priority, so the recipient
+  reads "Marie sent you 4 emails" and can answer the lot with `resolve_batch()` without losing
+  per-email granularity. **`RECIPIENT_ADMINS` (`@admins`) is resolved at read time, not write
+  time** — an admin hired tomorrow must see what was addressed to the *role* yesterday; expanding it
+  into one row per existing admin at send time would have frozen that list. `mark_seen()` never
+  touches `status`: "seen" and "resolved" are distinct events (same reasoning as
+  `task_store.acknowledged_at`), otherwise a request opened then set aside would vanish from the
+  queue with nobody having handled it. `_close()` carries `status = 'pending'` **inside the SQL**,
+  so two admins opening the same queue can't overwrite each other's answer. Email metadata
+  (subject/sender/classification) is **copied** into the request rather than referenced, so it stays
+  readable after the lead is purged by GDPR retention — a request whose subject evaporates can
+  neither be understood nor closed. `cancel_for_thread()` (wired into `retention.purge_subject`) and
+  `purge_older_than()` (spares *pending* requests at any age — an un-triaged review is outstanding
+  work, and erasing it would delete the trace along with the data).
 - [schedule_store.py](aca/storage/schedule_store.py) — §16.0: when each periodic job last ran
   (`data/schedule.sqlite`, `ACA_SCHEDULE_DB`). Without it `scheduler.py` would replay every job on
   each process restart — a retention purge and a burst of Gmail follow-up drafts on every
@@ -392,6 +452,82 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   security-posture banner (`ui.py`, `key="security_banner"`) gets a warm gradient plus a slow
   `aca-warn-glow` pulse — deliberately only at the animated levels, so a client who disabled motion
   doesn't get a wandering hint that something needs attention when nothing changed.
+  **§21 (design pass, measured against the live DOM rather than the source)** — five rules were
+  written but never rendered, which is why the pass was mostly *making the existing design exist*:
+  (1) `h1,h2,h3 { font-family: var(--aca-display) }` is specificity (0,0,1) and lost to Streamlit's
+  own `.st-emotion-cache-XXXX h1..h6` (0,1,1), so **no real heading was ever in the display serif** —
+  the hero title only worked because `.aca-hero__title` is a class; now anchored on
+  `stMarkdownContainer`/`stHeadingWithActionElements`, no `!important`; (2) a stale
+  `[data-testid="stHeader"] { background: transparent }` sat 130 lines below §19's opaque-header fix
+  and silently undid it (measured `rgba(0,0,0,0)`); (3) `--aca-header-h` was `3.5rem` = 49px under
+  `config.toml`'s `baseFontSize = 14`, describing a bar that actually measures 52.5px — now px;
+  (4) the **active** nav item was Streamlit's neutral grey while *hover* carried the brand colour,
+  lift and shadow, i.e. the hierarchy was inverted — now `aria-current` takes the brand fill and
+  hover is deliberately subordinate; (5) `chart_colors()` concatenated the six semantic tokens, but
+  nothing makes them distinct (default: `BRAND_INFO == BRAND_PRIMARY`, `BRAND_WARNING ==
+  BRAND_ACCENT`), so two dashboard categories drew in the same colour — now de-duplicated and
+  topped up with derived tints to 8. Also: `--aca-muted` 0.42 → **0.34** (was 4.2:1, below AA, and
+  it is the colour of *small* text — calibrated across all 18 presets after a hand-calibrated 0.38
+  passed 4 palettes and failed `Industrie & BTP`); a permanent low card shadow so cards separate
+  from the page even when a client picks near-identical surface/background (one shipped palette
+  measures 1.01:1); `--aca-ease-out`/`--aca-ease-in-out`/`--aca-t-*` tokens replacing five inline
+  curves; every UI animation cut under 300 ms; `:active { scale(.97) }` press feedback; hover gated
+  behind `@media (hover: hover) and (pointer: fine)`; `:focus-visible` rings on buttons/links/nav.
+  One animation **removed**: the empty-state icon's infinite float — the only perpetual purely
+  decorative motion, which competed for attention with the two loops that do signal something.
+  One animation **added** on request, and the tension with that removal is the point: the
+  **ambient background** (`[data-testid="stAppViewContainer"]::before`, two very soft radial veils
+  drifting on a 48s loop). Admissible only because it clears three constraints inherited from
+  decisions already made — (1) it borrows `--aca-primary` and **never** `--aca-accent`, since amber
+  means "a human must decide" and using it decoratively would empty the signal exactly as the four
+  broken palettes did; (2) it is below the attention threshold — 7% alpha, huge radii, no edge, and
+  48s is what separates a *material* from a *moving object*; (3) it covers the work surface only —
+  the sidebar and header have
+  opaque backgrounds and paint over it, so the chrome stays still. Animated with `transform` alone
+  so it is GPU-composited (no layout, no repaint) — this is the one loop that never stops, and
+  animating `background-position` instead would have repainted the whole page every frame. The
+  gradient lives in the **static** block and only the `animation` line is level-gated, so
+  "animations: sobre/aucune" keeps the depth and loses only the movement, and
+  `prefers-reduced-motion` freezes the loop without erasing the background. The companion rule
+  `[data-testid="stMain"], [stSidebar], [stHeader] { position: relative; z-index: 1 }` is
+  structural, not decorative: the veil is `position: fixed` in the same stacking context, so without
+  it the wash would paint **over** the page. **Corrected after the user reported not seeing it, and
+  they were right** — the radii were in `rem`, hence frozen at 588px (14px root from `config.toml`),
+  so on a wide screen two small islands floated in a ~2900px layer with one falling outside the
+  viewport entirely: measured at 1892px, **6 of 7 background points were untouched** and only the
+  bottom-right corner carried colour. The instructive part is *why it passed verification*: the
+  earlier "varies by only 5/255" measurement was taken at 1440px on a strip that happened to sit
+  near the one visible blob — a true number, sampled at the only flattering place, supporting the
+  opposite of the right conclusion. Fixed by sizing in `vmax` (a background decoration scales with
+  the **window**, never with the text size), cutting the overflow 25% → 10% (a 2.5% drift needs no
+  more, and the excess was pushing the blobs out of frame), and raising the alpha 7% → 14% — a
+  judgement fix as much as a code one, since "below the attention threshold" was my criterion while
+  the request was *a background animation you can see*, and an effect nobody can perceive is not
+  subtle, it is absent. `--aca-veil-1`/`--aca-veil-2` are lower in dark mode (9%/6%), because on a
+  light page the veil darkens and thus *raises* text contrast, while on a dark page it lightens and
+  lowers it. After the fix, same viewport: 6 of 7 points carry the wash, 22 luminance levels corner
+  to corner. A test locks the lesson (radii must stay in viewport units, never `rem`).
+  Motion note worth keeping: entrance animations were *suspected* of replaying on every Streamlit
+  rerun (which would have meant deleting them outright); measuring `getAnimations()` before and
+  after a widget-triggered rerun showed them unchanged at `finished` — React reconciles the nodes,
+  so they play once per mount. The hypothesis was wrong and the animations were kept.
+- `signal_separation(primary, accent)` (§21) — the guard behind the pass's one genuine *design*
+  defect rather than a rendering one. Since §19 the accent has exactly one job — *a human must
+  decide here* (`.aca-signoff`, the alert pill, the decision rail's terminus) — but all 18 `PRESETS`
+  predate that rule and still treat accent as "the second brand colour": 4 of them gave it the same
+  hue family as the primary, erasing the product's central affordance (the test instance ran an
+  all-blue palette with **not one pixel** of the reserved colour). Deliberately **not**
+  `contrast_ratio`: WCAG measures luminance, so it ranks these backwards — the default petrol/amber
+  pair scores a poor 1.66:1 while dark-blue/light-blue scores well and still reads as "blue". It is
+  a distance in the **a\*b\* chroma plane of CIELAB with L\* ignored on purpose** (identical → 0,
+  dark/light blue → 0.08, petrol/amber → 0.74); an earlier hue+saturation version was wrong in both
+  directions and the 18-preset ranking exposed it immediately. Wired into `accessibility_report()`
+  (warns, never refuses — it is the client's brand) and locked by a test parametrized over every
+  preset. `Accessibilité renforcée` was fixed **despite passing** the metric: it paired blue with
+  violet, the classic deuteranopia confusion, and a metric that models normal colour vision is the
+  wrong authority on a palette whose name promises accessibility. Stated invariant, corrected from
+  §19's wording: what matters is that the accent is **reserved and unmistakable**, not that it is
+  warm — hence `Corail`, whose brand colour is already warm, gets a *cool* reserved colour.
 - [i18n.py](aca/core/i18n.py) — §18 tangent, on explicit user request ("ajouter l'option de
   switcher si français ou anglais la langue"): a **FR/EN language switcher for the UI**, scoped
   deliberately to primary chrome only (navigation, page headers/captions, main buttons/labels, key
@@ -825,6 +961,28 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   — unlike Journal d'activité, this page is **always** in the navigation (an operator sees a
   read-only settings view; `_can()` checks gate what's editable within the page itself, same as
   before the split).
+- [app_pages/6_reviews.py](app_pages/6_reviews.py) — §20: the review-request surface, serving **two
+  roles on one page** in the order that matches reality — what you *received* first (it is a queue,
+  and it blocks a colleague), then what you send, then what you already sent. Two separate pages
+  would have forced an admin — who both receives and sends — to switch screens for one subject. The
+  picker is an `st.dataframe(selection_mode="multi-row")` over the pending queue (or the last 30
+  days, so "I have a doubt about what I did yesterday" stays possible), so "several at once" is a
+  real multi-select rather than a repeated single action. Sending is gated on
+  `PERM_VALIDATE_LEAD`/`PERM_REJECT_LEAD`: a `viewer` consults, and letting a read-only role hand
+  work to an admin would exceed what "read-only" announces. Choosing `@admins` when **no** admin
+  account exists is refused loudly rather than written to a table nobody would ever read (the real
+  shared-secret-mode case).
+- [app_pages/7_reports.py](app_pages/7_reports.py) — §20: the report builder — period (last month /
+  this month / 7-30-90 days / exact dates), sections grouped by family with each one's description
+  shown as help, the email table's **columns** and filters (that is where "category and sender
+  only" comes from), a free title and context note printed on the cover, comparison on/off, and
+  reusable presets. The "to" date has **one day added** before it reaches the engine: the engine's
+  upper bound is exclusive, but a person choosing "up to the 15th" means the 15th included — without
+  this, that whole day would silently vanish from the report. An on-screen preview renders every
+  block before download, so an empty section is discovered here (and the period widened) rather than
+  inside the PDF. **Two access gates for one reason**: the `activity`/`actors` sections reproduce the
+  Journal d'activité, admin-only since §17 — and so does the monthly archive list, which contains
+  them. A report serving that content without the same gate would be a plain bypass of the rule.
 - [gmail_reader.py](aca/integrations/gmail_reader.py) — Gmail API integration (OAuth "installed app" flow):
   `get_gmail_service()` (auths, caches token in `credentials/gmail_token.json`), `list_unread_emails()`,
   `get_email()` (body + **all** PDF/Word/Excel attachments — `_extract_attachments()` walks every
@@ -949,6 +1107,34 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   contact, draft content and the human-review footer are genuinely present (not a blank/broken
   document), plus header-injection/path-traversal characters (`\r`, `\n`, `/`, `"`) neutralised in the
   filename.
+- [report_pdf.py](aca/integrations/report_pdf.py) — §20: the **themed, multi-page renderer** for
+  `reporting.collect()`'s output. **No new dependency, deliberately**: charts are drawn with
+  PyMuPDF primitives (already pinned for reading attachments and writing proposals). Pulling in
+  matplotlib for four bar charts would have added tens of megabytes, a font to embed and a second
+  rendering engine to the Docker image — to produce raster images that would have needed
+  re-theming by hand anyway, since the palette comes from the client; vector rectangles are
+  crisper in print, weigh kilobytes and take the brand colour for free. **Always on-brand, never
+  illegible**: a client's dark theme is right on screen and disastrous on a document meant to be
+  printed and forwarded, so the paper is forced light and the client's ink colour is kept only if
+  its contrast holds (WCAG AA 4.5); the accent colour is always honoured. Same never-raises
+  contract as `pdf_export.py`/`notify.py` (returns `None`) — it is called by a nightly job as well
+  as by a button. `write_pdf()` is **idempotent by default** (an existing report is never
+  overwritten, exactly like `activity_log.archive_period`: a re-run after a retention purge would
+  otherwise replace a complete report with an amputated one under the same name). Two real defects
+  found by *looking at the rendered document*, not by re-reading the code: (1) every French
+  paragraph overran the right margin, because `fitz.get_text_length()` badly under-measures
+  accented characters ("ééééééééée" measured 22.8pt against 45.6pt for "eeeeeeeeee") — fixed by
+  measuring through `fitz.Font(...).text_length()`; (2) `…` and `—` rendered as stray dots in every
+  truncated cell and every empty value, because a PDF's Base-14 fonts are written with a Latin-1
+  encoding — the glyphs exist in the font but the document cannot address them, while accented
+  letters *are* in Latin-1 and rendered fine, which is what made it easy to miss. Fixed at the
+  **drawing boundary** (a single `_put`) rather than at the twenty-three call sites, the same
+  reasoning as `console.py` for console encoding; the trailing
+  `encode('latin-1', 'replace')` is not belt-and-braces, since an inbound email subject can contain
+  any Unicode at all. A third defect was found by a test rather than review: a typo in a `BRAND_*`
+  hex made `_Palette` raise, so `build_report_pdf` returned `None` per its own contract and **the
+  nightly report silently stopped being produced** — a colour is decoration and must not decide
+  whether the document exists (now falls back per token).
 - [attachment_reader.py](aca/ingestion/attachment_reader.py) — `extract_text_from_attachments(attachments)`: the
   multi-format email-attachment path (P2 §11.4 item 16) — a real RFP arrives with several PDF/Word/
   Excel documents, not one PDF. Dispatches by extension (`.pdf` → `pdf_reader.extract_raw_text_from_pdf`,
@@ -1108,7 +1294,7 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   96% (48/50) pre-migration — both prior errors were on deliberately ambiguous cases. Run via
   `python -m aca.eval.eval_classifier`; re-run once real emails are available to track accuracy
   under real conditions instead of the synthetic set.
-- [tests/](tests/) — automated pytest suite (**606 tests**, offline, ~19s — see Known gaps for full
+- [tests/](tests/) — automated pytest suite (**767 tests**, offline, ~40s — see Known gaps for full
   coverage list): [conftest.py](tests/conftest.py) (env isolation + `FakeLLM`/`ExplodingLLM`, now
   also blanking `ACA_ORG_ID`/`STRIPE_API_KEY`, redirecting `ACA_CONFIG_DB`/`ACA_USERS_DB`, and
   neutralising every §15 security switch — `ACA_ENV=development`, empty `ACA_API_KEY`/
@@ -1191,7 +1377,34 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   file**: [test_i18n.py](tests/test_i18n.py) (11 tests — `translate()` never raising on an unknown
   key/language, every declared key genuinely non-empty in both languages, `{placeholder}` formatting,
   and a sample-key check that FR and EN actually differ, so a future key copy-pasted identically into
-  both languages can't silently defeat the switcher). **606 tests total**, offline, ~19s. Run via
+  both languages can't silently defeat the switcher). **§20 adds three files**:
+  [test_review_store.py](tests/test_review_store.py) (21 tests — ordered by what the registry
+  actually carries, namely *work one person handed to another*: a request reaches its recipient and
+  nobody else, in both failing directions; a batch is genuinely a batch; an already-decided request
+  can't be decided twice, since two admins can open the same queue at once; "seen" never silently
+  becomes "resolved"; tenant isolation; and the purge spares *pending* requests at any age),
+  [test_reporting.py](tests/test_reporting.py) (27 tests — a report is read by someone without
+  access to the raw data who will make decisions on it, so **a wrong figure is worse than a missing
+  section**: exclusive upper bounds proved by an event sitting exactly on a month boundary being
+  counted once and only once; the comparison window being same-length rather than "previous month";
+  a failing section degrading to a text block instead of taking the report down *and* instead of
+  staying silent; every section carrying its context; and no deltas at all when comparison is off,
+  rather than "0 %" everywhere), and
+  [test_report_pdf.py](tests/test_report_pdf.py) (25 tests — a genuine round trip: build, reopen
+  with `fitz`, extract the text and assert the content is really there, since "no exception" is
+  also true of a blank page; never-raises on absurd input; the Latin-1 substitutions incl. an
+  unmanageable Unicode subject; accent-aware measurement; and idempotent disk writes).
+  `test_scheduler.py` gains 4 tests for the monthly `report` job (a file is really produced, an
+  existing one is never overwritten, a render failure is raised rather than swallowed — otherwise
+  the scheduler would record "ok" and not retry for a month — and a failed notification does not
+  turn a produced report into a failure). **§21 adds 65 tests to
+  [test_branding.py](tests/test_branding.py)** (90 → 120 there, incl. 4 parametrized over all 18
+  shipped presets), deliberately asserting the **emitted stylesheet** rather than the intent — every
+  defect that pass found had survived several reviews precisely because a dead CSS rule raises no
+  exception, breaks no test and is invisible on re-reading: the display serif never reaching a real
+  heading, the header silently reverted to transparent, `--aca-header-h` stated in `rem` under a
+  14 px root, the accent collapsing into the primary on 4 palettes, and duplicate colours in the
+  categorical chart palette. **767 tests total**, offline, ~40s. Run via
   `python -m pytest tests/` (pytest pinned in requirements.txt).
 
 ## Stack
@@ -1302,7 +1515,15 @@ lockouts, role/settings changes — longer than routine usage noise), `ACA_ARCHI
 activity journal), and `ACA_SCHEDULE_ARCHIVE_HOURS` (default `720`, same convention as the other four
 `ACA_SCHEDULE_*_HOURS` — controls how often the scheduler *checks* for a due archive, not which month
 gets archived, which `_last_completed_month()` always computes as the previous calendar month).
-All 80 variables are documented one by one in [.env.example](.env.example) (§16.2.2), which
+§20 adds: `ACA_REVIEW_DB` (default `data/reviews.sqlite` — review requests,
+[review_store.py](aca/storage/review_store.py); distinct from `ACA_TASK_DB` because a task is
+*dated* and self-executing while a review request is *addressed* and waits on a person),
+`ACA_REPORT_DIR` (default `data/reports` — where the scheduler writes the monthly PDF reports) and
+`ACA_SCHEDULE_REPORT_HOURS` (default `720`, same convention as `ACA_SCHEDULE_ARCHIVE_HOURS`:
+it sets how often the scheduler *checks*, never which month is covered — that is always the last
+completed calendar month via `reporting.last_completed_month()`; `0` disables the automatic report
+while the "Rapports" page stays usable on demand).
+All 83 variables are documented one by one in [.env.example](.env.example) (§16.2.2), which
 is the file to read first — this section is the reference, that one is the checklist.
 
 `credentials/` (gitignored) holds `service_account.json` (Sheets) and `gmail_credentials.json` (Gmail
@@ -1643,6 +1864,83 @@ afterward.
   account (the branch is exercised through `AppTest` with a seeded `gmail_message_id`, and
   `send_draft` is covered only by its graceful-degradation contract), because demo mode produces
   manual entries with no Gmail thread — the same limit as every other Gmail-dependent path here.
+- ✅ **Fixed (2026-08-04)** — §20 "handing a lead to a colleague, and telling the month's story".
+  Three requests in one pass: (1) let an **operator hand the admin specific emails** to re-read,
+  several in one gesture, visible to the admin on login; (2) a **monthly PDF** of what happened,
+  from emails to statistics, with graphs, **comparing against the previous month**; (3) that PDF
+  made **as parametrable as possible** ("classification and email names only", a chosen date range,
+  anything), always with context and always themed. Delivered:
+  [review_store.py](aca/storage/review_store.py) + [app_pages/6_reviews.py](app_pages/6_reviews.py),
+  [reporting.py](aca/core/reporting.py) + [report_pdf.py](aca/integrations/report_pdf.py) +
+  [app_pages/7_reports.py](app_pages/7_reports.py), a `report` scheduler job, period-windowed reads
+  and a row-level `list_events()` in `analytics_store`, `action_counts`/`actors_between` in
+  `activity_log`, GDPR purge wiring, and ~100 i18n keys. Suite: 620 → **697 tests**. **The pass's
+  own finding, stated as such**: request (1) was not a missing *screen* but a missing **gesture** —
+  an operator facing a lead beyond their authority could validate (CRM write), reject (removes it
+  from everyone's queue), or go tell someone outside the product, where the information stops being
+  traceable; "I'm not deciding this" had no representation anywhere in the data model. Four defects
+  found by verification rather than review: (a) **every French paragraph overran the right margin**
+  in the PDF — `fitz.get_text_length()` under-measures accented characters so badly that
+  "ééééééééée" measures 22.8pt against 45.6pt for "eeeeeeeeee", and the wrap calculation believed it
+  was inside the margin; caught by rendering the pages to images and looking at them, invisible in
+  the code; (b) **`…` and `—` rendered as stray dots** in every truncated cell and empty value,
+  because a PDF's Base-14 fonts are addressed through Latin-1 — while accented letters *are* in
+  Latin-1 and rendered correctly, which is exactly what made it easy to miss; (c) a typo in a
+  `BRAND_*` hex made `_Palette` raise, so `build_report_pdf` returned `None` per its own
+  never-raises contract and **the nightly report silently stopped being produced** — the protective
+  contract was again what hid the loss, the same shape as §17's swallowed audit line; (d) in the
+  end-to-end harness itself, a fake session dated 1970 made the app show the login screen — a
+  session TTL that *works* passing for a missing feature (fixed in the harness, not the product).
+  Verified live: the full offline suite; both new pages rendered headless for all three roles; a
+  real operator→admin round trip (a batch of 2 handed over, visible to the admin with its note and
+  subjects, absent from the sender's own inbox but present in their sent list); the admin-only gate
+  on archived monthly reports; and `ui.py`'s hero pill + sidebar panel + toast, with **one** toast
+  for a two-email batch. Still open, and stated plainly: the monthly report has **never run over
+  twelve months of real data** (verified on synthetic data and through the scheduled job in tests);
+  its "your report is ready" notification reaches nobody when neither Slack nor `NOTIFY_EMAIL` is
+  configured (the file is still there, but nothing goes to fetch it); and the PDF is **not
+  attached** to that notification, since `notify.py` carries text only and adding attachment support
+  exceeded the request.
+- ✅ **Fixed (2026-08-05)** — §21 "design pass". Request: improve the Streamlit design "to the top",
+  each element with a purpose, "neat and fluid", using the animation/design skills. The pass's own
+  finding is that it was mostly **not** a decoration job: the rule adopted at the outset — *judge
+  nothing from the source, measure everything on the rendered page* (app run in a sandbox with
+  copied DBs, demo mode, no API key, driven through a real browser) — turned up **five rules that
+  were written and never rendered**, each invisible to code review because dead CSS raises no
+  exception and breaks no test: (1) no page heading was ever in the display serif (specificity lost
+  to Streamlit's own emotion class — so a third of §19's typographic thesis had never been seen by
+  anyone); (2) §19's opaque header had been silently reverted by a stale `background: transparent`
+  130 lines lower (measured `rgba(0,0,0,0)`: content scrolled under a hairline with nothing behind
+  it); (3) `--aca-header-h` claimed to be the header height and was 49px against a real 52.5px,
+  because `3.5rem` assumed a 16px root while `config.toml` sets `baseFontSize = 14`; (4) the active
+  nav item was unbranded grey while hover carried the brand colour, lift and shadow — the hierarchy
+  inverted on a seven-entry bar; (5) two dashboard chart categories drew in the identical colour,
+  because the categorical palette concatenated six semantic tokens that are legitimately allowed to
+  be equal (`BRAND_INFO == BRAND_PRIMARY`, `BRAND_WARNING == BRAND_ACCENT` in the defaults). Beyond
+  rendering, one genuine **design** defect: `BRAND_ACCENT` was given a single exclusive meaning at
+  §19 ("a human must decide here") but none of the 18 shipped presets were revisited, so 4 gave it
+  the primary's own hue family — the test instance ran an all-blue palette with not one pixel of the
+  reserved colour. Fixed via a new `signal_separation()` (CIELAB a\*b\* distance, L\* ignored —
+  WCAG contrast ranks these backwards), 5 corrected preset accents, and a warning in
+  `accessibility_report()`. Also: muted text raised to clear AA, permanent low card shadow, easing
+  tokens, all UI motion under 300 ms, press feedback, pointer-gated hover, `:focus-visible` rings,
+  one perpetual decorative animation removed, and `.streamlit/config.toml` regenerated from the
+  token defaults (it was still the pre-§19 Fluent blue, so a fresh clone rendered half in the
+  intended palette and half in an abandoned one). A follow-up request added an **ambient background
+  wash** — accepted only under the three constraints described in the `branding.py` entry above,
+  since it arrived immediately after *removing* a perpetual decorative animation for competing with
+  the loops that carry meaning. Suite: 697 → **767 tests**. A methodological note
+  worth keeping, since it cuts the other way: the pass *suspected* entrance animations replayed on
+  every Streamlit rerun, which would have justified deleting them; measuring `getAnimations()`
+  before and after a widget-triggered rerun showed them unchanged at `finished` — React reconciles
+  the nodes — so **the hypothesis was wrong and the animations were kept**, merely shortened. Still
+  open, stated plainly: nothing was checked on a real phone or tablet (only a resized desktop
+  browser); dark mode and the 18 presets are verified by computation only, none opened by eye; the
+  `data-testid`/emotion selectors remain Streamlit 1.59 implementation details, so a version bump
+  can make the page **less pretty, never broken**; and this deployment's own colours are stored as
+  *explicit* overrides, which by the project's long-standing rule are never overridden by a preset
+  — so the corrected palettes do **not** change this instance, though the Apparence panel now warns
+  that its accent scores 0.08.
 
 
 ## Status vs. the 8-week roadmap

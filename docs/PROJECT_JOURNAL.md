@@ -1913,3 +1913,428 @@ L'envoi programmé n'a **jamais été déclenché contre un vrai compte Gmail** 
 ne produit que des saisies manuelles, sans fil Gmail. La branche d'interface est vérifiée, le
 stockage et l'annulation le sont par tests, mais `send_draft` n'est couvert que par son contrat de
 dégradation gracieuse — même limite que tous les autres chemins dépendant de Gmail dans ce projet.
+
+---
+
+## 2026-08-04 — Passer le relais à un collègue, et raconter le mois écoulé
+
+### Les trois demandes
+
+L'utilisateur a demandé trois choses d'un coup :
+
+1. Qu'un **opérateur puisse transmettre à l'administrateur des e-mails précis** à faire relire avant
+   validation — **plusieurs d'un seul geste**, et que l'administrateur les voie en se connectant.
+2. Qu'un **PDF mensuel** raconte ce qui s'est passé, des e-mails aux statistiques, avec des
+   graphiques, **en comparant au mois précédent** pour que ce soit utile.
+3. Que ce PDF soit **paramétrable au maximum** : choisir ce qu'il contient (par exemple « la
+   catégorie et le nom des e-mails seulement »), la période, « n'importe quoi » — toujours avec le
+   contexte, et toujours à un thème.
+
+### 1. Le geste qui manquait dans l'outil
+
+Jusqu'ici, un opérateur devant un lead qui le dépasse n'avait que trois issues : **valider** (ce qui
+écrit dans le CRM), **rejeter** (ce qui fait disparaître le lead de la file de toute l'équipe), ou
+**ne rien faire** et prévenir son responsable par un autre canal — un message, un mot dans le
+couloir. Dans ce dernier cas, l'information sort du produit : plus de trace, plus de date, plus
+personne pour savoir si quelqu'un s'en est occupé.
+
+Le troisième geste — « je ne tranche pas, quelqu'un doit regarder » — n'existait pas. C'est
+exactement ce qui a été ajouté.
+
+**Comment ça marche, concrètement.** Une nouvelle page « Relectures ». L'opérateur y voit la file
+d'attente (ou les e-mails des 30 derniers jours), **coche plusieurs lignes**, écrit pourquoi
+(« clause de pénalité inhabituelle »), choisit le destinataire — par défaut « tous les
+administrateurs » — et envoie. L'administrateur, à sa prochaine connexion, voit :
+
+- une **pastille rouge** dans l'en-tête (« 2 relecture(s) à traiter »),
+- un **panneau dans la barre latérale** indiquant qui a demandé quoi,
+- un **toast**, annoncé une seule fois par lot.
+
+Il peut ouvrir chaque lead, répondre par écrit, traiter ou écarter — ou répondre au lot entier d'un
+seul clic quand l'avis vaut pour tout le monde.
+
+**Pourquoi un nouveau registre plutôt que réutiliser celui des tâches (§19).** Les deux se
+ressemblent en surface, mais pas du tout dans leur fonctionnement :
+
+- une **tâche** est *datée* : c'est le planificateur qui la déclenche quand l'heure arrive, et elle
+  se termine toute seule ;
+- une **demande de relecture** est *adressée* : c'est la connexion d'une personne qui la fait
+  apparaître, et elle se termine quand cette personne a décidé quelque chose.
+
+La question posée n'est pas la même : « qu'est-ce qui est échu ? » d'un côté, « qu'est-ce qui
+m'attend ? » de l'autre. Les mettre dans la même table aurait obligé le planificateur à sauter ce
+type, la purge à le traiter à part, et la liste des échéances à l'exclure — trois exceptions dans
+une table dont l'intérêt était justement d'être uniforme.
+
+**Un détail qui compte : les informations de l'e-mail sont recopiées dans la demande.** L'objet et
+l'adresse de l'expéditeur sont dupliqués plutôt que référencés, pour qu'un administrateur puisse
+encore comprendre de quoi il s'agit si le lead a été effacé entre-temps par la purge RGPD. Une
+demande dont l'intitulé s'évapore ne peut plus être ni comprise ni close.
+
+**Deux garde-fous repris du §19 :** « vu » et « traité » restent deux choses différentes (consulter
+une demande ne la retire pas de la file, sinon une relecture ouverte puis oubliée serait perdue pour
+tout le monde) ; et une demande déjà tranchée ne peut pas l'être une deuxième fois — deux
+administrateurs peuvent parfaitement ouvrir la même file au même moment, et le second ne doit pas
+écraser la réponse du premier.
+
+### 2. Le rapport mensuel : un tableau de bord montre un état, un rapport raconte une évolution
+
+Toutes les données existaient déjà. Le projet compte les e-mails classés, les validations, les
+gestes de chaque personne, les envois programmés. Mais elles n'existaient qu'**à l'écran, en
+« N derniers jours », et jamais comparées**. Personne ne pouvait répondre à la seule question qui
+justifie de reconduire un outil : « qu'est-ce que ça nous a apporté en juillet, par rapport à
+juin ? »
+
+Le rapport mensuel est produit automatiquement par le planificateur, en PDF, aux couleurs de
+l'entreprise. Il couvre toujours le **dernier mois entièrement écoulé** — jamais le mois en cours,
+qui n'a pas fini de recevoir des lignes : un rapport « du mois » produit le 12 ne porterait que sur
+onze jours et se comparerait à un mois plein, ce qui inventerait une chute d'activité qui n'a pas eu
+lieu.
+
+**La comparaison est faite honnêtement**, et c'est le point le plus important :
+
+- elle porte sur la **période de même durée qui précède**, pas sur « le mois d'avant » pris
+  naïvement. Comparer 31 jours à 28 ferait apparaître février en baisse de 10 % chaque année sans
+  qu'il s'y passe quoi que ce soit ;
+- une hausse n'est **pas automatiquement une bonne nouvelle**. Chaque indicateur déclare le sens qui
+  lui est favorable : un délai de réponse qui augmente s'affiche en rouge, un volume qui augmente en
+  vert. Tout colorier en vert produirait un rapport flatteur et faux ;
+- passer de 0 à 3 n'affiche **aucun pourcentage**, juste « +3 ». Écrire « +100 % » raconterait une
+  progression qui n'a pas de base de comparaison.
+
+**Le contenu est classé en quatre familles**, qui correspondent à quatre lecteurs : activité
+commerciale (le commercial), qualité et intervention humaine (le responsable), traçabilité et
+conformité (l'administrateur), exploitation (celui qui fait tourner l'outil). Quinze tableaux
+alignés dans l'ordre où le code les a produits ne se lisent pas. Chaque famille commence sur une
+page neuve, ce qui rend le document feuilletable.
+
+### 3. Le rapport paramétrable : « le plus paramétrable possible »
+
+La même machinerie, pilotée depuis une page « Rapports ». On y choisit :
+
+- **la période** : mois dernier, ce mois-ci, 7/30/90 derniers jours, ou deux dates précises ;
+- **les sections** : quatorze au total, cochées une par une, chacune accompagnée d'une phrase qui
+  dit ce qu'elle apporte ;
+- **les colonnes du détail e-mail** : c'est là qu'on obtient « la catégorie et l'expéditeur
+  seulement », comme demandé, ou au contraire le détail complet ;
+- **des filtres** : par catégorie, par expéditeur, leads validés seulement ;
+- **un titre et une note de contexte** libres, imprimés sur la couverture ;
+- et l'ensemble peut être **enregistré comme préréglage** réutilisable — un rapport qu'il faut
+  recomposer case par case chaque mois ne sera composé qu'une fois.
+
+Un préréglage enregistre volontairement **tout sauf les dates** : « Revue mensuelle direction »
+décrit un contenu, pas un mois. Y figer juillet en ferait un préréglage inutilisable dès août.
+
+**« Toujours avec le contexte »** a été pris au sérieux. Chaque bloc du document porte une phrase
+qui explique d'où vient le chiffre et sur quoi il porte, et la couverture liste les sections
+demandées. Sans cette liste, un lecteur ne peut pas distinguer « il ne s'est rien passé » de « cette
+section n'a pas été demandée » — deux conclusions opposées tirées de la même absence. Un rapport
+circule : il finit dans une réunion trois semaines plus tard, et un nombre sans son mode de calcul y
+devient au mieux inutile, au pire trompeur.
+
+**« Toujours avec un thème »** aussi, avec une nuance assumée : le document reprend les couleurs du
+client, **sauf si elles le rendent illisible**. Un thème sombre est parfait à l'écran et désastreux
+sur un document imprimé puis transféré — du texte clair sur du papier clair. Le papier est donc
+toujours clair, et l'encre du client n'est conservée que si son contraste tient la norme
+d'accessibilité. La couleur d'accent, elle, est toujours respectée : c'est celle qu'on reconnaît.
+
+**Aucune nouvelle dépendance.** Les graphiques (barres avec la période précédente en filigrane,
+courbe de volume avec son aire remplie) sont dessinés directement avec la bibliothèque PDF déjà
+présente dans le projet. Ajouter matplotlib pour quatre diagrammes aurait fait entrer des dizaines
+de mégaoctets, une police à embarquer et un moteur de rendu de plus — pour produire des images
+qu'il aurait fallu recolorier à la main de toute façon, puisque la palette vient du client.
+
+### Ce que la vérification a trouvé, et que la relecture n'aurait pas vu
+
+Trois défauts réels, tous découverts en **regardant le document produit** ou en écrivant un test —
+pas en relisant le code :
+
+1. **Chaque paragraphe en français dépassait la marge droite** et se faisait couper au bord de la
+   page. La fonction qui mesure la largeur d'un texte sous-évalue gravement les lettres accentuées :
+   « ééééééééée » mesurait 22,8 points là où « eeeeeeeeee » en mesurait 45,6 — les « é » comptaient
+   pour presque rien. Le calcul de retour à la ligne se croyait donc dans les clous. Visible d'un
+   coup d'œil sur la page rendue, invisible dans le code.
+2. **Les « … » et les « — » sortaient en petits points parasites**, dans chaque cellule tronquée
+   d'un tableau et à chaque valeur absente. Les polices standard d'un PDF sont écrites avec un
+   encodage occidental limité : la police possède bien ces caractères, mais le document n'a aucun
+   moyen de les désigner. Les lettres accentuées, elles, passent très bien — ce qui rendait le
+   défaut d'autant plus facile à ne pas voir. Corrigé **à un seul endroit**, là où le texte est posé
+   sur la page, plutôt qu'aux vingt-trois points d'appel : même raisonnement que la correction
+   d'encodage console faite plus tôt dans le projet.
+3. **Une faute de frappe dans une couleur de marque empêchait tout le rapport d'exister.** Une
+   valeur invalide dans le fichier de configuration faisait échouer le rendu, qui renvoyait « rien »
+   conformément à son contrat de robustesse — donc plus aucun rapport mensuel n'était produit, en
+   silence, la nuit. Une couleur est un ornement : elle ne doit pas décider si le document existe.
+   Corrigé par un repli sur la couleur par défaut.
+
+Une quatrième chose, trouvée en montant le test de bout en bout : le premier scénario donnait à la
+fausse session une date de début en 1970, si bien que l'application affichait l'écran de connexion —
+la session avait **légitimement** expiré. Autrement dit, une protection qui fonctionne se faisait
+passer pour une fonctionnalité manquante. Corrigé côté test, pas côté produit.
+
+### Vérifications faites
+
+- **Suite de tests : 620 → 697** (tout hors ligne, ~30 s). Trois nouveaux fichiers — le registre des
+  relectures (21 tests), le moteur de rapport (27), le rendu PDF (25) — plus quatre tests de
+  planificateur pour le travail mensuel.
+- **Le PDF est réellement relu** dans les tests : on le construit, on le rouvre, on en extrait le
+  texte et on vérifie que le contenu attendu y est. « Aucune erreur » ne prouve pas qu'un document
+  est lisible — une page blanche passe ce test-là.
+- **Les deux nouvelles pages ont été rendues pour les trois rôles** (administrateur, opérateur,
+  lecteur) sans exception.
+- **Un parcours réel a été rejoué** : Marie transmet deux e-mails, l'administrateur les voit avec la
+  note et les objets, Marie ne les voit pas dans sa propre file de réception mais bien dans ses
+  envois.
+- **L'en-tête, la barre latérale et le toast ont été vérifiés** : l'administrateur voit les trois,
+  l'opérateur aucun, et un lot de deux e-mails ne produit **qu'un seul** toast.
+- **Le rapport a été inspecté page par page**, en images, avant et après correction des deux défauts
+  de mise en page.
+
+### Ce qui reste non vérifié, dit clairement
+
+Le rapport mensuel n'a **jamais tourné sur douze mois de données réelles** : il est vérifié sur des
+données synthétiques et par le travail planifié en test. La notification « votre rapport est prêt »
+n'atteint personne si ni Slack ni l'adresse e-mail ne sont configurés — le rapport reste alors
+visible dans l'onglet, mais rien ne va le chercher. Et le PDF n'est **pas joint** à cette
+notification : le module d'envoi ne transporte que du texte, et lui ajouter la gestion des pièces
+jointes dépassait la demande.
+
+
+## 2026-08-05 — Une passe de design qui a surtout trouvé du design déjà écrit mais jamais affiché
+
+**La demande.** « Améliore le design Streamlit au maximum, chaque élément avec une intention, que ce
+soit net et fluide », en s'appuyant sur des méthodes de design d'interface (Emil Kowalski pour le
+mouvement, une skill de direction artistique, et la skill Streamlit maison).
+
+**Ce qu'on croyait faire, et ce qu'on a fait.** On s'attendait à « redécorer ». En pratique, la
+règle qu'on s'est donnée dès le départ a tout changé : *ne rien juger sur le code, tout mesurer sur
+la page réellement affichée*. On a donc lancé l'application dans un bac à sable (copies des bases,
+mode démonstration, aucune clé d'API) et piloté un vrai navigateur pour relever les valeurs
+calculées par le moteur de rendu. Résultat : l'essentiel du travail n'a pas été d'inventer un
+nouveau style, mais de **faire exister celui qui était déjà écrit et qui ne s'affichait pas**.
+
+### Cinq choses qui étaient dans le fichier et pas à l'écran
+
+**1. Les titres n'étaient pas dans la bonne police.** Le projet s'était donné en §19 trois « voix »
+typographiques : une serif pour la voix du document, une sans pour la voix de l'outil, un monospace
+pour les valeurs de la machine. Sur la page, un titre de section calculait « Segoe UI ». Explication
+en clair : en CSS, quand deux règles veulent la même chose, c'est la plus « précise » qui gagne, pas
+la dernière écrite. Notre règle disait `h1, h2, h3` (très général) ; celle de Streamlit disait
+`.st-emotion-cache-1vxakfx h3` (plus précise). La nôtre perdait à tous les coups. Le seul titre qui
+sortait bien en serif était l'en-tête de marque — et par hasard, parce qu'il est désigné par une
+classe et non par son nom de balise. Autrement dit : **un tiers de la thèse typographique du projet
+n'avait jamais été visible par personne.**
+
+**2. La barre d'en-tête était transparente.** §19 avait corrigé un chevauchement en lui donnant un
+fond opaque. Sauf qu'une vieille ligne `background: transparent` traînait cent trente lignes plus
+bas dans le même fichier et l'annulait. Mesuré sur la page : `rgba(0, 0, 0, 0)`. Le contenu défilait
+donc sous un filet horizontal derrière lequel il n'y avait rien.
+
+**3. La hauteur réservée à cette barre était fausse.** La variable valait `3.5rem`. Un « rem » est
+une unité relative à la taille de police de base. On supposait 16 pixels — mais le fichier de thème
+fixe cette base à 14. La variable censée *décrire* une barre mesurée à 52,5 px n'en valait donc que
+49. Elle est passée en pixels : une valeur qui prétend décrire une mesure doit décrire cette mesure.
+
+**4. L'onglet de la page courante était gris.** Relevé : l'onglet actif recevait un gris neutre de
+Streamlit, pendant que le survol recevait la couleur de marque, un léger soulèvement et une ombre.
+La hiérarchie était **inversée** — l'effet le plus visible désignait l'endroit où passe la souris,
+pas l'endroit où l'on se trouve. Sur une barre à sept entrées, c'est pourtant la seule information
+qui compte.
+
+**5. Deux catégories du tableau de bord se dessinaient dans la même couleur.** La palette des
+graphiques était fabriquée en enfilant les six couleurs « à sens » (principale, succès,
+avertissement, accent, information, erreur). Or rien n'oblige ces six-là à être différentes : dans
+la palette par défaut, « information » vaut la couleur principale et « avertissement » vaut la
+couleur d'accent — ce qui est **juste** du point de vue du sens, et devient faux dès qu'on aplatit
+la liste en palette de graphique. Une légende à cinq entrées n'en distinguait que trois.
+
+### Le vrai défaut de conception : le signal de décision pouvait disparaître
+
+C'est la trouvaille qui dépasse la cosmétique. Depuis §19, la couleur d'accent n'est plus « la
+deuxième couleur de la marque » : elle a **un seul rôle**, signaler *ce qui attend une décision
+humaine* — le cartouche « Bon pour accord », la pastille d'alerte, la fin du rail de décision. C'est
+le repère central d'un produit dont toute la promesse est qu'une personne tranche avant que quoi que
+ce soit parte.
+
+Mais les dix-huit palettes livrées avaient été écrites **avant** que l'accent reçoive ce rôle, et
+personne n'y était revenu. Sur l'instance de test — qui tourne avec une palette bleue — il n'y avait
+littéralement **pas un pixel** de la couleur réservée : accent et couleur principale étaient deux
+bleus. L'écran restait joli et n'indiquait plus où agir.
+
+Pour mesurer ça, il a fallu trouver le bon critère, et le premier essai était faux. On a d'abord
+utilisé le contraste WCAG (l'outil habituel) : il donne le résultat **à l'envers**, parce qu'il
+mesure une différence de clair/foncé et pas de couleur — le couple par défaut pétrole/ambre, qui
+saute aux yeux, y obtient une note médiocre, tandis que bleu foncé/bleu clair y obtient une bonne
+note tout en restant « du bleu ». Deuxième essai en teinte + saturation : faux aussi, et le
+classement des dix-huit palettes l'a montré tout de suite (deux turquoises passaient pour distincts,
+un vert profond et un sable étaient signalés à tort). La bonne mesure ignore complètement la
+clarté : on compare les deux couleurs **dans le plan des couleurs** d'un espace perceptif (CIELAB),
+ce qui reproduit enfin le jugement de l'œil — couleur identique = 0, bleu foncé/bleu clair = 0,08,
+pétrole/ambre = 0,74.
+
+Quatre palettes livrées ont donc reçu un nouvel accent, et une cinquième pour une raison différente :
+« Accessibilité renforcée » passait la mesure automatique, mais associait bleu et violet, c'est-à-dire
+exactement la paire que confondent les personnes daltoniennes — sur une palette dont le nom promet
+l'accessibilité, se fier à une mesure qui suppose une vision normale était le pire endroit possible.
+Au passage, la règle a été formulée plus honnêtement : ce qui compte n'est pas que l'accent soit
+*chaud*, mais qu'il soit **réservé et impossible à confondre**. La palette « Corail », dont la
+couleur de marque est déjà chaude, reçoit donc un accent froid.
+
+Enfin, un garde-fou a été ajouté au panneau Apparence : si un administrateur choisit un accent trop
+proche de sa couleur principale, il est **prévenu** — jamais empêché, c'est sa charte graphique.
+
+### Le mouvement : une hypothèse démentie par la mesure
+
+Point de méthode intéressant. On soupçonnait que les animations d'entrée se rejouaient à **chaque**
+interaction (Streamlit ré-exécute tout le script au moindre clic), ce qui aurait imposé de les
+supprimer purement et simplement. Avant de toucher à quoi que ce soit, on l'a vérifié en interrogeant
+le navigateur avant et après un clic : les animations restaient à « terminée », inchangées. React
+réutilise les éléments existants au lieu de les recréer, donc l'animation ne repart pas.
+**L'hypothèse était fausse, et les animations ont été gardées.** Elles ont seulement été raccourcies
+sous 300 ms (au-delà, un mouvement cesse d'être perçu comme une réponse et devient une attente), et
+toutes les courbes ont été rassemblées en deux variables partagées au lieu de cinq écritures
+différentes semées dans le fichier.
+
+Trois ajouts sur le ressenti, chacun avec une raison : un **enfoncement du bouton** au clic (avant,
+appuyer ne produisait aucun signal — or ici chaque clic déclenche un aller-retour serveur, donc
+c'est la seule confirmation immédiate possible) ; le **survol réservé aux souris** (sur tactile,
+`:hover` se déclenche au toucher et *reste* actif, si bien que le bouton qu'on vient d'utiliser a
+l'air sélectionné) ; et un **contour de focus au clavier** sur les boutons et les liens (il n'existait
+que sur les champs de saisie — sur l'écran de validation, ne pas voir le focus revient à ne pas
+savoir quel bouton on s'apprête à actionner).
+
+Une seule chose a été **retirée** : l'icône des écrans vides flottait en boucle indéfiniment. C'était
+le seul mouvement perpétuel purement décoratif ; dans un outil ouvert toute la journée, il se
+disputait l'attention avec les deux boucles qui, elles, signalent vraiment quelque chose (le pouls
+d'une analyse en cours, la lueur de la bannière de sécurité). Enlever un accessoire rend les autres
+audibles.
+
+### Deux corrections de lisibilité
+
+Le gris des textes secondaires (accroches, relevés, libellés d'indicateurs — donc du **petit**
+texte) était sous le seuil d'accessibilité AA. Il a été assombri. Détail méthodologique utile : un
+premier réglage calibré à la main sur quatre palettes passait ces quatre-là et **échouait** sur une
+cinquième ; c'est le test paramétré sur les dix-huit palettes qui l'a rattrapé immédiatement. Le
+réglage final laisse de la marge sur toutes.
+
+Les cartes, elles, reposaient entièrement sur une différence de couleur entre le fond de page et le
+fond des cartes — que rien n'oblige un client à conserver, et que plusieurs palettes livrées
+annulaient presque (mesuré : 1,01 contre 1). Elles reçoivent désormais une ombre très basse en
+permanence : la séparation devient une propriété du système et non un coup de chance de palette.
+
+### Le fichier de thème n'avait pas suivi
+
+`.streamlit/config.toml` — la couche qui atteint l'*intérieur* des composants Streamlit (menu
+déroulant ouvert, en-tête de tableau, palette des graphiques) — était resté sur le bleu Microsoft
+d'avant §19. Une installation neuve s'affichait donc pour moitié dans la palette voulue et pour
+moitié dans une palette abandonnée. Il a été régénéré depuis les valeurs par défaut du produit,
+c'est-à-dire exactement ce que l'application écrit elle-même quand un administrateur enregistre sa
+marque.
+
+### Ce qui a été vérifié, et ce qui ne l'a pas été
+
+Vérifié : la suite complète passe (**697 → 762 tests**, 65 ajoutés) ; chaque correction est relevée
+sur la page réellement affichée, avant et après (barre d'en-tête devenue opaque, titres passés en
+serif, onglet actif passé à la couleur de marque, gris secondaire assombri, aucun débordement
+horizontal à 900 px de large) ; les graphiques se dessinent bien — une capture prise trop tôt les
+montrait vides, ce qui a été levé en comptant les éléments réellement dessinés plutôt qu'en se fiant
+à l'image.
+
+Les soixante-cinq tests ajoutés portent volontairement sur la **feuille de style produite**, pas sur
+l'intention : c'est précisément parce qu'une règle CSS morte ne lève aucune erreur, ne casse aucun
+test et ne se voit pas à la relecture que ces cinq défauts avaient pu survivre à plusieurs passes.
+
+Non vérifié, et il faut le dire : rien n'a été regardé sur un vrai téléphone ni sur une vraie
+tablette (on ne dispose ici que d'un navigateur redimensionné) ; le mode sombre et les dix-huit
+palettes ne sont contrôlés que par calcul, aucune n'a été ouverte à l'œil ; et les sélecteurs
+utilisés restent des détails d'implémentation de Streamlit 1.59 — une montée de version peut rendre
+la page **moins jolie**, jamais cassée, puisque aucune de ces règles ne conditionne une
+fonctionnalité.
+
+**Une conséquence pour l'instance actuelle, à signaler.** Les couleurs de cette installation ont été
+enregistrées explicitement dans les réglages (un bleu foncé et un bleu clair). Or le produit garantit
+depuis toujours qu'une couleur *explicitement choisie* n'est jamais écrasée — ni par un préréglage,
+ni par une correction comme celle-ci. La correction des palettes ne changera donc **pas** cet écran.
+En revanche, le panneau Apparence affiche maintenant l'avertissement : accent trop proche de la
+couleur principale, séparation 0,08 sur 1. Vider le champ « couleur d'accent » suffit à retomber sur
+la valeur corrigée du préréglage.
+
+### Ajout demandé dans la foulée : un fond d'ambiance
+
+Demande : « ajoute une petite animation de fond ». La tension est réelle et vaut d'être notée, parce
+qu'on venait de **retirer** une animation perpétuelle (l'icône flottante) au motif qu'un mouvement
+sans fin dans un outil ouvert toute la journée dispute l'attention aux deux boucles qui signalent
+vraiment quelque chose. Ajouter un fond animé juste après ne pouvait donc pas être fait à la légère :
+il fallait qu'il tienne trois conditions, chacune héritée d'une décision déjà prise.
+
+**Ce qu'il dit.** La machine tourne même quand personne ne regarde — le relevé d'e-mails et le
+planificateur travaillent en tâche de fond, et un écran parfaitement inerte quand la file est vide
+dit le contraire de ce que fait le produit. C'est un fond qui *respire*, pas un objet qui bouge.
+
+**Trois garde-fous.** (1) **Froid uniquement** : le voile emprunte la couleur principale, jamais
+l'ambre — celle-ci ne signifie qu'une chose, « une personne doit trancher », et l'employer
+décorativement aurait vidé le signal de son sens, c'est-à-dire refait le défaut corrigé sur quatre
+palettes le matin même. (2) **Sous le seuil de l'attention** : 7 % de la couleur de marque, des
+rayons énormes, aucun contour, et 48 secondes par cycle. C'est la lenteur qui fait la différence
+entre une matière et un objet — à 10 s l'œil suit le mouvement, à 48 s l'écran n'est jamais tout à
+fait le même sans qu'on puisse dire ce qui a changé. (3) **Le plan de travail seulement** : la barre
+latérale et l'en-tête ont leurs propres fonds opaques et passent par-dessus, donc le chrome reste
+stable.
+
+**Mesuré plutôt que supposé**, comme le reste de la journée. Sur une bande de fond sans contenu, le
+voile ne fait varier l'image que de **5 niveaux sur 255 au maximum** en douze secondes (moyenne
+inférieure à 1) : le mouvement est littéralement imperceptible d'un instant à l'autre. En revanche,
+d'un bout à l'autre de la page, le fond passe de 245 à 237 — soit une profondeur bien visible. C'est
+exactement le réglage recherché : perceptible comme relief, imperceptible comme déplacement. Une
+première mesure brute annonçait un écart de 227 sur 255 entre deux captures ; en isolant les zones,
+il s'agissait de la notification de rappel qui apparaissait entre les deux images, pas du voile —
+d'où l'intérêt de mesurer une région sans contenu plutôt que l'écran entier.
+
+Deux détails techniques qui comptent. Le voile est animé en `transform` uniquement, donc composé par
+la carte graphique : aucun recalcul de mise en page ni repeinture, ce qui est indispensable pour la
+seule animation de la feuille qui ne s'arrête jamais (animer la position du dégradé aurait été plus
+court à écrire et aurait repeint la page entière à chaque image). Et le dégradé est posé dans le
+bloc *statique* de la feuille, pas dans le bloc d'animations : un client qui choisit « animations :
+sobre » ou « aucune » garde la profondeur et perd seulement le mouvement — et `prefers-reduced-motion`
+fige la boucle sans effacer le fond, ce qui est le bon comportement (moins de mouvement, pas moins
+d'interface).
+
+Vérifié en direct sur le DOM : `position: fixed`, `z-index: 0`, `pointer-events: none`, dégradé bien
+construit sur la couleur principale, animation `48s infinite` en cours, et le contenu principal
+au-dessus (`position: relative; z-index: 1`) — cette dernière règle n'est pas décorative : sans
+elle, le voile serait passé **devant** la page.
+
+**Puis l'utilisateur a répondu : « je ne vois pas l'animation de fond ». Il avait raison, et ma
+vérification était en défaut.** Deux causes, dont une entièrement de mon fait.
+
+La première est banale : Streamlit ne recharge pas un module importé comme `branding.py` quand on
+enregistre le fichier. Une instance démarrée avant la modification continue de servir l'ancienne
+feuille de style — c'est d'ailleurs le même piège qui m'avait fait croire deux fois dans la journée
+qu'un correctif « ne prenait pas ».
+
+La seconde est un vrai défaut de conception. Les rayons des voiles étaient exprimés en `rem`, donc
+figés à 588 pixels (la racine est à 14 px, imposée par `config.toml`). Sur un écran large, deux
+taches de 588 px dans une couche de près de 2 900 px deviennent deux petits îlots, dont l'un tombait
+carrément hors du champ visible. Mesuré à 1892 px de large : **six points de fond sur sept étaient
+rigoureusement intacts** (245, 245, 245), et seul le coin inférieur droit portait la couleur.
+
+Ce qui rend l'erreur intéressante, c'est *pourquoi je ne l'avais pas vue* : ma mesure « le voile ne
+varie que de 5 niveaux sur 255 » avait été prise à 1440 px de large, et sur une bande qui se trouvait
+justement près de la seule tache visible. J'avais donc mesuré une vraie valeur, au seul endroit qui
+la rendait flatteuse, et j'en avais tiré la conclusion inverse de la bonne : je croyais avoir réglé
+une subtilité, j'avais en fait une décoration absente sur la majeure partie de l'écran.
+
+Correctif en trois points. (1) Rayons en `vmax` : une décoration de fond se mesure à la **fenêtre**,
+pas à la taille du texte. (2) Débordement ramené de 25 % à 10 % : la dérive ne déplace le voile que
+de 2,5 %, donc une couche 1,5 fois plus grande que l'écran ne servait qu'à repousser les taches hors
+du cadre. (3) Intensité portée de 7 % à 14 % — et c'est une correction de jugement autant que de
+code : « en dessous du seuil d'attention » était mon critère, alors que la demande était *une
+animation de fond qu'on voit*. Un effet que l'utilisateur ne peut pas percevoir n'est pas un effet
+discret, c'est un effet raté. L'intensité est en revanche **plus faible en mode sombre** (9 %), parce
+que sur fond clair le voile assombrit la page — donc augmente le contraste du texte — tandis que sur
+fond sombre il l'éclaircit et le réduit.
+
+Après correction, au même format d'écran : **six points sur sept portent le voile** (contre un seul),
+pour un écart de 22 niveaux de luminance d'un bord à l'autre — visible comme une matière, sans
+jamais concurrencer le contenu. Suite : 762 → **767 tests**, dont un qui verrouille précisément la
+leçon (les rayons doivent rester en unités de fenêtre, jamais en `rem`).

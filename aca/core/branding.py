@@ -35,6 +35,7 @@ de connexion de s'afficher.
 Aucun import Streamlit ici (même posture que `risk_scan.py`, `session.py`, `graph_topology.py`) :
 tout est pur et testable hors ligne, `ui.py` se charge du rendu.
 """
+import colorsys
 import os
 import re
 
@@ -180,15 +181,34 @@ TOKENS = {
 # Palettes prêtes à l'emploi : un cahier des charges arrive rarement avec des codes hexadécimaux,
 # plus souvent avec « nos couleurs sont le bleu marine et l'or ». Un préréglage donne un point de
 # départ cohérent que l'on ajuste ensuite jeton par jeton.
+#
+# §21 — LES ACCENTS ONT ÉTÉ REVUS, et c'est une correction de fond, pas un ajustement de goût.
+# Ces palettes ont été écrites en §17/§18, quand `BRAND_ACCENT` voulait encore dire « la deuxième
+# couleur de la marque ». §19 lui a donné UN rôle exclusif — *une personne doit trancher ici* — sans
+# revenir sur les palettes déjà livrées. Résultat mesuré par `signal_separation()` sur les dix-huit :
+# quatre d'entre elles donnaient un accent de la même famille que la couleur principale (turquoise
+# sur turquoise, bleu clair sur bleu foncé…), c'est-à-dire qu'elles effaçaient le seul signal qui
+# distingue « en attente de vous » du reste de l'écran. Constaté en conditions réelles : l'instance
+# de test tournait sous « Azur corporate », et pas un pixel d'ambre n'apparaissait nulle part.
+#
+# La règle que ces valeurs respectent désormais est la SÉPARATION et la RÉSERVE, pas une température
+# fixe. « Le travail de la machine est froid, la décision est chaude » reste la formulation par
+# défaut, mais lorsqu'un client a une couleur de marque déjà chaude (« Corail »), c'est la couleur
+# froide qui devient celle qu'on réserve : ce qui compte est qu'on ne puisse pas la confondre avec
+# le reste, et qu'elle ne serve à rien d'autre.
+#
 PRESETS = {
     "ACA (défaut)": {},
     # ── Palettes génériques ───────────────────────────────────────────────────────────────────
     "Azur corporate": {
-        "BRAND_PRIMARY": "#0F4C81", "BRAND_ACCENT": "#3E8FD0", "BRAND_SURFACE": "#F2F6FB",
+        # Accent : #3E8FD0 -> #A65A11. L'ancien n'était que la couleur principale éclaircie
+        # (séparation 0,08 sur 1) : le cartouche de signature disparaissait dans la page.
+        "BRAND_PRIMARY": "#0F4C81", "BRAND_ACCENT": "#A65A11", "BRAND_SURFACE": "#F2F6FB",
         "BRAND_SIDEBAR": "#EDF3F9", "BRAND_BORDER": "#D8E3EF", "BRAND_RADIUS": "8px",
     },
     "Émeraude": {
-        "BRAND_PRIMARY": "#0B7A5E", "BRAND_ACCENT": "#37C39B", "BRAND_SURFACE": "#F1F8F5",
+        # Accent : #37C39B -> #A94A28 (séparation 0,11 -> 0,79). Terre cuite contre émeraude.
+        "BRAND_PRIMARY": "#0B7A5E", "BRAND_ACCENT": "#A94A28", "BRAND_SURFACE": "#F1F8F5",
         "BRAND_SIDEBAR": "#ECF5F1", "BRAND_BORDER": "#D5E8E0", "BRAND_SUCCESS": "#0B7A5E",
     },
     "Ardoise & or": {
@@ -196,7 +216,11 @@ PRESETS = {
         "BRAND_SIDEBAR": "#EDEFF2", "BRAND_BORDER": "#DDE1E6", "BRAND_RADIUS": "4px",
     },
     "Corail": {
-        "BRAND_PRIMARY": "#D64545", "BRAND_ACCENT": "#F0956A", "BRAND_SURFACE": "#FDF4F2",
+        # Le seul cas où la couleur réservée est FROIDE, et il est instructif : la couleur de marque
+        # étant déjà chaude, un accent chaud (l'ancien saumon #F0956A) restait de la même famille —
+        # 0,27, à la limite basse. Le sarcelle profond ne peut pas être confondu avec le corail, et
+        # c'est le seul critère qui compte : l'invariant est « réservée et distincte », pas « chaude ».
+        "BRAND_PRIMARY": "#D64545", "BRAND_ACCENT": "#1F6F73", "BRAND_SURFACE": "#FDF4F2",
         "BRAND_SIDEBAR": "#FBEFEC", "BRAND_BORDER": "#F2DCD6", "BRAND_RADIUS": "16px",
     },
     "Violet nuit (sombre)": {
@@ -220,7 +244,9 @@ PRESETS = {
         "BRAND_RADIUS": "0px", "BRAND_FONT": "Roboto", "BRAND_DENSITY": "compacte",
     },
     "Santé & médical": {
-        "BRAND_PRIMARY": "#00747C", "BRAND_ACCENT": "#5BC0BE", "BRAND_SURFACE": "#F2F9F9",
+        # Accent : #5BC0BE -> #B8503A. Deux turquoises, séparation 0,07 : c'était la palette la
+        # plus atteinte des dix-huit. Le corail est par ailleurs un classique du secteur médical.
+        "BRAND_PRIMARY": "#00747C", "BRAND_ACCENT": "#B8503A", "BRAND_SURFACE": "#F2F9F9",
         "BRAND_SIDEBAR": "#EAF4F5", "BRAND_BORDER": "#CFE5E7", "BRAND_INFO": "#00747C",
         "BRAND_RADIUS": "16px", "BRAND_FONT": "Source Sans 3", "BRAND_DENSITY": "aérée",
     },
@@ -269,7 +295,12 @@ PRESETS = {
     "Accessibilité renforcée": {
         # Contrastes poussés et mouvement réduit : pour un client dont le cahier des charges impose
         # le RGAA/WCAG AA, ou une équipe travaillant sur des écrans de mauvaise qualité.
-        "BRAND_PRIMARY": "#00408A", "BRAND_ACCENT": "#6B21A8", "BRAND_SURFACE": "#F0F2F5",
+        # Accent : #6B21A8 -> #B45309. Celui-ci passait pourtant le contrôle automatique (0,44) :
+        # `signal_separation()` modélise une vision normale des couleurs, or bleu et violet sont
+        # précisément la paire que confondent les deutéranopes. Sur une palette dont le nom promet
+        # l'accessibilité, s'en remettre à la mesure générique aurait été le pire endroit. Bleu et
+        # ambre est le couple de référence, distinguable sous deutéranopie comme sous protanopie.
+        "BRAND_PRIMARY": "#00408A", "BRAND_ACCENT": "#B45309", "BRAND_SURFACE": "#F0F2F5",
         "BRAND_SIDEBAR": "#E8EBF0", "BRAND_BORDER": "#B9C0CC", "BRAND_TEXT": "#0B0F14",
         "BRAND_RADIUS": "4px", "BRAND_ANIMATIONS": "sobre", "BRAND_DENSITY": "aérée",
     },
@@ -386,6 +417,60 @@ def readable_text_on(hex_color: str) -> str:
     son mauvais goût.
     """
     return "#FFFFFF" if relative_luminance(hex_color) < 0.45 else "#111111"
+
+
+def signal_separation(primary: str, accent: str) -> float:
+    """
+    Écart perceptif entre la couleur principale et la couleur d'accent, de 0 (indistinguables) à 1.
+
+    **Pourquoi cette mesure existe.** Depuis §19, l'accent n'est plus « la deuxième couleur de la
+    marque » : il a UN sens, un seul, et c'est le plus important du produit — *quelque chose attend
+    une décision humaine*. Il porte le cartouche de signature, la pastille d'alerte de l'en-tête et
+    le terminus du rail de décision. Si l'accent se confond avec la couleur principale, ce signal
+    disparaît : tout l'écran devient « de la marque », et plus rien ne dit où regarder.
+
+    **Pourquoi pas `contrast_ratio`.** Le contraste WCAG mesure une différence de LUMINANCE, pas de
+    teinte. Le couple par défaut (pétrole #125E6B / ambre #B4622A) n'obtient que 1,66:1 alors qu'il
+    est évidemment lisible comme deux couleurs différentes ; à l'inverse un bleu foncé et un bleu
+    clair obtiennent un bon contraste tout en restant « du bleu ». Utiliser le contraste ici aurait
+    donc signalé le bon couple et laissé passer le mauvais — exactement à l'envers.
+
+    **Comment.** Distance dans le PLAN CHROMATIQUE (a*, b*) de CIELAB, la clarté L* étant
+    délibérément ignorée. Une première version combinait teinte et saturation en TSL et se trompait
+    dans les deux sens, ce que le classement des dix-huit palettes livrées a rendu visible
+    immédiatement : « Santé & médical » (#00747C → #5BC0BE, deux turquoises) passait pour correcte
+    grâce au seul écart de saturation, tandis qu'« Immobilier » (vert profond → sable) était
+    signalée alors qu'elle se lit parfaitement. Ignorer L* est exactement ce qui corrige les deux :
+    un bleu clair et un bleu foncé restent « du bleu » quelle que soit leur différence de clarté,
+    alors qu'un neutre et une couleur vive se distinguent sans partager aucune teinte — et dans le
+    plan a*b*, un neutre est proche de l'origine, donc naturellement loin de tout ce qui est vif.
+
+    Renvoie une distance normalisée : < 0,25 ⇒ le signal de décision est perdu.
+    """
+    def to_lab_ab(value: str):
+        # sRGB -> linéaire -> XYZ (D65) -> L*a*b*. ~15 lignes de stdlib, contre une dépendance
+        # « colour science » pour un seul calcul : même arbitrage que `totp.py` et `slack_verify.py`.
+        channels = []
+        for raw in _to_rgb(value):
+            component = raw / 255
+            channels.append(component / 12.92 if component <= 0.04045
+                            else ((component + 0.055) / 1.055) ** 2.4)
+        red, green, blue = channels
+        x = (red * 0.4124 + green * 0.3576 + blue * 0.1805) / 0.95047
+        y = (red * 0.2126 + green * 0.7152 + blue * 0.0722) / 1.00000
+        z = (red * 0.0193 + green * 0.1192 + blue * 0.9505) / 1.08883
+
+        def f(t):
+            return t ** (1 / 3) if t > 0.008856 else (7.787 * t) + (16 / 116)
+
+        fx, fy, fz = f(x), f(y), f(z)
+        return 500 * (fx - fy), 200 * (fy - fz)
+
+    a_1, b_1 = to_lab_ab(primary)
+    a_2, b_2 = to_lab_ab(accent)
+    distance = ((a_1 - a_2) ** 2 + (b_1 - b_2) ** 2) ** 0.5
+    # ~100 unités a*b* séparent deux couleurs vives opposées ; on y ramène l'échelle 0-1.
+    return round(min(1.0, distance / 100.0), 3)
 
 
 def mix(hex_color: str, other: str, ratio: float) -> str:
@@ -670,7 +755,15 @@ def _variables(tokens: dict) -> str:
   --aca-surface: {tokens["BRAND_SURFACE"]};
   --aca-sidebar: {tokens["BRAND_SIDEBAR"]};
   --aca-text: {text};
-  --aca-muted: {mix(text, background, 0.42)};
+  /* 0.34 et non 0.42 : à 0.42 le gris secondaire tombait à 4,2:1 sur les cartes — sous le seuil
+     WCAG AA (4,5:1) — et c'est précisément la couleur des accroches, des relevés et des libellés
+     d'indicateurs, c'est-à-dire du texte PETIT, celui pour lequel le seuil existe.
+     La valeur a été calibrée sur les DIX-HUIT palettes livrées, pas sur un échantillon : un premier
+     réglage à 0.38 passait sur les quatre que j'avais mesurées à la main et échouait sur
+     « Industrie & BTP » (4,15:1), la seule dont le jeton `BRAND_TEXT` est plus clair que le défaut
+     — le test paramétré sur toutes les palettes l'a rattrapé immédiatement. 0.34 laisse 4,73:1 au
+     pire cas, donc de la marge quel que soit le fond choisi par le client. */
+  --aca-muted: {mix(text, background, 0.34)};
   --aca-border: {tokens["BRAND_BORDER"]};
   --aca-success: {tokens["BRAND_SUCCESS"]};
   --aca-warning: {tokens["BRAND_WARNING"]};
@@ -690,11 +783,43 @@ def _variables(tokens: dict) -> str:
                 0 4px 16px rgba(16, 24, 40, {"0.30" if dark else "0.05"});
   --aca-shadow-lift: 0 10px 30px rgba(var(--aca-primary-rgb), {"0.30" if dark else "0.16"});
   /* §19 — hauteur réservée à la barre d'en-tête de Streamlit. La barre est en `position:
-     absolute` avec un `z-index` de 999990 et un fond transparent : tout ce que la page place
-     au-dessus de cette hauteur passe DESSOUS. C'est la cause exacte du chevauchement signalé
-     (en-tête 52,5 px contre 30,8 px de marge haute). Exprimée en variable pour que la marge de la
-     page et le fond de la barre ne puissent plus diverger. */
-  --aca-header-h: 3.5rem;
+     absolute` avec un `z-index` de 999990 : tout ce que la page place au-dessus de cette hauteur
+     passe DESSOUS. C'est la cause exacte du chevauchement signalé (en-tête 52,5 px contre
+     30,8 px de marge haute). Exprimée en variable pour que la marge de la page et le fond de la
+     barre ne puissent plus diverger.
+
+     §21 — exprimée en PIXELS, plus en `rem`. `3.5rem` supposait une racine à 16 px ; or
+     `config.toml` fixe `baseFontSize = 14`, donc 3,5 rem ne valait que 49 px face à une barre
+     mesurée à 52,5 px sur le DOM réel. La variable censée ÊTRE la hauteur de la barre était donc
+     plus courte qu'elle, et seul le `+ 1rem` du `max()` sauvait le dégagement. Une valeur qui
+     prétend décrire une mesure doit décrire cette mesure : en px, elle ne dépend plus d'un réglage
+     de taille de police qui vit dans un autre fichier. */
+  --aca-header-h: 54px;
+
+  /* §21 — vocabulaire de mouvement. Avant, chaque règle portait sa propre courbe écrite à la main
+     (`ease`, `ease-out`, quatre `cubic-bezier` différents) : cinq dialectes pour une seule
+     application, donc aucune cohérence perceptible entre deux éléments qui jouent le même rôle.
+     Les courbes natives de CSS sont par ailleurs trop molles pour de l'interface — elles manquent
+     l'attaque qui fait qu'un mouvement se lit comme une réponse et non comme un délai.
+
+     `--aca-ease-out` pour ce qui ENTRE ou SORT (départ franc = réponse immédiate) ;
+     `--aca-ease-in-out` pour ce qui SE DÉPLACE d'un point à un autre à l'écran ;
+     `ease` reste implicite pour les simples changements de couleur.
+     `ease-in` n'apparaît nulle part, et c'est délibéré : il démarre lentement, donc il retarde
+     précisément l'instant que l'œil regarde le plus. */
+  --aca-ease-out: cubic-bezier(.22, 1, .36, 1);
+  --aca-ease-in-out: cubic-bezier(.77, 0, .175, 1);
+  /* Intensité du fond d'ambiance, plus faible en mode sombre : sur fond clair le voile ASSOMBRIT
+     légèrement la page, ce qui augmente le contraste du texte foncé ; sur fond sombre il l'ÉCLAIRE,
+     ce qui le réduit. La même valeur dans les deux modes aurait donc été prudente d'un côté et
+     risquée de l'autre. */
+  --aca-veil-1: {"9%" if dark else "14%"};
+  --aca-veil-2: {"6%" if dark else "10%"};
+  /* Durées nommées plutôt que semées dans la feuille : une interface se règle d'un endroit.
+     Bornées à 220 ms — au-delà, un outil ouvert huit heures par jour se met à sembler lent. */
+  --aca-t-press: .12s;
+  --aca-t-hover: .16s;
+  --aca-t-enter: .22s;
 }}
 """
 
@@ -716,20 +841,54 @@ _KEYFRAMES = """
 @keyframes aca-ring { 0% { box-shadow: 0 0 0 0 rgba(var(--aca-primary-rgb), .45); } 70% { box-shadow: 0 0 0 9px rgba(var(--aca-primary-rgb), 0); } 100% { box-shadow: 0 0 0 0 rgba(var(--aca-primary-rgb), 0); } }
 @keyframes aca-tick { from { opacity: 0; transform: translateY(6px) scale(.96); } to { opacity: 1; transform: none; } }
 @keyframes aca-warn-glow { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--aca-warning) 35%, transparent); } 50% { box-shadow: 0 0 16px 2px color-mix(in srgb, var(--aca-warning) 55%, transparent); } }
+/* Dérive du fond d'ambiance. `translate3d` + `scale` uniquement : ces deux propriétés sont
+   composées par le GPU, donc la boucle ne déclenche ni calcul de disposition ni repeinture, ce qui
+   compte pour la seule animation de la feuille qui ne s'arrête jamais. Animer
+   `background-position` aurait été plus court à écrire et aurait repeint la page entière à chaque
+   image. */
+@keyframes aca-ambient {
+  0%   { transform: translate3d(0, 0, 0) scale(1); }
+  50%  { transform: translate3d(2.5%, -2%, 0) scale(1.06); }
+  100% { transform: translate3d(0, 0, 0) scale(1); }
+}
 """
 
 _ANIMATIONS_FULL = """
-/* Entrée échelonnée des blocs de premier niveau. Les délais sont bornés à quatre paliers : au-delà,
-   l'utilisateur attend l'affichage au lieu de le trouver fluide. */
-[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] { animation: aca-rise .42s cubic-bezier(.22,.61,.36,1) both; }
-[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(1) { animation-delay: .02s; }
-[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(2) { animation-delay: .07s; }
-[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(3) { animation-delay: .12s; }
-[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(n+4) { animation-delay: .17s; }
+/* §21 — DURÉES RAMENÉES SOUS 300 ms et courbes unifiées sur les jetons `--aca-ease-*`.
+   Avant : 0,42 s d'entrée plus 0,17 s de décalage, soit près de 0,6 s avant qu'un écran soit
+   stable. Une animation d'interface se juge à la vitesse à laquelle elle rend la main, pas à sa
+   durée ; au-delà de ~300 ms elle cesse d'être perçue comme une réponse et devient une attente.
 
-[data-testid="stMetric"] { animation: aca-pop .5s cubic-bezier(.22,.61,.36,1) both; }
-[data-testid="stAlert"] { animation: aca-pop .35s ease-out both; }
-[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] { animation: aca-slide-in .35s ease-out both; }
+   Vérifié avant de toucher à quoi que ce soit, parce que l'hypothèse de départ était fausse :
+   on pouvait croire que ces entrées se rejouaient à CHAQUE rerun Streamlit (donc des dizaines de
+   fois par heure, ce qui aurait imposé de les supprimer purement et simplement). Mesure faite sur
+   le DOM réel — `getAnimations()` avant et après un rerun provoqué par un widget — les animations
+   restaient à `currentTime = 500 ms, playState = "finished"` de part et d'autre : React réconcilie
+   les nœuds, l'animation ne redémarre pas. Elles ne jouent donc qu'au MONTAGE (premier affichage,
+   changement de page), ce qui est exactement le cas d'usage légitime d'une animation d'entrée.
+   Conclusion : on les garde, on les raccourcit. */
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] { animation: aca-rise .24s var(--aca-ease-out) both; }
+/* Décalages resserrés dans la bande 30-80 ms : assez pour lire une cascade, trop court pour
+   qu'on attende le dernier bloc. */
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(1) { animation-delay: 0s; }
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(2) { animation-delay: .04s; }
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(3) { animation-delay: .08s; }
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(n+4) { animation-delay: .12s; }
+
+/* Fond d'ambiance : 48 s par cycle, et cette lenteur EST le réglage. À 10 s on suit le mouvement
+   des yeux ; à 48 s l'écran n'est jamais tout à fait le même sans qu'on puisse dire ce qui a
+   changé — c'est-à-dire une matière, pas un objet en déplacement. Bornée au niveau « complet » :
+   un client qui a choisi « sobre » demande le calme, et le dégradé statique lui reste acquis
+   (cf. `_SURFACES`). `prefers-reduced-motion` gèle la boucle en gardant le dégradé, ce qui est
+   exactement le comportement attendu — moins de mouvement, pas moins d'interface. */
+[data-testid="stAppViewContainer"]::before {
+  animation: aca-ambient 48s var(--aca-ease-in-out) infinite;
+  will-change: transform;
+}
+
+[data-testid="stMetric"] { animation: aca-pop .26s var(--aca-ease-out) both; }
+[data-testid="stAlert"] { animation: aca-pop .2s var(--aca-ease-out) both; }
+[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] { animation: aca-slide-in .22s var(--aca-ease-out) both; }
 
 /* Barre de navigation supérieure : entrée au chargement, puis chaque lien apparaît en léger
    décalage — le même principe d'entrée échelonnée que le rail de décision, appliqué à la
@@ -740,12 +899,12 @@ _ANIMATIONS_FULL = """
    donc `:nth-child` sur lui-même ne différenciait jamais rien (toujours 1er de son parent) : c'est
    `.rc-overflow-item:nth-child(N)` qui compte réellement la position parmi les liens. Bug trouvé
    en inspectant le DOM réellement rendu (Playwright), invisible en ne relisant que le CSS. */
-.rc-overflow:has([data-testid="stTopNavLinkContainer"]) { animation: aca-rise .35s ease-out both; }
-[data-testid="stTopNavLinkContainer"] { animation: aca-tick .3s ease-out both; }
+.rc-overflow:has([data-testid="stTopNavLinkContainer"]) { animation: aca-rise .24s var(--aca-ease-out) both; }
+[data-testid="stTopNavLinkContainer"] { animation: aca-tick .2s var(--aca-ease-out) both; }
 .rc-overflow-item:nth-child(1) [data-testid="stTopNavLinkContainer"] { animation-delay: .02s; }
-.rc-overflow-item:nth-child(2) [data-testid="stTopNavLinkContainer"] { animation-delay: .06s; }
-.rc-overflow-item:nth-child(3) [data-testid="stTopNavLinkContainer"] { animation-delay: .1s; }
-.rc-overflow-item:nth-child(n+4) [data-testid="stTopNavLinkContainer"] { animation-delay: .14s; }
+.rc-overflow-item:nth-child(2) [data-testid="stTopNavLinkContainer"] { animation-delay: .05s; }
+.rc-overflow-item:nth-child(3) [data-testid="stTopNavLinkContainer"] { animation-delay: .08s; }
+.rc-overflow-item:nth-child(n+4) [data-testid="stTopNavLinkContainer"] { animation-delay: .11s; }
 
 /* Bannière de sécurité : lueur qui respire, pour qu'un point de configuration manquant avant une
    mise en ligne ne se noie pas visuellement parmi les autres accordéons de la page. */
@@ -774,38 +933,47 @@ _ANIMATIONS_FULL = """
 
 /* Le rail se DESSINE de haut en bas : le mouvement raconte la séquence du traitement, et l'œil
    arrive naturellement sur le dernier maillon, qui est la décision demandée. */
-.aca-rail__step { animation: aca-tick .34s cubic-bezier(.22,.61,.36,1) both; }
+/* Le rail garde le décalage le plus long de la feuille, et c'est le seul endroit où c'est mérité :
+   ici la cascade N'EST PAS décorative, elle raconte l'ordre réel du traitement et amène l'œil sur
+   le dernier maillon, qui est la décision demandée. La durée par étape passe quand même sous la
+   barre des 300 ms — c'est la séquence qui doit être lisible, pas chaque étape qui doit être lente. */
+.aca-rail__step { animation: aca-tick .26s var(--aca-ease-out) both; }
 .aca-rail__step:nth-child(1) { animation-delay: .02s; }
-.aca-rail__step:nth-child(2) { animation-delay: .08s; }
-.aca-rail__step:nth-child(3) { animation-delay: .14s; }
-.aca-rail__step:nth-child(4) { animation-delay: .2s; }
-.aca-rail__step:nth-child(5) { animation-delay: .26s; }
-.aca-rail__step:nth-child(n+6) { animation-delay: .32s; }
-.aca-rail__step:not(:last-child)::before { transform-origin: top; animation: aca-draw .3s ease-out both; animation-delay: .2s; }
+.aca-rail__step:nth-child(2) { animation-delay: .07s; }
+.aca-rail__step:nth-child(3) { animation-delay: .12s; }
+.aca-rail__step:nth-child(4) { animation-delay: .17s; }
+.aca-rail__step:nth-child(5) { animation-delay: .22s; }
+.aca-rail__step:nth-child(n+6) { animation-delay: .27s; }
+.aca-rail__step:not(:last-child)::before { transform-origin: top; animation: aca-draw .24s var(--aca-ease-out) both; animation-delay: .16s; }
 /* L'étape en cours respire : elle signale « c'est ici que ça se passe » sans texte supplémentaire. */
 .aca-rail__step--active .aca-rail__marker { animation: aca-ring 2s ease-out infinite; }
 
 /* La frise apparaît dans l'ordre chronologique, ce qui est le sens de lecture attendu. */
-.aca-tl__item { animation: aca-tick .3s ease-out both; }
+.aca-tl__item { animation: aca-tick .22s var(--aca-ease-out) both; }
 .aca-tl__item:nth-child(1) { animation-delay: .02s; }
-.aca-tl__item:nth-child(2) { animation-delay: .06s; }
-.aca-tl__item:nth-child(3) { animation-delay: .1s; }
-.aca-tl__item:nth-child(n+4) { animation-delay: .14s; }
+.aca-tl__item:nth-child(2) { animation-delay: .05s; }
+.aca-tl__item:nth-child(3) { animation-delay: .08s; }
+.aca-tl__item:nth-child(n+4) { animation-delay: .11s; }
 
-.aca-stat { animation: aca-pop .42s cubic-bezier(.22,.61,.36,1) both; }
-.aca-stat:nth-child(2) { animation-delay: .05s; }
-.aca-stat:nth-child(3) { animation-delay: .1s; }
-.aca-stat:nth-child(4) { animation-delay: .15s; }
-.aca-stat:nth-child(n+5) { animation-delay: .2s; }
+.aca-stat { animation: aca-pop .26s var(--aca-ease-out) both; }
+.aca-stat:nth-child(2) { animation-delay: .04s; }
+.aca-stat:nth-child(3) { animation-delay: .08s; }
+.aca-stat:nth-child(4) { animation-delay: .12s; }
+.aca-stat:nth-child(n+5) { animation-delay: .16s; }
 
-.aca-empty { animation: aca-fade .3s ease-out both; }
-.aca-empty__icon { animation: aca-float 6s ease-in-out infinite; }
+/* §21 — l'icône d'état vide ne flotte plus en boucle. C'était le seul mouvement PERPÉTUEL et
+   purement décoratif de la feuille : dans un outil qu'un opérateur garde ouvert toute la journée,
+   une animation infinie en périphérie du regard attire l'œil sans jamais rien signaler, et finit
+   par se disputer l'attention avec les deux boucles qui, elles, signalent vraiment quelque chose
+   (le pouls d'une analyse en cours, la lueur de la bannière de sécurité). Retirer un accessoire
+   rend les deux autres audibles. L'apparition en fondu, elle, reste : elle a une fin. */
+.aca-empty { animation: aca-fade .22s var(--aca-ease-out) both; }
 """
 
 _ANIMATIONS_SUBTLE = """
-[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] { animation: aca-fade .25s ease-out both; }
-[data-testid="stAlert"] { animation: aca-fade .25s ease-out both; }
-.rc-overflow:has([data-testid="stTopNavLinkContainer"]) { animation: aca-fade .25s ease-out both; }
+[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] { animation: aca-fade .2s var(--aca-ease-out) both; }
+[data-testid="stAlert"] { animation: aca-fade .2s var(--aca-ease-out) both; }
+.rc-overflow:has([data-testid="stTopNavLinkContainer"]) { animation: aca-fade .2s var(--aca-ease-out) both; }
 """
 
 # Polish visuel indépendant du niveau d'animation : bordures, ombres, états de survol. Ce sont des
@@ -813,6 +981,56 @@ _ANIMATIONS_SUBTLE = """
 # donc en mode « aucune », où seul le bloc `prefers-reduced-motion` les réduit à zéro.
 _SURFACES = """
 [data-testid="stAppViewContainer"] { background: var(--aca-bg); }
+
+/* ── Fond d'ambiance (§21) ─────────────────────────────────────────────────────────────────────
+   Deux voiles radiaux très faibles posés sur le plan de travail. Ce qu'ils disent, et c'est la
+   seule raison de les accepter : **la machine tourne même quand personne ne regarde.** Le relevé
+   d'e-mails tourne en tâche de fond, le planificateur aussi ; un écran parfaitement inerte quand la
+   file est vide dit le contraire de ce que fait le produit.
+
+   Trois contraintes, chacune tirée d'une décision déjà prise ailleurs dans cette feuille :
+
+   1. **Froid uniquement.** Les voiles empruntent `--aca-primary`, jamais `--aca-accent` : l'ambre
+      ne signifie qu'une chose dans toute l'application, « une personne doit trancher ». Un fond
+      qui l'utiliserait décorativement viderait le signal de son sens — exactement le défaut qu'on
+      vient de corriger sur quatre palettes.
+   2. **Sous le seuil de l'attention.** 7 % de la couleur de marque, des rayons énormes et aucun
+      contour : à l'échelle de la page cela se lit comme une matière, pas comme un objet. C'est ce
+      qui le distingue de l'icône flottante retirée le même jour, qui était un ÉLÉMENT en
+      mouvement dans le champ périphérique.
+   3. **Le fond seul.** La barre latérale et l'en-tête ont leurs propres fonds opaques et passent
+      donc par-dessus : le plan de travail respire, le chrome reste stable.
+
+   Posé ici (bloc statique) et non dans le bloc d'animations : le dégradé apporte de la profondeur
+   même immobile, donc « animations : aucune » garde un fond agréable au lieu d'un aplat — seul le
+   MOUVEMENT est conditionnel (cf. `_ANIMATIONS_FULL`). */
+[data-testid="stAppViewContainer"]::before {
+  content: "";
+  position: fixed;
+  /* Débordement volontaire mais MODESTE : la dérive ne déplace le voile que de ~2,5 %, donc 10 %
+     suffisent pour qu'aucun bord de dégradé n'entre jamais dans le cadre. Un premier essai à 25 %
+     rendait la couche 1,5 fois plus grande que l'écran : les voiles, positionnés en pourcentage de
+     CETTE couche, se retrouvaient rejetés hors du champ visible. */
+  inset: -10%;
+  z-index: 0;
+  pointer-events: none;
+  /* Rayons en `vmax` et non en `rem`. C'est le correctif de fond : `42rem` valait 588 px fixes
+     (racine à 14 px imposée par `config.toml`), donc sur un écran large les voiles devenaient deux
+     petits îlots dans une page immense — relevé sur un écran de 1892 px, six points de fond sur
+     sept étaient rigoureusement intacts, et un seul coin portait la couleur. Une décoration de fond
+     doit se mesurer à la FENÊTRE, pas à la taille du texte. */
+  background:
+    radial-gradient(78vmax 78vmax at 22% 18%,
+      color-mix(in srgb, var(--aca-primary) var(--aca-veil-1), transparent), transparent 58%),
+    radial-gradient(66vmax 66vmax at 84% 88%,
+      color-mix(in srgb, var(--aca-primary) var(--aca-veil-2), transparent), transparent 56%);
+}
+/* Le voile est en `position: fixed` dans le même contexte d'empilement que le contenu : sans cette
+   ligne, il passerait DEVANT la page au lieu de derrière. Règle structurelle, pas décorative. */
+[data-testid="stMain"], [data-testid="stSidebar"], [data-testid="stHeader"] {
+  position: relative;
+  z-index: 1;
+}
 
 /* §19 — CORRECTION DU CHEVAUCHEMENT. La barre d'en-tête de Streamlit (qui contient la navigation
    haute) est `position: absolute`, `z-index: 999990`, fond transparent, et mesure ~52 px : elle est
@@ -839,12 +1057,36 @@ html, body, [data-testid="stAppViewContainer"], .stMarkdown, .stMarkdown p { fon
 
 /* Trois rôles typographiques (§19). Les titres passent à la face de titrage : c'est le contraste
    serif/sans qui porte la hiérarchie, plutôt qu'une simple différence de graisse dans une seule
-   famille — laquelle donne à toutes les pages le même aplat indifférencié. */
+   famille — laquelle donne à toutes les pages le même aplat indifférencié.
+
+   §21 — RÈGLE MORTE, corrigée. `h1, h2, h3 { … }` a une spécificité de (0,0,1) et perdait contre
+   la règle interne de Streamlit `.st-emotion-cache-XXXX h1, … h6` (0,1,1), qui réimpose la police
+   de texte sur TOUS les titres. Constaté sur le DOM réel : un `h3` de page calculait
+   « Segoe UI, Open Sans », jamais la serif. Conséquence — la moitié de la thèse typographique de
+   §19 (« la serif porte la voix du document ») n'existait que dans la feuille de style : le seul
+   titre réellement en serif était l'en-tête de marque, et par accident, parce qu'il est ciblé par
+   une CLASSE (`.aca-hero__title`, 0,1,0) et non par son nom d'élément.
+
+   Le correctif ancre les titres sur les conteneurs que Streamlit pose lui-même autour d'eux
+   (`stMarkdownContainer`, `stHeadingWithActionElements`) : (0,1,1) contre (0,1,1), et la nôtre
+   vient après dans la feuille. Pas de `!important` — une montée de version doit pouvoir reprendre
+   la main sans qu'on ait à démonter une surenchère de priorités. */
+[data-testid="stMarkdownContainer"] h1,
+[data-testid="stMarkdownContainer"] h2,
+[data-testid="stMarkdownContainer"] h3,
+[data-testid="stHeadingWithActionElements"] h1,
+[data-testid="stHeadingWithActionElements"] h2,
+[data-testid="stHeadingWithActionElements"] h3,
 h1, h2, h3 {
   font-family: var(--aca-display);
   letter-spacing: -.015em;
   font-weight: 600;
 }
+/* h4-h6 sont des sous-titres de formulaire, pas la voix du document : ils restent en sans, sinon
+   la serif cesse d'être un signal et devient le style par défaut de tout ce qui est un titre. */
+[data-testid="stMarkdownContainer"] h4,
+[data-testid="stMarkdownContainer"] h5,
+[data-testid="stMarkdownContainer"] h6,
 h4, h5, h6 { font-family: var(--aca-font); letter-spacing: -.008em; }
 
 /* Valeurs machine en chiffres tabulaires : dans une file d'attente, des compteurs qui ne s'alignent
@@ -858,9 +1100,22 @@ h4, h5, h6 { font-family: var(--aca-font); letter-spacing: -.008em; }
    proposition, KPI, entrée de file d'attente). Une seule règle les met toutes d'accord. */
 [data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] {
   border-radius: var(--aca-radius-lg);
-  transition: box-shadow .22s ease, transform .22s ease, border-color .22s ease;
+  /* §21 — une ombre TRÈS basse, en permanence. Le parti pris « les cartes sont des documents posés
+     sur un plan de travail » reposait uniquement sur la différence entre `--aca-surface` et
+     `--aca-bg` ; or rien n'oblige un client à les choisir distinctes, et plusieurs palettes
+     livrées les rendent quasi identiques (mesuré : #F2F6FB sur #F5F5F5, soit 1,01:1 — les cartes
+     ne tenaient plus que par leur filet de 1 px). Une ombre portée ne dépend d'aucune des deux
+     couleurs : la séparation devient une propriété du système, pas un coup de chance de palette. */
+  box-shadow: 0 1px 2px rgba(16, 24, 40, .04);
+  transition: box-shadow var(--aca-t-hover) ease,
+              border-color var(--aca-t-hover) ease;
 }
-[data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:hover { border-color: rgba(var(--aca-primary-rgb), .38); }
+@media (hover: hover) and (pointer: fine) {
+  [data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:hover {
+    border-color: rgba(var(--aca-primary-rgb), .38);
+    box-shadow: 0 2px 8px rgba(16, 24, 40, .07);
+  }
+}
 
 /* §19 — dégradés retirés d'ici. Ils étaient partout (en-tête, boutons, cartes de KPI, navigation),
    et un effet appliqué à tout ne hiérarchise rien : c'est la marque la plus reconnaissable d'une
@@ -887,10 +1142,47 @@ h4, h5, h6 { font-family: var(--aca-font); letter-spacing: -.008em; }
    faisait qu'ajouter du bruit à un élément déjà saillant par sa forme et son contraste. */
 .stButton button, .stFormSubmitButton button, .stDownloadButton button {
   border-radius: var(--aca-radius); font-weight: 550;
-  transition: transform .16s ease, box-shadow .16s ease, background .16s ease, border-color .16s ease;
+  transition: transform var(--aca-t-press) var(--aca-ease-out),
+              box-shadow var(--aca-t-hover) ease,
+              background var(--aca-t-hover) ease,
+              border-color var(--aca-t-hover) ease;
 }
-.stButton button:hover, .stFormSubmitButton button:hover, .stDownloadButton button:hover { transform: translateY(-1px); }
-.stButton button:active, .stFormSubmitButton button:active { transform: translateY(0); }
+/* §21 — le survol est réservé aux pointeurs fins. Sur un écran tactile, `:hover` se déclenche au
+   toucher et RESTE actif après : le bouton qu'on vient d'utiliser garde son état de survol, ce qui
+   se lit comme « toujours sélectionné ». Un état visuel qui ment sur ce qui est en cours coûte plus
+   cher que l'effet qu'il apporte. */
+@media (hover: hover) and (pointer: fine) {
+  .stButton button:hover, .stFormSubmitButton button:hover, .stDownloadButton button:hover {
+    transform: translateY(-1px);
+  }
+}
+/* §21 — RETOUR D'APPUI. Avant, `:active` se contentait d'annuler le décalage du survol : appuyer
+   ne produisait donc aucun signal propre, seulement l'absence d'un autre. Un enfoncement franc
+   (0.97) est la confirmation la moins chère qu'une interface puisse donner — elle dit « c'est
+   entendu » avant même que le serveur ait répondu, ce qui compte d'autant plus ici où chaque clic
+   déclenche un rerun Streamlit complet. `scale` plutôt que `translateY` parce que l'échelle
+   emporte aussi le contenu du bouton : c'est le bouton entier qui s'enfonce, pas une étiquette qui
+   glisse. */
+.stButton button:active, .stFormSubmitButton button:active, .stDownloadButton button:active {
+  transform: scale(.97);
+  transition-duration: var(--aca-t-press);
+}
+
+/* §21 — visibilité au clavier. Les champs avaient déjà un anneau de marque ; les BOUTONS et les
+   LIENS n'avaient rien, donc une personne qui navigue au clavier ne pouvait pas savoir où elle se
+   trouvait — sur l'écran de validation, cela veut dire ne pas savoir quel bouton on est sur le
+   point d'actionner. `:focus-visible` et non `:focus` : la bague n'apparaît qu'à la navigation
+   clavier, jamais après un clic souris. */
+.stButton button:focus-visible,
+.stFormSubmitButton button:focus-visible,
+.stDownloadButton button:focus-visible,
+[data-testid="stTopNavLink"]:focus-visible,
+summary:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--aca-primary);
+  outline-offset: 2px;
+  border-radius: var(--aca-radius);
+}
 .stButton button[kind="primary"], .stFormSubmitButton button[kind="primary"] {
   background: var(--aca-primary);
   border: none; color: var(--aca-on-primary); box-shadow: 0 1px 2px rgba(16,24,40,.16);
@@ -928,13 +1220,27 @@ h4, h5, h6 { font-family: var(--aca-font); letter-spacing: -.008em; }
 [data-testid="stTopNavLink"] {
   border-radius: var(--aca-radius);
   font-weight: 600;
-  transition: background .18s ease, color .18s ease, transform .14s ease, box-shadow .18s ease;
+  transition: background var(--aca-t-hover) ease, color var(--aca-t-hover) ease;
 }
-[data-testid="stTopNavLink"]:hover {
-  background: var(--aca-primary-soft);
-  color: var(--aca-primary);
-  transform: translateY(-1px);
-  box-shadow: 0 2px 6px rgba(var(--aca-primary-rgb), .18);
+/* §21 — la PAGE COURANTE porte la marque. Relevé sur le DOM réel : l'onglet actif recevait
+   `rgba(173,173,173,.25)`, un gris de Streamlit, tandis que le survol recevait la couleur de
+   marque, une élévation et une ombre. L'état le plus fort désignait donc l'endroit où le curseur
+   passe, pas l'endroit où l'on se trouve — la hiérarchie était littéralement inversée, et sur une
+   barre à sept entrées c'est la seule information qui compte. `aria-current` est posé par
+   Streamlit lui-même : on s'ancre sur la sémantique, pas sur une classe de version. */
+[data-testid="stTopNavLink"][aria-current],
+[data-testid="stTopNavLinkContainer"]:has([aria-current]) [data-testid="stTopNavLink"] {
+  background: var(--aca-primary);
+  color: var(--aca-on-primary);
+  box-shadow: 0 1px 3px rgba(var(--aca-primary-rgb), .35);
+}
+/* Le survol reste volontairement DISCRET : il indique une cible atteignable, pas une position.
+   Plus d'élévation ni d'ombre ici — c'était ce qui le faisait passer devant l'état actif. */
+@media (hover: hover) and (pointer: fine) {
+  [data-testid="stTopNavLink"]:hover:not([aria-current]) {
+    background: var(--aca-primary-soft);
+    color: var(--aca-primary);
+  }
 }
 
 /* Bannière de sécurité (§18, `key="security_banner"` dans ui.py — un ancrage stable indépendant du
@@ -961,7 +1267,6 @@ input:focus, textarea:focus, [data-baseweb="select"] > div:focus-within {
 [data-testid="stExpander"] details { border-radius: var(--aca-radius); border-color: var(--aca-border); }
 [data-testid="stAlert"] { border-radius: var(--aca-radius); }
 [data-testid="stDataFrame"] { border-radius: var(--aca-radius); overflow: hidden; }
-[data-testid="stHeader"] { background: transparent; }
 """
 
 _HERO = """
@@ -1358,13 +1663,38 @@ def chart_colors(tokens: dict) -> list:
     Les couleurs d'état (succès/avertissement/danger/info) sont réutilisées telles quelles : elles
     ont déjà été choisies pour se distinguer entre elles, et les répéter dans les graphiques rend le
     tableau de bord cohérent avec les bandeaux d'alerte.
+
+    §21 — **dédoublonnage**, et ce n'était pas cosmétique. Les six jetons sémantiques étaient
+    concaténés tels quels, alors que rien n'impose qu'ils soient distincts : dans la palette par
+    défaut `BRAND_INFO` vaut `BRAND_PRIMARY` (le pétrole) et `BRAND_WARNING` vaut `BRAND_ACCENT`
+    (l'ambre), parce que c'est juste du point de vue du SENS. Aplatis en palette catégorielle, cela
+    donnait `[…, #B4622A, #B4622A, #125E6B, …]` : deux catégories voisines du graphique « Volume par
+    catégorie » se dessinaient dans la même couleur, et une légende à cinq entrées n'en distinguait
+    que trois. Une palette catégorielle a une exigence propre — chaque série doit être séparable —
+    qui ne découle pas de la cohérence sémantique. On garde donc l'ordre sémantique, on retire les
+    répétitions, et on complète par des dérivés jusqu'à obtenir huit teintes réellement distinctes.
     """
     primary, accent = tokens["BRAND_PRIMARY"], tokens["BRAND_ACCENT"]
-    return [
+    preferred = [
         primary, tokens["BRAND_SUCCESS"], tokens["BRAND_WARNING"], accent,
         tokens["BRAND_INFO"], tokens["BRAND_DANGER"],
-        mix(primary, accent, 0.5), mix(primary, tokens["BRAND_BACKGROUND"], 0.45),
     ]
+    # Repli : dérivés des deux couleurs de marque, suffisamment écartés pour rester lisibles côte à
+    # côte même quand un client a réglé plusieurs jetons d'état sur la même valeur.
+    fallback = [
+        mix(primary, accent, 0.5),
+        mix(primary, tokens["BRAND_BACKGROUND"], 0.45),
+        mix(accent, tokens["BRAND_BACKGROUND"], 0.45),
+        mix(primary, tokens["BRAND_TEXT"], 0.35),
+        mix(accent, tokens["BRAND_TEXT"], 0.35),
+    ]
+    palette = []
+    for color in preferred + fallback:
+        if color.upper() not in {seen.upper() for seen in palette}:
+            palette.append(color)
+        if len(palette) == 8:
+            break
+    return palette
 
 
 # ── Thème natif (config.toml) ─────────────────────────────────────────────────────────────────
@@ -1507,5 +1837,21 @@ def accessibility_report(tokens: dict) -> list:
         problems.append(
             "Fond des cartes presque identique au fond principal : les blocs bordurés "
             "(fiche prospect, proposition) ne se distingueront plus."
+        )
+    # §21 — le contrôle le plus important de cette liste, et le seul qui ne porte pas sur la
+    # lisibilité d'un texte mais sur la LISIBILITÉ D'UN SIGNAL. La couleur d'accent ne sert qu'à une
+    # chose dans toute l'application : marquer ce qui attend une décision humaine (cartouche « Bon
+    # pour accord », pastille d'alerte, terminus du rail). Choisie trop proche de la couleur
+    # principale, elle ne disparaît pas — elle devient indistinguable du décor, ce qui est pire :
+    # l'écran a toujours l'air correct, et plus rien n'indique où il faut agir. Aucun contrôle
+    # n'existait pour ça, et quatre des palettes livrées étaient dans ce cas.
+    separation = signal_separation(tokens["BRAND_PRIMARY"], tokens["BRAND_ACCENT"])
+    if separation < 0.25:
+        problems.append(
+            f"Couleur d'accent trop proche de la couleur principale (séparation {separation:.2f} "
+            "sur 1). L'accent ne sert qu'à signaler ce qui attend une validation humaine : s'il "
+            "appartient à la même famille que la couleur principale, ce repère disparaît. Une "
+            "teinte franchement différente est préférable — chaude si la couleur principale est "
+            "froide, froide si elle est chaude."
         )
     return problems
