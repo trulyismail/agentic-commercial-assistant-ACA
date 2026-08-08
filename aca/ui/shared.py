@@ -460,6 +460,15 @@ def check_auth(brand: dict) -> bool:
     # client voit, et un bandeau générique y annulerait tout le paramétrage d'apparence.
     st.html(branding.hero_html(brand))
 
+    # §28 — la signature de l'agence, juste sous le bandeau. Placée ICI et non en bas de la
+    # fonction parce que l'écran de connexion a plusieurs sorties anticipées (verrouillage, second
+    # facteur) : en bas, elle manquerait précisément sur les écrans où l'on reste le plus longtemps.
+    # C'est aussi le seul écran que TOUS les rôles voient avant quoi que ce soit d'autre.
+    _mark = branding.agency_mark_html(branding.resolve_agency(), prefix=t("footer.installed_by"))
+    if _mark:
+        st.html('<div class="aca-footer" style="border-top:none;margin-top:0;padding-top:.2rem">'
+                f'{_mark}</div>')
+
     expired = st.session_state.pop("expired_reason", None)
     if expired == "idle":
         st.info(t("auth.session_idle_expired"), icon=":material/timer_off:")

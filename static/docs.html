@@ -1,0 +1,670 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>acami — Setup guide: install ACA from zero to your first validated lead</title>
+<meta name="description" content="Step-by-step technical guide to installing and configuring the ACA framework: prerequisites, a five-command quick start, Docker, first login, branding, optional integrations and going to production.">
+<meta name="color-scheme" content="light">
+<link rel="icon" type="image/png" sizes="32x32" href="brand/acami-favicon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="brand/acami-favicon-180.png">
+
+<!--
+  ACA setup guide — the technical companion to `landing.html`.
+
+  ── WHY THIS EXISTS ─────────────────────────────────────────────────────────────────────────────
+  The pricing section on the landing page tells a prospect WHAT the four steps from payment to a
+  running deployment are, in one sentence each. It cannot tell them HOW — the actual commands, the
+  actual files, the actual order — without turning a sales page into a manual. This page is that
+  manual. It is linked from §05 "How you get access" (the buy-it path) and from §01 "Try it before
+  you pay" (the demo path), because the same page answers "I just paid, now what" and "I want to see
+  how this actually works before I pay".
+
+  ── WHAT IS REAL AND WHAT IS NOT ────────────────────────────────────────────────────────────────
+  Every command below is copied from the files that actually run: README.md, .env.example,
+  scripts/run_solo.py, docker-compose.yml, aca/storage/user_store.py. Nothing here is aspirational —
+  where a capability is optional or unverified against a real account, that is stated the same way
+  CLAUDE.md states it, not smoothed over for a sales audience.
+
+  ── SAME SHELL AS legal.html, ON PURPOSE ────────────────────────────────────────────────────────
+  Same tokens, same nav, same side-nav-as-pseudo-pages mechanism, same bilingual technique
+  (English in the markup, French in `data-fr`, stashed reversibly into `data-en` on first switch).
+  A third stylesheet for a third page would drift from the other two at the first edit — the same
+  reasoning that already keeps `legal.html` off its own copy.
+
+  ── Remote resources ────────────────────────────────────────────────────────────────────────────
+  Three Google fonts, as an enhancement only — every family is backed by a system stack and the page
+  reads correctly offline. No remote script, no remote image, no analytics, no cookie of any kind.
+-->
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Figtree:wght@400;500;600;700&family=Fragment+Mono:ital@0;1&display=swap">
+
+<style>
+/* ══ TOKENS — identical to landing.html/legal.html, so all three read as one site ═══════════════ */
+:root{
+  --paper:#fdfdfd; --paper-2:#f7f7f7;
+  --ink:#000; --ink-2:#545454; --ink-3:#636363; --faint:#b0b0b0;
+  --rule:#ededed; --rule-2:#e3e3e3;
+  --ink-accent:#125E6B;
+  --signal:#B4622A; --signal-soft:#fbf1e9;
+  --good:#1F7A54; --good-soft:#eaf6f0;
+  --frame:1176px; --gutter:40px;
+  --ease-out:cubic-bezier(.23,1,.32,1);
+  --font-display:"Instrument Serif","Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Times New Roman",serif;
+  --font-sans:"Figtree","Plus Jakarta Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;
+  --font-mono:"Fragment Mono","Cascadia Code",ui-monospace,SFMono-Regular,Consolas,monospace;
+}
+*,*::before,*::after{box-sizing:border-box}
+[hidden]{display:none !important}
+html{-webkit-text-size-adjust:100%; scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){ html{scroll-behavior:auto} }
+body{margin:0; background:var(--paper); color:var(--ink); font-family:var(--font-sans);
+     font-size:16px; line-height:1.6; -webkit-font-smoothing:antialiased}
+h1,h2,h3{margin:0; font-weight:600; line-height:1.12; letter-spacing:-.03em}
+p{margin:0} ul{margin:0; padding:0; list-style:none} a{color:inherit; text-decoration:none}
+code{font-family:var(--font-mono); font-size:.875em}
+::selection{background:var(--ink); color:var(--paper)}
+
+.frame{max-width:var(--frame); margin:0 auto;
+       border-left:1px solid var(--rule); border-right:1px solid var(--rule)}
+.brk::before{content:"["; color:var(--faint); margin-right:1px}
+.brk::after {content:"]"; color:var(--faint); margin-left:1px}
+.mono{font-family:var(--font-mono); font-size:.75rem; letter-spacing:.02em; color:var(--ink-3)}
+.eyebrow{font-family:var(--font-mono); font-size:.6875rem; letter-spacing:.14em;
+         text-transform:uppercase; color:var(--faint); display:block; margin-bottom:16px}
+
+/* ══ NAV ════════════════════════════════════════════════════════════════════════════════════════ */
+.nav{position:sticky; top:0; z-index:50; background:rgba(253,253,253,.88);
+     -webkit-backdrop-filter:saturate(180%) blur(14px); backdrop-filter:saturate(180%) blur(14px);
+     border-bottom:1px solid var(--rule)}
+.nav__inner{max-width:var(--frame); margin:0 auto; height:70px; padding:0 var(--gutter);
+            border-left:1px solid var(--rule); border-right:1px solid var(--rule);
+            display:flex; align-items:center; justify-content:space-between; gap:18px}
+.logo{display:inline-flex; align-items:center; gap:9px; font-weight:600; letter-spacing:-.02em}
+.logo img{height:20px; width:auto; display:block}
+.nav__right{display:flex; align-items:center; gap:20px}
+.nav__right a{font-size:.875rem; color:var(--ink-2)}
+@media (hover:hover) and (pointer:fine){ .nav__right a:hover{color:var(--ink)} }
+.lang{display:inline-flex; gap:2px; font-family:var(--font-mono); font-size:.6875rem}
+.lang button{background:none; border:0; padding:6px 8px; cursor:pointer; color:var(--faint);
+             font:inherit; border-radius:6px}
+.lang button[aria-pressed="true"]{color:var(--ink); background:var(--paper-2)}
+.lang button:focus-visible{outline:2px solid var(--ink-accent); outline-offset:2px}
+
+/* ══ LAYOUT ═════════════════════════════════════════════════════════════════════════════════════ */
+.head{padding:74px var(--gutter) 42px; border-bottom:1px solid var(--rule)}
+.h-page{font-size:clamp(2.4rem,5.4vw,3.6rem); letter-spacing:-.035em}
+.lede{font-size:1.0625rem; color:var(--ink-2); max-width:62ch; margin-top:18px}
+.head__meta{margin-top:22px; display:flex; gap:10px; flex-wrap:wrap}
+.pill{display:inline-flex; align-items:center; gap:6px; padding:5px 11px; border-radius:999px;
+      border:1px solid var(--rule-2); font-family:var(--font-mono); font-size:.6875rem;
+      letter-spacing:.02em; color:var(--ink-3)}
+.pill b{color:var(--ink)}
+.wrap{display:grid; grid-template-columns:minmax(0,232px) minmax(0,1fr)}
+/* The side nav is what makes twelve sections behave like twelve pages: you always see where you
+   are and what else exists — the one thing separate pages give you for free. */
+.side{padding:42px 20px 42px var(--gutter); border-right:1px solid var(--rule)}
+.side ul{position:sticky; top:100px; display:flex; flex-direction:column; gap:11px}
+.side a{font-size:.8438rem; color:var(--ink-3); display:block}
+.side a.is-here{color:var(--ink); font-weight:600}
+@media (hover:hover) and (pointer:fine){ .side a:hover{color:var(--ink)} }
+.body{padding:42px var(--gutter) 70px; min-width:0}
+.sec{padding-block:36px; border-bottom:1px dashed var(--rule-2); scroll-margin-top:92px}
+.sec:last-child{border-bottom:0}
+.h-sec{font-size:clamp(1.5rem,3vw,2rem); letter-spacing:-.03em; margin-bottom:6px}
+.sec h3{font-size:1rem; margin:26px 0 8px; letter-spacing:-.015em}
+.sec h4{font-size:.875rem; margin:18px 0 6px; letter-spacing:-.01em; color:var(--ink-2)}
+.sec p{margin-top:12px; color:var(--ink-2); max-width:74ch}
+.sec>p:first-of-type{margin-top:14px}
+.sec ul li, .sec ol li{margin-top:9px; color:var(--ink-2); padding-left:18px; position:relative; max-width:74ch}
+.sec ul li::before{content:""; position:absolute; left:2px; top:.62em; width:5px; height:5px;
+                border-radius:1px; background:var(--faint)}
+.sec ol{counter-reset:step}
+.sec ol li{counter-increment:step; padding-left:26px}
+.sec ol li::before{content:counter(step) "."; width:auto; height:auto;
+                    border-radius:0; background:none; font-family:var(--font-mono);
+                    font-size:.8125rem; color:var(--ink-3); position:absolute; left:0; top:0}
+.sec table{border-collapse:collapse; margin-top:16px; width:100%; font-size:.9063rem}
+.sec th,.sec td{border:1px solid var(--rule-2); padding:9px 11px; text-align:left;
+                vertical-align:top; color:var(--ink-2)}
+.sec th{background:var(--paper-2); color:var(--ink); font-weight:600; font-size:.8438rem}
+.tbl{overflow-x:auto}
+.note{margin-top:20px; padding:14px 16px; border:1px dashed var(--rule-2); border-radius:12px;
+      background:var(--paper-2); font-size:.875rem; color:var(--ink-3)}
+.note.good{border-color:#cfe9dd; background:var(--good-soft); color:#1a5a40}
+.note b{color:var(--ink)}
+.note.good b{color:#134a34}
+
+/* ══ CODE BLOCKS ════════════════════════════════════════════════════════════════════════════════ */
+.code{margin-top:14px; padding:16px 18px; background:#111318; color:#eceef0; border-radius:12px;
+      font-family:var(--font-mono); font-size:.8125rem; line-height:1.8; overflow-x:auto;
+      white-space:pre}
+.code .rem{color:#7d8894}
+@media print{ .code{background:#f0f0f0; color:#111; border:1px solid #ddd} .code .rem{color:#666} }
+
+.btn{display:inline-flex; align-items:center; justify-content:center; gap:8px;
+     padding:13px 22px; border:0; border-radius:999px; background:var(--ink); color:var(--paper);
+     font:inherit; font-weight:600; font-size:.9375rem; cursor:pointer;
+     transition:transform .12s var(--ease-out)}
+.btn:active{transform:scale(.985)}
+.btn:focus-visible{outline:2px solid var(--ink-accent); outline-offset:3px}
+.btn--ghost{background:transparent; color:var(--ink); border:1px solid var(--rule-2)}
+.btn--sm{padding:10px 18px; font-size:.875rem}
+
+/* ══ FOOTER ═════════════════════════════════════════════════════════════════════════════════════ */
+.foot{padding:54px var(--gutter) 32px; border-top:1px solid var(--rule);
+      display:grid; grid-template-columns:2fr 1fr 1fr; gap:34px}
+.foot h4{font-size:.875rem; font-weight:600; margin-bottom:15px}
+.foot li{margin-bottom:9px}
+.foot a{font-size:.875rem; color:var(--ink-3)}
+@media (hover:hover) and (pointer:fine){ .foot a:hover{color:var(--ink)} }
+.foot__bar{padding:18px var(--gutter); border-top:1px solid var(--rule);
+           display:flex; justify-content:space-between; gap:18px; flex-wrap:wrap;
+           font-size:.8125rem; color:var(--ink-3)}
+
+@media (max-width:860px){
+  :root{--gutter:24px}
+  .wrap{grid-template-columns:minmax(0,1fr)}
+  .side{border-right:0; border-bottom:1px solid var(--rule); padding:22px var(--gutter)}
+  .side ul{position:static; flex-direction:row; flex-wrap:wrap; gap:8px 16px}
+  .foot{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+  .foot > :first-child{grid-column:1/-1}
+}
+@media (pointer:coarse){
+  .nav__right a,.side a,.foot a{display:inline-block; padding-block:9px}
+  .lang button{min-height:44px; min-width:38px}
+}
+@media print{
+  .nav,.side,.lang,.btn{display:none}
+  .frame{max-width:none; border:0}
+  .wrap{grid-template-columns:minmax(0,1fr)}
+  .sec{break-inside:avoid}
+  body{font-size:10.5pt}
+}
+</style>
+</head>
+
+<body>
+
+<nav class="nav">
+  <div class="nav__inner">
+    <a class="logo" href="landing.html"><img src="brand/acami.svg" alt="acami"></a>
+    <div class="nav__right">
+      <a class="brk" href="landing.html" data-fr="Retour au site">Back to site</a>
+      <div class="lang" role="group" aria-label="Language">
+        <button type="button" data-lang="en" aria-pressed="true">EN</button>
+        <button type="button" data-lang="fr" aria-pressed="false">FR</button>
+      </div>
+    </div>
+  </div>
+</nav>
+
+<main class="frame">
+
+  <header class="head">
+    <span class="eyebrow" data-fr="Documentation">Documentation</span>
+    <h1 class="h-page" data-fr="Installer ACA, de zéro à votre premier lead validé.">Set up ACA, start to finish.</h1>
+    <p class="lede" data-fr="Le pendant technique de la page tarifaire : les commandes exactes, les fichiers exacts, et ce que chaque brique optionnelle vous apporte réellement. À lire avant d'installer quoi que ce soit — ou après, pour comprendre ce que vous faites déjà tourner.">
+      The technical companion to the pricing page: the exact commands, the exact files, and what
+      each optional piece actually buys you. Read it before you install anything — or after, to
+      understand what you are already running.
+    </p>
+    <div class="head__meta">
+      <span class="pill" data-fr="⏱ &lt;b&gt;5 commandes&lt;/b&gt; jusqu'à une instance qui tourne">⏱ <b>Five commands</b> to a running instance</span>
+      <span class="pill" data-fr="🔑 &lt;b&gt;Une seule clé&lt;/b&gt; requise pour une vraie analyse (Groq)">🔑 <b>One key</b> required for a real analysis (Groq)</span>
+      <span class="pill" data-fr="🧪 &lt;b&gt;Zéro clé&lt;/b&gt; pour le mode démonstration">🧪 <b>Zero keys</b> for demo mode</span>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <aside class="side">
+      <ul>
+        <li><a class="brk" href="#overview" data-fr="Vue d'ensemble">Overview</a></li>
+        <li><a class="brk" href="#prerequisites" data-fr="Avant de commencer">Before you start</a></li>
+        <li><a class="brk" href="#demo" data-fr="Essayer sans rien installer">Try it, no install</a></li>
+        <li><a class="brk" href="#quickstart" data-fr="Cinq commandes">Five commands</a></li>
+        <li><a class="brk" href="#configuration" data-fr="Configuration">Configuration</a></li>
+        <li><a class="brk" href="#docker" data-fr="Docker">Docker</a></li>
+        <li><a class="brk" href="#first-login" data-fr="Première connexion">First login</a></li>
+        <li><a class="brk" href="#branding" data-fr="À vos couleurs">Make it yours</a></li>
+        <li><a class="brk" href="#integrations" data-fr="Intégrations optionnelles">Optional integrations</a></li>
+        <li><a class="brk" href="#production" data-fr="Passer en production">Going to production</a></li>
+        <li><a class="brk" href="#verify" data-fr="Vérifier que ça marche">Verify it works</a></li>
+        <li><a class="brk" href="#help" data-fr="Obtenir de l'aide">Getting help</a></li>
+      </ul>
+    </aside>
+
+    <div class="body">
+
+      <!-- ══ 01 OVERVIEW ══════════════════════════════════════════════════════════════════════ -->
+      <section class="sec" id="overview">
+        <span class="eyebrow">01 — Overview</span>
+        <h2 class="h-sec" data-fr="Ce que vous installez.">What you're installing.</h2>
+        <p data-fr="ACA pré-lit les e-mails commerciaux entrants et leurs pièces jointes (PDF, Word, Excel), en extrait les informations du lead avec un LLM, les compare à votre propre base de connaissances, rédige une proposition — puis <b>s'arrête</b>. Aucune ligne n'entre dans votre CRM et aucun e-mail n'est envoyé avant qu'une personne ait cliqué « Valider ». C'est un rédacteur, pas un agent autonome sur votre CRM.">
+          ACA pre-reads incoming sales email and its attachments (PDF, Word, Excel), extracts the
+          lead's information with an LLM, checks it against your own knowledge base, drafts a
+          proposal — then <b>stops</b>. Nothing reaches your CRM and no email goes out until a
+          person clicks "Validate". It drafts and waits; it never acts alone on your CRM.
+        </p>
+        <p data-fr="Un déploiement = un tenant, sur <b>votre</b> infrastructure : votre Google Sheets, vos clés d'API, votre conteneur, vos données. Ce que vous démarrez tient en quatre processus, tous lancés par une seule commande :">
+          One deployment, one tenant, on <b>your</b> infrastructure: your Google Sheet, your API
+          keys, your container, your data. What you start is four processes, all launched by one
+          command:
+        </p>
+        <div class="tbl"><table>
+          <tr><th data-fr="Processus">Process</th><th data-fr="Rôle">Role</th><th data-fr="Fichier">File</th></tr>
+          <tr><td data-fr="API">API</td><td data-fr="Le cerveau en HTTP — expose le graphe, pilote l'interface, Slack et n8n">The brain over HTTP — exposes the graph, drives the UI, Slack and n8n</td><td><code>aca/api.py</code></td></tr>
+          <tr><td data-fr="Interface">UI</td><td data-fr="La console opérateur — intake, validation, réglages, tableau de bord">The operator console — intake, validation, settings, dashboard</td><td><code>ui.py</code></td></tr>
+          <tr><td data-fr="Réception">Poller</td><td data-fr="Surveille la boîte Gmail et lance une analyse pour chaque nouveau message">Watches the Gmail inbox and starts an analysis for each new message</td><td><code>aca/core/poller.py</code></td></tr>
+          <tr><td data-fr="Planificateur">Scheduler</td><td data-fr="Relances, purge RGPD, archives — à heure fixe">Follow-ups, GDPR purge, archives — on a fixed cadence</td><td><code>aca/core/scheduler.py</code></td></tr>
+        </table></div>
+        <p data-fr="Deux paliers, et n8n n'est jamais requis pour être automatique :">
+          Two tiers, and n8n is never required for automation:
+        </p>
+        <div class="tbl"><table>
+          <tr><th data-fr="Palier">Tier</th><th data-fr="Composants">Components</th><th data-fr="Pour qui">For whom</th></tr>
+          <tr><td data-fr="Solo">Solo</td><td data-fr="API + interface + réception + planificateur">API + UI + poller + scheduler</td><td data-fr="Consultant seul, PME — automatisé de bout en bout, sans n8n">Solo consultant, SMB — automated end to end, no n8n</td></tr>
+          <tr><td data-fr="Enterprise">Enterprise</td><td data-fr="Idem, + n8n">Same, plus n8n</td><td data-fr="Orchestration avec vos autres outils (CRM, ERP, ticketing)">Orchestration with your other tools (CRM, ERP, ticketing)</td></tr>
+        </table></div>
+        <p data-fr="Les deux paliers font tourner la même image et la même API : n8n s'ajoute, il ne remplace rien.">
+          Both tiers run the same image and the same API: n8n is additive, it replaces nothing.
+        </p>
+      </section>
+
+      <!-- ══ 02 PREREQUISITES ═════════════════════════════════════════════════════════════════ -->
+      <section class="sec" id="prerequisites">
+        <span class="eyebrow">02 — Before you start</span>
+        <h2 class="h-sec" data-fr="Ce qu'il vous faut.">What you need.</h2>
+        <p data-fr="Le principe directeur du projet : une variable de configuration absente signifie « fonctionnalité ignorée », jamais un plantage. La liste ci-dessous distingue donc ce qui est réellement nécessaire de ce qui est confortable.">
+          The project's guiding principle: an absent configuration variable means "feature
+          skipped", never a crash. So the list below separates what is genuinely required from
+          what is merely nice to have.
+        </p>
+        <h3 data-fr="Strictement nécessaire">Strictly required</h3>
+        <ul>
+          <li data-fr="<b>Python 3.11 ou plus récent</b> (développé et testé sous 3.14).">
+            <b>Python 3.11 or newer</b> (built and tested on 3.14).</li>
+          <li data-fr="<b>Un compte Google</b> pour créer un Google Sheets — c'est le CRM et la base de connaissances.">
+            <b>A Google account</b> to create a Google Sheet in — it is the CRM and the knowledge base.</li>
+          <li data-fr="<b>Un compte de service Google</b> (gratuit) avec l'API Google Sheets activée, pour que le code puisse lire et écrire dans ce classeur sans intervention humaine.">
+            <b>A Google service account</b> (free) with the Google Sheets API enabled, so the code
+            can read and write that sheet without a human in the loop.</li>
+          <li data-fr="<b>Une clé Groq gratuite</b> (<a class='brk' href='https://console.groq.com' target='_blank' rel='noopener'>console.groq.com</a>) — c'est le seul compte strictement nécessaire pour qu'une analyse réelle s'exécute : classification, extraction, supervision et rédaction en dépendent toutes.">
+            <b>A free Groq API key</b> (<a class="brk" href="https://console.groq.com" target="_blank" rel="noopener">console.groq.com</a>) — the one account you strictly need for a
+            real analysis to run: classification, extraction, supervision and drafting all depend
+            on it.</li>
+        </ul>
+        <h3 data-fr="Utile, mais facultatif">Useful, but optional</h3>
+        <ul>
+          <li data-fr="<b>Une clé Gemini gratuite</b> — active la recherche sémantique dans votre base de connaissances. Absente, le système utilise une recherche par mots-clés à la place.">
+            <b>A free Gemini key</b> — enables semantic search over your knowledge base. Absent,
+            the system falls back to keyword search instead.</li>
+          <li data-fr="<b>Une clé Tavily gratuite</b> (1000 requêtes/mois) — enrichit automatiquement le profil de l'entreprise d'un prospect et sert de repli si votre FAQ ne sait pas répondre.">
+            <b>A free Tavily key</b> (1,000 requests/month) — automatically enriches a prospect's
+            company profile and acts as a fallback when your FAQ has no answer.</li>
+          <li data-fr="<b>Un compte Gmail</b> — pour la réception automatique des e-mails, les brouillons de réponse et les relances. Le premier lancement ouvre un navigateur pour l'autorisation ; c'est à faire une fois, en local.">
+            <b>A Gmail account</b> — for automatic email intake, reply drafts and follow-ups. The
+            first run opens a browser for consent; it is a one-time, local step.</li>
+          <li data-fr="<b>Git</b>, pour récupérer le dépôt (une archive ZIP fonctionne aussi).">
+            <b>Git</b>, to fetch the repository (a ZIP archive works too).</li>
+        </ul>
+        <p class="note" data-fr="Tout ce qui suit — HubSpot, Slack, Supabase, n8n, Stripe — s'ajoute plus tard sans rien casser. Chaque intégration se dégrade proprement en son absence : voir §09 « Intégrations optionnelles ».">
+          Everything past this point — HubSpot, Slack, Supabase, n8n, Stripe — is added later
+          without breaking anything. Every integration degrades cleanly in its absence: see §09
+          "Optional integrations".
+        </p>
+      </section>
+
+      <!-- ══ 03 DEMO ═══════════════════════════════════════════════════════════════════════════ -->
+      <section class="sec" id="demo">
+        <span class="eyebrow">03 — Try it, no install</span>
+        <h2 class="h-sec" data-fr="Essayer avant de tout installer.">Try it before you install anything.</h2>
+        <p data-fr="Le mode démonstration exécute le <b>vrai</b> graphe — même superviseur, même autocritique, même pause de validation — avec un modèle simulé et <b>aucune clé d'API</b>. Seul l'appel facturé est simulé ; les écritures CRM sont bloquées durement, pas simplement ignorées.">
+          Demo mode runs the <b>real</b> graph — same supervisor, same self-critique, same
+          validation pause — with a simulated model and <b>no API key at all</b>. Only the
+          billable call is simulated; CRM writes are hard-blocked, not merely skipped.
+        </p>
+        <h3 data-fr="Sans rien installer localement">Without installing anything locally</h3>
+        <p data-fr="Si une instance de démonstration hébergée est disponible, le bouton « Ouvrir la démonstration » sur la page tarifaire y mène directement.">
+          If a hosted demo instance is available, the "Open the demo" button on the pricing page
+          leads straight to it.
+        </p>
+        <h3 data-fr="En local, en une commande">Locally, in one command</h3>
+        <p data-fr="Après les trois premières commandes de la section suivante (clonage, environnement virtuel, dépendances) :">
+          After the first three commands of the next section (clone, virtual environment,
+          dependencies):
+        </p>
+        <div class="code">python -m aca.core.app<span class="rem">  # runs 6 mock emails through the full graph, stops at the validation pause,
+</span><span class="rem">                  # never writes anywhere — no .env file needed at all</span></div>
+        <p data-fr="Pour voir la même chose depuis l'interface Streamlit (le sélecteur d'e-mails d'exemple, le tableau de bord, les réglages) plutôt qu'en ligne de commande :">
+          To see the same thing from the Streamlit console (the example-email picker, the
+          dashboard, the settings screen) rather than the command line:
+        </p>
+        <div class="code">copy .env.example .env<span class="rem">           # Windows — cp on macOS/Linux</span>
+<span class="rem"># open .env and set: </span>ACA_DEMO_MODE=1
+streamlit run ui.py</div>
+        <p data-fr="En mode démonstration, <code>demo.guard_write()</code> lève une exception plutôt que d'ignorer silencieusement une écriture CRM tentée par erreur — c'est l'exception délibérée à la dégradation gracieuse du reste du projet, parce qu'une fausse ligne écrite chez un prospect pendant une démonstration est un incident, pas un simple oubli.">
+          In demo mode, <code>demo.guard_write()</code> raises rather than silently skipping a CRM
+          write attempted by mistake — the deliberate exception to the rest of the project's
+          graceful degradation, because a fake row written into a prospect's CRM during a demo is
+          an incident, not a shrug.
+        </p>
+      </section>
+
+      <!-- ══ 04 QUICKSTART ═════════════════════════════════════════════════════════════════════ -->
+      <section class="sec" id="quickstart">
+        <span class="eyebrow">04 — Five commands</span>
+        <h2 class="h-sec" data-fr="De zéro à une instance qui tourne.">From zero to a running instance.</h2>
+        <p data-fr="Pour une vraie analyse (pas la démonstration), vous aurez besoin d'un compte de service Google et d'une clé Groq — voir §02. Le reste de cette section suppose que les deux sont prêts.">
+          For a real analysis (not the demo), you will need a Google service account and a Groq
+          key — see §02. The rest of this section assumes both are ready.
+        </p>
+        <h3 data-fr="1. Créer le compte de service Google Sheets">1. Create the Google Sheets service account</h3>
+        <ol>
+          <li data-fr="Dans la Google Cloud Console, créez un projet, activez l'API « Google Sheets », puis créez un compte de service et téléchargez sa clé JSON.">
+            In the Google Cloud Console, create a project, enable the "Google Sheets API", then
+            create a service account and download its JSON key.</li>
+          <li data-fr="Enregistrez ce fichier sous <code>credentials/service_account.json</code> à la racine du dépôt.">
+            Save that file as <code>credentials/service_account.json</code> at the repository root.</li>
+          <li data-fr="Créez un nouveau Google Sheets, puis partagez-le en accès « Éditeur » avec l'adresse e-mail du compte de service (le champ <code>client_email</code> du fichier JSON).">
+            Create a new Google Sheet, then share it with "Editor" access to the service account's
+            email address (the <code>client_email</code> field in the JSON file).</li>
+          <li data-fr="Copiez l'identifiant du classeur — la longue chaîne entre <code>/d/</code> et <code>/edit</code> dans son URL.">
+            Copy the sheet's ID — the long string between <code>/d/</code> and <code>/edit</code>
+            in its URL.</li>
+        </ol>
+        <h3 data-fr="2. Installer et configurer">2. Install and configure</h3>
+        <div class="code">git clone &lt;repository-url&gt; aca &amp;&amp; cd aca
+python -m venv venv &amp;&amp; venv\Scripts\activate<span class="rem">     # Windows; source venv/bin/activate elsewhere</span>
+pip install -r requirements.txt
+copy .env.example .env<span class="rem">                           # Windows; cp on macOS/Linux</span>
+<span class="rem"># open .env and fill in GROQ_API_KEY and GOOGLE_SHEETS_ID from step 1</span>
+python scripts/setup_sheets.py<span class="rem">                    # once — creates the "Leads" header row</span>
+python scripts/setup_faq.py<span class="rem">                       # once — seeds the FAQ with 74 sample Q&amp;A pairs</span></div>
+        <h3 data-fr="3. Démarrer">3. Start it</h3>
+        <div class="code">python scripts/run_solo.py<span class="rem">   # API + UI + poller + scheduler, together, one Ctrl+C stops all four</span></div>
+        <p data-fr="L'interface est sur <code>http://localhost:8501</code>, l'API sur <code>http://localhost:8000</code> (bilan de santé : <code>/health</code>).">
+          The UI is at <code>http://localhost:8501</code>, the API at
+          <code>http://localhost:8000</code> (health check: <code>/health</code>).
+        </p>
+        <p class="note good" data-fr="Ces cinq commandes suffisent au strict minimum. Une variable absente dans <code>.env</code> ne fait rien planter : la fonctionnalité qu'elle active est simplement sautée, tant que <code>ACA_ENV</code> reste sur <code>development</code> (le défaut) — voir §10 pour ce qui change en production.">
+          These five commands are the strict minimum. A variable left blank in <code>.env</code>
+          crashes nothing: the capability it gates is simply skipped, as long as
+          <code>ACA_ENV</code> stays on <code>development</code> (the default) — see §10 for what
+          changes in production.
+        </p>
+      </section>
+
+      <!-- ══ 05 CONFIGURATION ═════════════════════════════════════════════════════════════════ -->
+      <section class="sec" id="configuration">
+        <span class="eyebrow">05 — Configuration</span>
+        <h2 class="h-sec" data-fr="La carte, pas le territoire.">The map, not the territory.</h2>
+        <p data-fr="<code>.env.example</code> documente chaque variable une par une, avec ce qu'elle débloque et ce qui se passe en son absence — c'est le fichier à ouvrir pour le détail. Ce qui suit en est la carte : neuf groupes, dans l'ordre où ils apparaissent dans ce fichier.">
+          <code>.env.example</code> documents every variable one by one, what it unlocks and what
+          happens in its absence — that is the file to open for the detail. What follows is its
+          map: nine groups, in the order they appear in that file.
+        </p>
+        <div class="tbl"><table>
+          <tr><th data-fr="Groupe">Group</th><th data-fr="Débloque">Unlocks</th><th data-fr="Variables clés">Key variables</th></tr>
+          <tr><td data-fr="1. Strict minimum">1. Strict minimum</td><td data-fr="N'importe quelle analyse">Any analysis at all</td><td><code>GROQ_API_KEY</code>, <code>GOOGLE_SERVICE_ACCOUNT_FILE</code>, <code>GOOGLE_SHEETS_ID</code></td></tr>
+          <tr><td data-fr="2. Capacités optionnelles">2. Optional capabilities</td><td data-fr="Recherche sémantique, enrichissement, réception Gmail, Postgres partagé, vrai CRM">Semantic search, enrichment, Gmail intake, shared Postgres, a real CRM</td><td><code>GOOGLE_API_KEY</code>, <code>TAVILY_API_KEY</code>, <code>GMAIL_CREDENTIALS_FILE</code>, <code>DATABASE_URL</code>, <code>HUBSPOT_ACCESS_TOKEN</code>, <code>CALENDLY_URL</code></td></tr>
+          <tr><td data-fr="3. Notifications &amp; routage">3. Notifications &amp; routing</td><td data-fr="Une personne est prévenue qu'un lead attend">Someone gets told a lead is waiting</td><td><code>SLACK_WEBHOOK_URL</code>, <code>NOTIFY_EMAIL</code>, <code>SLACK_SIGNING_SECRET</code>, <code>SUPPORT_EMAIL</code>, <code>HR_EMAIL</code></td></tr>
+          <tr><td data-fr="4. n8n / webhooks sortants">4. n8n / outbound webhooks</td><td data-fr="Orchestration du palier Enterprise">Enterprise-tier orchestration</td><td><code>ACA_WEBHOOK_URL</code>, <code>ACA_WEBHOOK_SECRET</code></td></tr>
+          <tr><td data-fr="5. Automatisation de fond">5. Background automation</td><td data-fr="L'autonomie du palier Solo — réception 24/7, relances, purge">The Solo tier's autonomy — 24/7 intake, follow-ups, purge</td><td><code>POLL_INTERVAL_SECONDS</code>, <code>ACA_SCHEDULE_*_HOURS</code>, <code>RELANCE_DAYS</code>, <code>RETENTION_DAYS</code></td></tr>
+          <tr><td data-fr="6. Sécurité">6. Security</td><td data-fr="Comptes nominatifs, sessions, verrouillage en production">Named accounts, sessions, production lockdown</td><td><code>ACA_ENV</code>, <code>ACA_API_KEY</code>, <code>ACA_SESSION_TTL_SECONDS</code>, <code>ACA_METRICS_TOKEN</code></td></tr>
+          <tr><td data-fr="7. Multi-tenant &amp; facturation">7. Multi-tenant &amp; billing</td><td data-fr="Plusieurs clients sur un même déploiement">Several clients on one deployment</td><td><code>ACA_ORG_ID</code>, <code>STRIPE_API_KEY</code></td></tr>
+          <tr><td data-fr="8. Chemins des bases locales">8. Local database paths</td><td data-fr="Isoler plusieurs instances sur une même machine">Isolating several instances on one machine</td><td><code>ACA_QUEUE_DB</code>, <code>ACA_ANALYTICS_DB</code>, …</td></tr>
+          <tr><td data-fr="9. Identité visuelle">9. Visual identity</td><td data-fr="Votre logo, vos couleurs, votre typographie">Your logo, your colours, your type</td><td><code>BRAND_NAME</code>, <code>BRAND_PRIMARY</code>, <code>BRAND_LOGO</code></td></tr>
+        </table></div>
+        <p data-fr="Presque tout ce qui figure dans les groupes 2 à 9 est aussi réglable <b>sans toucher à <code>.env</code></b>, depuis l'onglet « Réglages » de l'interface — voir §08. <code>.env</code> reste utile pour tout démarrer déjà configuré (une image Docker livrée aux couleurs d'un client, par exemple).">
+          Nearly everything in groups 2 through 9 can also be set <b>without touching
+          <code>.env</code></b>, from the "Settings" screen in the UI — see §08.
+          <code>.env</code> stays useful for starting everything already configured (a Docker
+          image shipped already in a client's colours, for instance).
+        </p>
+      </section>
+
+      <!-- ══ 06 DOCKER ═════════════════════════════════════════════════════════════════════════ -->
+      <section class="sec" id="docker">
+        <span class="eyebrow">06 — Docker</span>
+        <h2 class="h-sec" data-fr="Le même conteneur, deux profils.">The same container, two profiles.</h2>
+        <p data-fr="Une seule image pour les quatre services, et deux profils Docker Compose — <code>solo</code> (API + interface + réception + planificateur) et <code>enterprise</code> (idem, + n8n). C'est la démonstration concrète que n8n est optionnel : les deux profils font tourner la même image et la même API ; on retire l'orchestrateur en changeant un mot.">
+          One image for all four services, and two Docker Compose profiles — <code>solo</code>
+          (API + UI + poller + scheduler) and <code>enterprise</code> (same, plus n8n). It is the
+          concrete proof that n8n is optional: both profiles run the same image and the same API;
+          the orchestrator is removed by changing one word.
+        </p>
+        <div class="code">docker compose --profile solo up          <span class="rem"># without n8n</span>
+docker compose --profile enterprise up    <span class="rem"># with n8n</span></div>
+        <p data-fr="Les identifiants Google sont montés en <b>lecture seule</b> et jamais copiés dans l'image ; un volume nommé conserve les registres SQLite locaux (file d'attente, journal d'audit, comptes, planificateur) — sans lui, valider un lead puis redémarrer le conteneur en perdrait la trace. Les ports sont liés à la boucle locale (<code>127.0.0.1</code>) par défaut : exposer publiquement demande TLS et une clé d'API obligatoire, voir §10.">
+          Google credentials are mounted <b>read-only</b> and never copied into the image; a named
+          volume keeps the local SQLite registries (queue, audit log, accounts, scheduler) —
+          without it, validating a lead and then restarting the container would lose the trace.
+          Ports are bound to loopback (<code>127.0.0.1</code>) by default: exposing this publicly
+          needs TLS and a mandatory API key, see §10.
+        </p>
+        <p data-fr="Sans Docker, le palier Solo se lance en une commande — voir §04, étape 3.">
+          Without Docker, the Solo tier starts with one command — see §04, step 3.
+        </p>
+      </section>
+
+      <!-- ══ 07 FIRST LOGIN ════════════════════════════════════════════════════════════════════ -->
+      <section class="sec" id="first-login">
+        <span class="eyebrow">07 — First login</span>
+        <h2 class="h-sec" data-fr="Créer votre premier compte.">Create your first account.</h2>
+        <p data-fr="Sans compte nominatif créé, l'interface retombe sur le mot de passe partagé <code>ACA_UI_PASSWORD</code> s'il est défini, ou reste ouverte sinon — correct pour un essai local, pas pour une équipe. Créez un compte administrateur nominatif dès que possible :">
+          With no named account created, the UI falls back to the shared
+          <code>ACA_UI_PASSWORD</code> if one is set, or stays open otherwise — fine for a local
+          trial, not for a team. Create a named admin account as early as possible:
+        </p>
+        <div class="code">python -m aca.storage.user_store create alice --role admin</div>
+        <p data-fr="Puis connectez-vous. Les comptes <code>admin</code> exigent un second facteur (TOTP) : la première connexion affiche un QR code — scannez-le avec n'importe quelle application d'authentification (Google Authenticator, Authy, 1Password…) et saisissez le code à 6 chiffres une fois pour confirmer l'enrôlement.">
+          Then sign in. <code>admin</code> accounts require a second factor (TOTP): the first
+          login shows a QR code — scan it with any authenticator app (Google Authenticator, Authy,
+          1Password…) and enter the 6-digit code once to confirm enrollment.
+        </p>
+        <div class="tbl"><table>
+          <tr><th data-fr="Rôle">Role</th><th data-fr="Peut faire">Can do</th></tr>
+          <tr><td><code>admin</code></td><td data-fr="Tout : réglages, comptes, curation de la base de connaissances, second facteur obligatoire">Everything: settings, accounts, knowledge-base curation, second factor mandatory</td></tr>
+          <tr><td><code>operator</code></td><td data-fr="Le travail quotidien : valider ou rejeter des leads">The day-to-day work: validate or reject leads</td></tr>
+          <tr><td><code>viewer</code></td><td data-fr="Lecture seule : tableau de bord et historique">Read-only: dashboard and history</td></tr>
+        </table></div>
+        <p data-fr="Autres commandes utiles :">Other useful commands:</p>
+        <div class="code">python -m aca.storage.user_store list
+python -m aca.storage.user_store passwd alice
+python -m aca.storage.user_store disable alice</div>
+      </section>
+
+      <!-- ══ 08 BRANDING ═══════════════════════════════════════════════════════════════════════ -->
+      <section class="sec" id="branding">
+        <span class="eyebrow">08 — Make it yours</span>
+        <h2 class="h-sec" data-fr="À vos couleurs, sans redémarrage.">Your colours, no restart.</h2>
+        <p data-fr="Dans l'onglet « Réglages → Apparence » (compte administrateur), logo, palette, typographie, rayon des angles, densité et niveau d'animation se règlent sans modifier une ligne de code et prennent effet immédiatement — aucun redémarrage, aucun déploiement.">
+          From "Settings → Appearance" (an admin account), logo, palette, typography, corner
+          radius, density and animation level are all set without touching a line of code and
+          take effect immediately — no restart, no redeploy.
+        </p>
+        <p data-fr="Le même écran gère aussi le lien de réservation Calendly ajouté aux propositions, les adresses de routage support/RH, et la cadence des relances — des réglages autrefois enfouis dans <code>.env</code>.">
+          The same screen also manages the Calendly booking link appended to proposals, the
+          support/HR routing addresses, and the follow-up cadence — settings that used to live
+          only in <code>.env</code>.
+        </p>
+      </section>
+
+      <!-- ══ 09 INTEGRATIONS ═══════════════════════════════════════════════════════════════════ -->
+      <section class="sec" id="integrations">
+        <span class="eyebrow">09 — Optional integrations</span>
+        <h2 class="h-sec" data-fr="Ajouter au fur et à mesure.">Add them as you go.</h2>
+        <p data-fr="Chacune est indépendante et se dégrade proprement en son absence — une variable manquante signifie « fonctionnalité ignorée », jamais un plantage.">
+          Each one is independent and degrades cleanly in its absence — a missing variable means
+          "feature skipped", never a crash.
+        </p>
+        <div class="tbl"><table>
+          <tr><th data-fr="Intégration">Integration</th><th data-fr="Apporte">Adds</th><th data-fr="Activée par">Gated by</th></tr>
+          <tr><td>HubSpot</td><td data-fr="Écrit le lead dans un vrai CRM, en plus de Google Sheets">Writes the lead to a real CRM, alongside Google Sheets</td><td><code>HUBSPOT_ACCESS_TOKEN</code></td></tr>
+          <tr><td>Slack</td><td data-fr="Alertes, et boutons « Valider »/« Rejeter » directement dans Slack">Alerts, and "Validate"/"Reject" buttons directly inside Slack</td><td><code>SLACK_WEBHOOK_URL</code>, <code>SLACK_SIGNING_SECRET</code></td></tr>
+          <tr><td data-fr="Supabase / pgvector">Supabase / pgvector</td><td data-fr="Checkpointer partagé entre processus + recherche sémantique sur base de données réelle">Shared checkpointer across processes + real-database semantic search</td><td><code>DATABASE_URL</code></td></tr>
+          <tr><td>n8n</td><td data-fr="Orchestration avec vos autres outils — palier Enterprise">Orchestration with your other tools — Enterprise tier</td><td data-fr="voir §06">see §06</td></tr>
+          <tr><td>LangSmith</td><td data-fr="Traçage des appels de modèle (gratuit, 5 000 traces/mois)">Model-call tracing (free, 5,000 traces/month)</td><td><code>LANGCHAIN_TRACING_V2</code></td></tr>
+          <tr><td>Stripe</td><td data-fr="Facturation à l'usage — non vérifié en réel, aucun compte de test disponible pour ce projet">Usage-based billing — not live-verified, no test account exists for this project</td><td><code>STRIPE_API_KEY</code></td></tr>
+        </table></div>
+      </section>
+
+      <!-- ══ 10 PRODUCTION ═════════════════════════════════════════════════════════════════════ -->
+      <section class="sec" id="production">
+        <span class="eyebrow">10 — Going to production</span>
+        <h2 class="h-sec" data-fr="Ce qui change en production.">What changes in production.</h2>
+        <p data-fr="Tout le projet repose sur la dégradation gracieuse — « absent = fonctionnalité ignorée » — le bon réglage par défaut en local, et exactement le mauvais sur un hébergement public, où il devient « absent = exposé ». <code>ACA_ENV</code> est l'interrupteur explicite :">
+          The whole project runs on graceful degradation — "absent = feature skipped" — the right
+          default locally, and exactly the wrong one on a public host, where it becomes "absent =
+          exposed". <code>ACA_ENV</code> is the explicit switch:
+        </p>
+        <div class="code">ACA_ENV=production</div>
+        <p data-fr="refuse de démarrer si <code>ACA_API_KEY</code>, un portail de connexion, <code>ACA_RATE_LIMIT</code> ou <code>ACA_METRICS_TOKEN</code> manquent — au lieu du « absent = ouvert » du mode développement.">
+          refuses to start if <code>ACA_API_KEY</code>, a login gate, <code>ACA_RATE_LIMIT</code>
+          or <code>ACA_METRICS_TOKEN</code> is missing — instead of development mode's "absent =
+          open".
+        </p>
+        <h3 data-fr="Liste de vérification avant ouverture publique">Checklist before opening this up publicly</h3>
+        <ol>
+          <li data-fr="Passez derrière TLS — configurations Caddy/Nginx toutes prêtes, y compris les en-têtes WebSocket que Streamlit exige, dans <code>docs/DEPLOYMENT_HARDENING.md</code>.">
+            Put it behind TLS — ready-made Caddy/Nginx configs, including the WebSocket headers
+            Streamlit needs, live in <code>docs/DEPLOYMENT_HARDENING.md</code>.</li>
+          <li data-fr="Faites tourner <code>python -m aca.core.prod_check</code> — vérifie la posture de sécurité sans jamais lever d'exception, la même vérification que la bannière admin-only de l'interface.">
+            Run <code>python -m aca.core.prod_check</code> — checks the security posture without
+            ever raising, the same check behind the UI's admin-only banner.</li>
+          <li data-fr="Fixez la fenêtre de rétention (<code>RETENTION_DAYS</code>, 365 par défaut) et confirmez que la tâche de purge du planificateur est active.">
+            Decide the retention window (<code>RETENTION_DAYS</code>, default 365) and confirm the
+            scheduler's purge job is enabled.</li>
+          <li data-fr="Faites tourner la revue RLS Supabase, en lecture seule : <code>python scripts/verify_rls.py</code>.">
+            Run the read-only Supabase RLS sweep: <code>python scripts/verify_rls.py</code>.</li>
+          <li data-fr="Lisez <code>docs/PRIVACY_POLICY.md</code> avant que le premier e-mail réel de prospect n'arrive.">
+            Read <code>docs/PRIVACY_POLICY.md</code> before the first real prospect email arrives.</li>
+        </ol>
+      </section>
+
+      <!-- ══ 11 VERIFY ═════════════════════════════════════════════════════════════════════════ -->
+      <section class="sec" id="verify">
+        <span class="eyebrow">11 — Verify it works</span>
+        <h2 class="h-sec" data-fr="Ne pas se fier, vérifier.">Trust, then verify.</h2>
+        <div class="code">python -m pytest tests/                <span class="rem"># full offline test suite</span>
+python -m aca.eval.eval_classifier     <span class="rem"># classifier accuracy on 50 labeled emails</span>
+python scripts/verify_rls.py           <span class="rem"># Supabase RLS coverage, read-only</span>
+python -m aca.storage.audit_log        <span class="rem"># checks the audit log's hash chain</span>
+curl http://localhost:8000/health      <span class="rem"># liveness — no secret, no external call</span></div>
+        <p data-fr="La suite de tests tourne intégralement hors ligne — aucune clé réelle n'est requise pour la lancer — et le fichier <code>tests/conftest.py</code> neutralise chaque intégration externe avant tout import.">
+          The test suite runs fully offline — no real key is required to run it — and
+          <code>tests/conftest.py</code> neutralises every external integration before any import
+          happens.
+        </p>
+      </section>
+
+      <!-- ══ 12 HELP ═══════════════════════════════════════════════════════════════════════════ -->
+      <section class="sec" id="help">
+        <span class="eyebrow">12 — Getting help</span>
+        <h2 class="h-sec" data-fr="Là où chercher ensuite.">Where to look next.</h2>
+        <p data-fr="Cette page couvre l'installation ; la référence technique complète vit dans le dépôt lui-même :">
+          This page covers installation; the full technical reference lives in the repository
+          itself:
+        </p>
+        <ul>
+          <li data-fr="<code>README.md</code> — référence rapide, à la racine du dépôt."><code>README.md</code> — quick reference, at the repository root.</li>
+          <li data-fr="<code>CLAUDE.md</code> — l'architecture complète, module par module."><code>CLAUDE.md</code> — the complete architecture, module by module.</li>
+          <li data-fr="<code>docs/ACAM_roadmap.md</code> — chaque décision et chaque audit, avec son raisonnement."><code>docs/ACAM_roadmap.md</code> — every decision and every audit, with its reasoning.</li>
+          <li data-fr="<code>docs/DEPLOYMENT_HARDENING.md</code> — TLS, secrets, rotation."><code>docs/DEPLOYMENT_HARDENING.md</code> — TLS, secrets, rotation.</li>
+          <li data-fr="<code>docs/PRIVACY_POLICY.md</code> — RGPD."><code>docs/PRIVACY_POLICY.md</code> — GDPR.</li>
+        </ul>
+        <p data-fr="Une question à laquelle cette page ne répond pas ?">
+          A question this page doesn't answer?
+        </p>
+        <a class="btn btn--ghost btn--sm" style="margin-top:14px" href="legal.html#contact" data-fr="Nous écrire">Write to us</a>
+        <a class="btn btn--sm" style="margin-top:14px; margin-left:10px" href="landing.html#book" data-fr="Réserver un appel">Book a call</a>
+      </section>
+
+    </div>
+  </div>
+</main>
+
+<footer class="frame">
+  <div class="foot">
+    <div>
+      <span class="logo"><img src="brand/acami.svg" alt="acami"></span>
+      <p style="margin-top:14px; max-width:34ch; font-size:.9375rem; color:var(--ink-2)"
+         data-fr="Agence IA. Nous installons le framework ACA, propulsé par notre moteur ACAM : il rédige et attend, il n'agit jamais seul sur votre CRM.">
+        AI agency. We install the ACA framework, powered by our ACAM engine: it drafts and waits,
+        it never acts alone on your CRM.
+      </p>
+    </div>
+    <div>
+      <h4 data-fr="Pages">Pages</h4>
+      <ul>
+        <li><a class="brk" href="landing.html#capabilities" data-fr="Capacités">Capabilities</a></li>
+        <li><a class="brk" href="landing.html#pricing" data-fr="Tarifs">Pricing</a></li>
+        <li><a class="brk" href="landing.html#book" data-fr="Réserver">Book a call</a></li>
+      </ul>
+    </div>
+    <div>
+      <h4 data-fr="Assistance">Support</h4>
+      <ul>
+        <li><a class="brk" href="legal.html#contact" data-fr="Contact">Contact</a></li>
+        <li><a class="brk" href="legal.html#privacy" data-fr="Confidentialité">Privacy Policy</a></li>
+        <li><a class="brk" href="legal.html#terms" data-fr="Conditions générales">Terms &amp; Conditions</a></li>
+        <li><a class="brk" href="legal.html#acceptable-use" data-fr="Usage acceptable">Acceptable Use</a></li>
+      </ul>
+    </div>
+  </div>
+  <div class="foot__bar">
+    <span>© acami. ACA and ACAM are its framework and engine.</span>
+    <span data-fr="Validation humaine obligatoire avant toute écriture CRM.">Human approval required before any CRM write.</span>
+  </div>
+</footer>
+
+<script>
+(function(){
+  "use strict";
+
+  /* ══ LANGUAGE ══════════════════════════════════════════════════════════════════════════════════
+     English lives in the markup; French rides along in `data-fr`. The English original is stashed
+     into `data-en` on the first switch, so the toggle stays reversible indefinitely. Same mechanism
+     as landing.html / legal.html. */
+  function setLang(lang){
+    var fr = lang === "fr";
+    document.documentElement.lang = lang;
+    [].forEach.call(document.querySelectorAll("[data-fr]"), function(el){
+      if (!el.hasAttribute("data-en")) el.setAttribute("data-en", el.innerHTML);
+      el.innerHTML = fr ? el.getAttribute("data-fr") : el.getAttribute("data-en");
+    });
+    [].forEach.call(document.querySelectorAll(".lang button"), function(b){
+      b.setAttribute("aria-pressed", String(b.getAttribute("data-lang") === lang));
+    });
+    try { localStorage.setItem("aca-lang", lang); } catch (e) {}
+  }
+  [].forEach.call(document.querySelectorAll(".lang button"), function(b){
+    b.addEventListener("click", function(){ setLang(b.getAttribute("data-lang")); });
+  });
+
+  /* ══ SIDE NAV ══════════════════════════════════════════════════════════════════════════════════
+     What makes twelve sections behave like twelve pages: you always see where you are and what
+     else exists — the one thing separate pages provide for free. */
+  var links = [].slice.call(document.querySelectorAll(".side a"));
+  if ("IntersectionObserver" in window && links.length) {
+    var io = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){
+        if (!e.isIntersecting) return;
+        links.forEach(function(a){
+          a.classList.toggle("is-here", a.getAttribute("href") === "#" + e.target.id);
+        });
+      });
+    }, { rootMargin: "-92px 0px -60% 0px" });
+    [].forEach.call(document.querySelectorAll(".sec"), function(s){ io.observe(s); });
+  }
+
+  var saved = null;
+  try { saved = localStorage.getItem("aca-lang"); } catch (e) {}
+  setLang(saved === "fr" ? "fr" : "en");
+})();
+</script>
+</body>
+</html>

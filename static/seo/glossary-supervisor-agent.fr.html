@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qu&#x27;est-ce qu&#x27;un agent superviseur ?</title>
+<meta name="description" content="Un agent superviseur est un modèle qui répartit le travail entre des agents spécialisés plutôt que de tout faire lui-même. Une définition construite face au nœud superviseur d&#x27;ACA.">
+<link rel="canonical" href="https://acami.example/seo/glossary-supervisor-agent.fr.html">
+<style>
+:root{--paper:#fdfdfd;--ink:#12171c;--ink-2:#4b5560;--ink-3:#636363;--rule:#e3e3e3;
+--primary:#125e6b;--accent:#b4622a;--radius:10px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+font-family:Figtree,Inter,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+line-height:1.6}
+.wrap{max-width:760px;margin:0 auto;padding:48px 24px 96px}
+nav{border-bottom:1px solid var(--rule);padding:16px 24px}
+nav a{color:var(--ink);text-decoration:none;font-weight:600;font-size:.9rem}
+nav a.back{color:var(--ink-2);font-weight:500;float:right}
+h1{font-family:'Instrument Serif',Georgia,serif;font-size:2.1rem;line-height:1.15;margin:.4em 0 .3em}
+h2{font-size:1.2rem;margin-top:2.2em}
+.kicker{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.72rem;letter-spacing:.08em;
+text-transform:uppercase;color:var(--primary)}
+.lede{color:var(--ink-2);font-size:1.05rem;max-width:60ch}
+p{max-width:68ch}
+code{background:#f1f4f5;padding:.1em .35em;border-radius:4px;font-size:.9em}
+ol,ul{max-width:66ch;padding-left:1.3em}
+li{margin-bottom:.6em}
+table{border-collapse:collapse;width:100%;margin:1.4em 0;font-size:.92rem}
+th,td{border:1px solid var(--rule);padding:.55em .7em;text-align:left;vertical-align:top}
+th{background:#f6f8f8;font-weight:600}
+.verified{border-left:3px solid var(--primary);padding:.2em 0 .2em 1em;margin:2em 0;
+color:var(--ink-2);font-size:.92rem}
+.verified.live{border-left-color:var(--accent)}
+.sources{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.78rem;color:var(--ink-3)}
+.sources a{color:inherit}
+footer{border-top:1px solid var(--rule);padding:32px 24px;text-align:center;
+color:var(--ink-3);font-size:.82rem}
+footer a{color:inherit}
+</style>
+</head>
+<body>
+<nav><a href="../fr/index.html">acami</a><a class="back" href="../fr/index.html">&larr; Retour sur acami.com</a></nav>
+<main class="wrap">
+<p class="kicker">Glossaire</p>
+<h1>Qu&#x27;est-ce qu&#x27;un agent superviseur ?</h1>
+<p>Un <b>agent superviseur</b> est un modèle dont le rôle est de décider lequel de plusieurs agents <em>spécialisés</em> doit agir ensuite, plutôt que d'exécuter la tâche lui-même. Ce schéma échange un grand modèle généraliste faisant tout contre plusieurs modèles plus petits et spécialisés, chacun faisant une chose — plus un coordinateur qui décide de l'ordre.</p><p>Pourquoi c'est préférable à un seul modèle qui fait tout : une consigne d'agent écrite pour exactement un métier (rechercher une entreprise, récupérer depuis une base de connaissances, rédiger une proposition) peut être plus courte, plus testable, et plus facile à surveiller qu'une consigne unique et énorme essayant de faire les quatre à la fois — et un modèle plus petit et moins coûteux peut souvent assurer lui-même la décision de routage, réservant le modèle plus grand et plus coûteux à l'étape qui en a réellement besoin.</p><p>Dans ACA, le superviseur tourne sur un petit modèle à 8 milliards de paramètres et choisit l'agent suivant — enrichissement, récupération de connaissances, ou rédaction — à partir de ce qui a déjà été fait, en ajoutant son raisonnement à un journal visible qu'une personne peut lire avant de valider quoi que ce soit. L'étape de rédaction elle-même tourne sur un modèle plus grand à 70 milliards de paramètres, réservé à la seule tâche qui en a réellement besoin. Chaque agent rend la main au superviseur une fois terminé, sauf l'agent de rédaction, qui passe toujours ensuite à une étape d'auto-critique — la seule arête du graphe qui est fixe plutôt que décidée, car la rédaction est délibérément toujours le dernier agent à s'exécuter.</p>
+<div class="verified">Le niveau de modèle du superviseur, ses garde-fous, et l'arête fixe rédaction-vers-réflexion sont tous directement lisibles dans le graphe compilé et couverts par les tests de topologie du graphe du projet.</div>
+<p class="sources">Sources : <code>aca/core/app.py</code>, <code>aca/core/graph_topology.py</code><br>Mis à jour : 2026-08-08</p>
+<p><a href="../seo/glossary-supervisor-agent.html">English version</a></p>
+</main>
+<footer>acami — Agence IA. <a href="../legal.html#privacy">Confidentialité</a> &middot; <a href="../legal.html#terms">Conditions</a></footer>
+</body>
+</html>

@@ -92,6 +92,10 @@ TRANSLATIONS = {
     "footer.deployed_for": {"fr": "déployé pour {company}", "en": "deployed for {company}"},
     "footer.human_validation": {"fr": "validation humaine obligatoire avant toute écriture CRM",
                                 "en": "human validation required before any CRM write"},
+    # §28 — signature de l'agence. « installé par » et non « propulsé par » : ce qui a été vendu est
+    # une installation, pas une licence, et le pied de page ne doit pas raconter autre chose que le
+    # contrat (cf. docs/BRAND.md, positionnement).
+    "footer.installed_by": {"fr": "installé par", "en": "installed by"},
     "lang.switch_label": {"fr": "Langue", "en": "Language"},
 
     # ── Connexion (aca/ui/shared.py) ────────────────────────────────────────────────────────

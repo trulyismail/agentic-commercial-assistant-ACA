@@ -3152,3 +3152,98 @@ rastérisation dû à la suppression d'une couche de composition, pas la texture
 **Non vérifié :** rien sur un vrai téléphone ; le mode sombre et les 18 préréglages ne sont vérifiés
 que par calcul ; `mask-image` reste un détail d'implémentation navigateur, contrôlé sur
 Chromium/Windows uniquement.
+
+---
+
+## 2026-08-08 — §28 : le site vendait le logiciel, alors que l'entreprise vend une prestation
+
+**Le point de départ n'était pas une demande de code.** La question était : « une agence IA ou un
+SaaS ? » La réponse — **une agence** — se lit directement dans le dépôt : 0 € de licence, déploiement
+sur l'infrastructure du client, clés d'API qui restent les siennes, prix devisé après un appel. Et
+c'est en la formulant qu'apparaît le vrai défaut : **la page de vente portait le nom du produit, pas
+celui de l'entreprise.** Le `<title>` disait « ACA — Agentic Commercial Assistant » et le bloc
+Organization nommait ACA ; la page argumentait donc « achetez ce logiciel » pendant que le texte
+juste en dessous argumentait « faites-nous l'installer ».
+
+**L'architecture retenue avec l'utilisateur** tient en trois couches, et règle au passage le problème
+de deux acronymes séparés par une seule lettre :
+
+| Couche | Nom | Rôle |
+|---|---|---|
+| Entité commerciale | **acami** | ce qu'on signe, ce qu'on dépose, ce qu'on référence |
+| Moteur | **ACAM** | le framework multi-agents |
+| Système déployé | **ACA** | ce qui tourne chez le client |
+
+`acami` s'écrit toujours en minuscules : c'est le seul signal typographique qui le distingue des deux
+acronymes posés à côté de lui sur la même page.
+
+### Ce que la passe a livré
+
+Un système de logo **généré** (`scripts/build_brand_assets.py` → 4 SVG + 3 PNG, identiques octet
+pour octet d'une exécution à l'autre, donc contrôlables en CI comme `graph.dot`) ; quatre documents
+(`BRAND.md`, `BRAND_GUIDELINES.md`, `MARKETING.md`, `AGENCY_VS_SAAS.md`) ; une couche de jetons
+`AGENCY_*` dans `branding.py`, câblée au pied de page, à l'écran de connexion et à un panneau de
+réglages ; et une refonte substantielle des pages juridiques. Suite : 805 → **829 tests au vert**,
+aucun nouvel échec.
+
+### Six choses trouvées plutôt que construites
+
+Cinq relèvent de la forme récurrente de ce projet — des pannes qui ne lèvent rien :
+
+1. **Le SVG de la marque n'était pas du XML valide.** Deux tirets consécutifs dans un commentaire
+   XML rendent le fichier mal formé. Un navigateur l'affiche quand même, ce qui est exactement ce
+   qui laisse la faute passer — et la première correction l'a **réintroduite** en citant la paire de
+   caractères.
+2. **Un point de contrôle de Bézier écrit à la main était faux** (84,32 au lieu de 86,32). Une
+   courbe fausse ne lève rien, ne casse aucun test et se voit à peine : les huit points se calculent
+   désormais à partir de trois nombres, et les SVG sont devenus des artefacts dérivés.
+3. **La page de vente se contredisait sur ses propres prix.** Deux commentaires affirmaient que les
+   chiffres avaient été « retirés plutôt que devinés » et qu'ils étaient « encore des marqueurs »,
+   pendant que les cartes affichaient 0 / 1 490 / 8 900 / 290 €.
+4. **Passer la page juridique en français supprimait tous les marqueurs `[TO COMPLETE]`.** Ils
+   vivaient dans des éléments dont la chaîne `data-fr` ne les contenait pas : une fois la vraie
+   raison sociale renseignée, la version française aurait affiché une politique de confidentialité
+   ne nommant **aucun** responsable de traitement. Corrigé par un seul objet `ENTITY`, les deux
+   langues portant le marqueur, vérifié 9 sur 9.
+5. **La politique confondait deux responsables de traitement.** Elle était écrite comme si
+   l'entreprise cliente parlait, sur une page servie par acami — et affirmait « aucun cookie de
+   suivi, tout vient de l'e-mail que vous nous envoyez » deux paragraphes sous un tableau listant le
+   cadre Cal.com et Web3Forms.
+6. **Les transferts hors UE étaient absents.** Groq, HubSpot et Web3Forms sont américains et acami
+   opère depuis la Tunisie, pays sans décision d'adéquation : c'était la lacune juridique la plus
+   sérieuse du document.
+
+### Une découverte qui n'appartient pas à cette passe
+
+`tests/test_branding.py` porte **117 lignes non commitées** d'une passe **§27 « bordures lisibles »**
+commencée et jamais terminée : des tests pour `readable_border_on()`, `BORDER_MIN_CONTRAST`, une
+séparation `--aca-border-soft`/`--aca-border`, un sélecteur de carte corrigé pour Streamlit 1.59 et
+un garde-fou DOMPurify — **dont rien n'est implémenté**. Ces 29 échecs sont antérieurs à la session
+(vérifié contre HEAD). La passe ne les a délibérément pas absorbés : les terminer suppose de changer
+`BRAND_BORDER` sur les 19 palettes livrées, ce qui est une décision de design à part entière. C'est
+aussi pourquoi cette passe est numérotée §28 et non §27.
+
+**L'ensemble pSEO a lui aussi été livré** : `scripts/build_seo_pages.py` génère
+`static/fr/index.html` (la page de vente réellement rendue en français), 10 pages pSEO (4
+intégrations, 3 comparaisons, 3 entrées de glossaire, chacune dans les deux langues = 20 fichiers)
+depuis `static/seo/pages.json`, plus `robots.txt`/`sitemap.xml`. La page française est le seul
+endroit où cette passe a touché le RENDU du fichier phare `landing.html`, ce qui en a fait la partie
+construite le plus prudemment : un `html.parser.HTMLParser` de la bibliothèque standard repère les
+bornes exactes de chaque élément `[data-fr]` de premier niveau dans le texte source brut (en
+reproduisant la règle du script de bascule lui-même — un élément imbriqué dans un autre élément
+`data-fr` devient inerte) et substitue le texte français par découpage direct, sans jamais
+reconstruire le document depuis un arbre analysé. `lxml` était disponible et délibérément **non
+utilisé** : présent seulement comme dépendance transitive de `python-docx`, l'utiliser directement
+aurait reproduit exactement le piège que `totp.py` documente pour `cryptography`. Vérifié plutôt que
+supposé : les blocs `<style>` et `<script>` sont confirmés identiques octet pour octet entre les
+versions anglaise et française, le diff (235 lignes) ne touche que le contenu textuel plus
+`lang`/`title`/meta/`aria-pressed`, et la génération est idempotente (24 fichiers, identiques sur
+deux exécutions).
+
+**Non fait, et dit :** rien de tout cela ne peut être référencé sans domaine, et aucun n'existe —
+les URL canoniques, `sitemap.xml` et `robots.txt` pointent tous vers le nom réservé
+`acami.example` ; la police d'origine du mot-symbole reste inconnue ; aucune recherche d'antériorité
+(INPI / INNORPI) n'a été faite ; la réorganisation des cartes de prix pour l'ancrage a été identifiée
+et volontairement laissée de côté ; et aucun navigateur n'était disponible cette session, donc
+chaque page a été vérifiée par analyse (XML / JS / JSON-LD / équilibrage HTML) et rastérisation
+PyMuPDF plutôt que sur un DOM rendu.

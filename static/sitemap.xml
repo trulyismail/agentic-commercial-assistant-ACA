@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://acami.example/</loc></url>
+  <url><loc>https://acami.example/fr/</loc></url>
+  <url><loc>https://acami.example/legal.html</loc></url>
+  <url><loc>https://acami.example/seo/gmail-integration.html</loc></url>
+  <url><loc>https://acami.example/seo/gmail-integration.fr.html</loc></url>
+  <url><loc>https://acami.example/seo/hubspot-integration.html</loc></url>
+  <url><loc>https://acami.example/seo/hubspot-integration.fr.html</loc></url>
+  <url><loc>https://acami.example/seo/slack-integration.html</loc></url>
+  <url><loc>https://acami.example/seo/slack-integration.fr.html</loc></url>
+  <url><loc>https://acami.example/seo/n8n-integration.html</loc></url>
+  <url><loc>https://acami.example/seo/n8n-integration.fr.html</loc></url>
+  <url><loc>https://acami.example/seo/vs-zapier-make.html</loc></url>
+  <url><loc>https://acami.example/seo/vs-zapier-make.fr.html</loc></url>
+  <url><loc>https://acami.example/seo/vs-rag-chatbot.html</loc></url>
+  <url><loc>https://acami.example/seo/vs-rag-chatbot.fr.html</loc></url>
+  <url><loc>https://acami.example/seo/vs-hiring-sdr.html</loc></url>
+  <url><loc>https://acami.example/seo/vs-hiring-sdr.fr.html</loc></url>
+  <url><loc>https://acami.example/seo/glossary-human-in-the-loop.html</loc></url>
+  <url><loc>https://acami.example/seo/glossary-human-in-the-loop.fr.html</loc></url>
+  <url><loc>https://acami.example/seo/glossary-agentic-workflow.html</loc></url>
+  <url><loc>https://acami.example/seo/glossary-agentic-workflow.fr.html</loc></url>
+  <url><loc>https://acami.example/seo/glossary-supervisor-agent.html</loc></url>
+  <url><loc>https://acami.example/seo/glossary-supervisor-agent.fr.html</loc></url>
+</urlset>

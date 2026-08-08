@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACA + Slack — validate a lead without opening a browser</title>
+<meta name="description" content="ACA posts an approval card with real Valider/Rejeter buttons to Slack. A click is HMAC-verified and resumes the graph — the whole validation loop can happen inside Slack.">
+<link rel="canonical" href="https://acami.example/seo/slack-integration.html">
+<style>
+:root{--paper:#fdfdfd;--ink:#12171c;--ink-2:#4b5560;--ink-3:#636363;--rule:#e3e3e3;
+--primary:#125e6b;--accent:#b4622a;--radius:10px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+font-family:Figtree,Inter,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+line-height:1.6}
+.wrap{max-width:760px;margin:0 auto;padding:48px 24px 96px}
+nav{border-bottom:1px solid var(--rule);padding:16px 24px}
+nav a{color:var(--ink);text-decoration:none;font-weight:600;font-size:.9rem}
+nav a.back{color:var(--ink-2);font-weight:500;float:right}
+h1{font-family:'Instrument Serif',Georgia,serif;font-size:2.1rem;line-height:1.15;margin:.4em 0 .3em}
+h2{font-size:1.2rem;margin-top:2.2em}
+.kicker{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.72rem;letter-spacing:.08em;
+text-transform:uppercase;color:var(--primary)}
+.lede{color:var(--ink-2);font-size:1.05rem;max-width:60ch}
+p{max-width:68ch}
+code{background:#f1f4f5;padding:.1em .35em;border-radius:4px;font-size:.9em}
+ol,ul{max-width:66ch;padding-left:1.3em}
+li{margin-bottom:.6em}
+table{border-collapse:collapse;width:100%;margin:1.4em 0;font-size:.92rem}
+th,td{border:1px solid var(--rule);padding:.55em .7em;text-align:left;vertical-align:top}
+th{background:#f6f8f8;font-weight:600}
+.verified{border-left:3px solid var(--primary);padding:.2em 0 .2em 1em;margin:2em 0;
+color:var(--ink-2);font-size:.92rem}
+.verified.live{border-left-color:var(--accent)}
+.sources{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.78rem;color:var(--ink-3)}
+.sources a{color:inherit}
+footer{border-top:1px solid var(--rule);padding:32px 24px;text-align:center;
+color:var(--ink-3);font-size:.82rem}
+footer a{color:inherit}
+</style>
+</head>
+<body>
+<nav><a href="../landing.html">acami</a><a class="back" href="../landing.html">&larr; Back to acami.com</a></nav>
+<main class="wrap">
+<p class="kicker">Integration</p>
+<h1>ACA + Slack — validate a lead without opening a browser</h1>
+<p class="lede">A sales team that already lives in Slack should not have to open a separate tool to approve a lead. ACA's Slack alert is not a notification with a link back to the app — it carries real interactive buttons (Block Kit), and clicking one resumes the paused analysis directly.</p>
+<h2>How it works</h2><ol><li><b>send_approval()</b> posts the analysis summary with "✅ Valider"/"✕ Rejeter" buttons, the lead's <code>thread_id</code> carried in the button's value.</li><li>A click POSTs to <code>/slack/interactions</code>, which verifies Slack's HMAC-SHA256 request signature — the endpoint <b>fails closed</b> (503) if the signing secret is not configured, rather than accepting an unverified click.</li><li>The same <code>_do_validate</code>/<code>_do_reject</code> helpers back both this endpoint and the REST API, so a Slack approval and a dashboard approval write identically to the audit log and the CRM.</li><li>If Slack is not configured, the alert falls back to a plain e-mail — buttonless, but the human gate still fires.</li></ol>
+<div class="verified">The Slack alert itself is live-verified (a real message delivered to a real workspace channel). The interactive-button callback loop is covered by 36 automated tests building genuinely HMAC-signed requests — approve, reject, bad signature, unconfigured secret — but has not been exercised against a real Slack app's Interactivity feature, which needs a public HTTPS endpoint this project does not currently have.</div>
+<p class="sources">Sources : <code>aca/integrations/notify.py</code>, <code>aca/core/slack_verify.py</code>, <code>aca/api.py</code><br>Updated : 2026-08-08</p>
+<p><a href="../seo/slack-integration.fr.html">Version française</a></p>
+</main>
+<footer>acami — AI agency. <a href="../legal.html#privacy">Privacy</a> &middot; <a href="../legal.html#terms">Terms</a></footer>
+</body>
+</html>

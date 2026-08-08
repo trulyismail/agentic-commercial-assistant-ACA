@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACA + n8n — l&#x27;orchestrateur ne remplace pas le jugement</title>
+<meta name="description" content="ACA expose 5 événements webhook sortants et une API REST conçue spécifiquement pour n8n — pièces jointes, reprises idempotentes, un mode asynchrone et une sonde /health. n8n branche ACA sur ce que vous utilisez déjà ; il n&#x27;ajoute pas le raisonnement.">
+<link rel="canonical" href="https://acami.example/seo/n8n-integration.fr.html">
+<style>
+:root{--paper:#fdfdfd;--ink:#12171c;--ink-2:#4b5560;--ink-3:#636363;--rule:#e3e3e3;
+--primary:#125e6b;--accent:#b4622a;--radius:10px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+font-family:Figtree,Inter,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+line-height:1.6}
+.wrap{max-width:760px;margin:0 auto;padding:48px 24px 96px}
+nav{border-bottom:1px solid var(--rule);padding:16px 24px}
+nav a{color:var(--ink);text-decoration:none;font-weight:600;font-size:.9rem}
+nav a.back{color:var(--ink-2);font-weight:500;float:right}
+h1{font-family:'Instrument Serif',Georgia,serif;font-size:2.1rem;line-height:1.15;margin:.4em 0 .3em}
+h2{font-size:1.2rem;margin-top:2.2em}
+.kicker{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.72rem;letter-spacing:.08em;
+text-transform:uppercase;color:var(--primary)}
+.lede{color:var(--ink-2);font-size:1.05rem;max-width:60ch}
+p{max-width:68ch}
+code{background:#f1f4f5;padding:.1em .35em;border-radius:4px;font-size:.9em}
+ol,ul{max-width:66ch;padding-left:1.3em}
+li{margin-bottom:.6em}
+table{border-collapse:collapse;width:100%;margin:1.4em 0;font-size:.92rem}
+th,td{border:1px solid var(--rule);padding:.55em .7em;text-align:left;vertical-align:top}
+th{background:#f6f8f8;font-weight:600}
+.verified{border-left:3px solid var(--primary);padding:.2em 0 .2em 1em;margin:2em 0;
+color:var(--ink-2);font-size:.92rem}
+.verified.live{border-left-color:var(--accent)}
+.sources{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.78rem;color:var(--ink-3)}
+.sources a{color:inherit}
+footer{border-top:1px solid var(--rule);padding:32px 24px;text-align:center;
+color:var(--ink-3);font-size:.82rem}
+footer a{color:inherit}
+</style>
+</head>
+<body>
+<nav><a href="../fr/index.html">acami</a><a class="back" href="../fr/index.html">&larr; Retour sur acami.com</a></nav>
+<main class="wrap">
+<p class="kicker">Intégration</p>
+<h1>ACA + n8n — l&#x27;orchestrateur ne remplace pas le jugement</h1>
+<p class="lede">Une confusion fréquente, dite ici clairement car elle détermine comment évaluer cette intégration : n8n ne rend pas ACA automatique — ACA est déjà autonome jusqu'à la pause de validation, seul, via un scrutateur en arrière-plan et un planificateur. Ce que n8n ajoute, c'est le <em>câblage</em> : relier les événements d'ACA à tout ce qu'une équipe utilise déjà, sans réimplémenter le raisonnement d'ACA dans un canevas de workflow.</p>
+<h2>Comment ça marche</h2><ol><li>Cinq événements sortants signés (<code>analysis.paused</code>, <code>analysis.clarification</code>, <code>analysis.routed</code>, <code>lead.validated</code>, <code>lead.rejected</code>) — un workflow n8n devient piloté par événement plutôt qu'en sondage via un nœud Schedule.</li><li>Les pièces jointes sont acceptées directement via l'API (base64, plafonnées à 10 fichiers / 20 Mo décodés), pour qu'un appel d'offres multi-documents atteigne le même graphe que n8n déclenche que via l'interface manuelle.</li><li>Un <code>thread_id</code> déjà connu renvoie l'analyse existante avec <code>already_exists: true</code> — le comportement de reprise par défaut du nœud HTTP de n8n ne peut donc pas déclencher une analyse en double (deux appels à un modèle 70B) ni une notification en double à l'équipe.</li><li><code>GET /health</code> n'effectue aucun appel externe et ne révèle aucun secret — un orchestrateur peut le sonder toutes les quelques secondes sans consommer de quota d'API.</li></ol>
+<div class="verified">Chaque mécanisme ci-dessus est couvert par des tests automatisés (limites des pièces jointes rejetées avant même l'appel au LLM, idempotence, mode asynchrone, chaque webhook déclenché au bon moment). Non testé contre une vraie instance ou un vrai workflow n8n — aucun n'existe pour ce projet ; n8n serait simplement un client HTTP et un abonné aux webhooks de cette API.</div>
+<p class="sources">Sources : <code>aca/api.py</code>, <code>aca/integrations/webhook.py</code>, <code>n8n/README.md</code><br>Mis à jour : 2026-08-08</p>
+<p><a href="../seo/n8n-integration.html">English version</a></p>
+</main>
+<footer>acami — Agence IA. <a href="../legal.html#privacy">Confidentialité</a> &middot; <a href="../legal.html#terms">Conditions</a></footer>
+</body>
+</html>

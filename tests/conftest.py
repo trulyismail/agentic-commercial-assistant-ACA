@@ -87,6 +87,14 @@ _ENV_OVERRIDES = {
     # travail planifié `report` écrit un PDF sur disque, et une exécution de la suite ne doit pas
     # déposer de document dans `data/reports/` — ni, pire, en écraser un vrai.
     "ACA_REPORT_DIR": os.path.join(_TMP_DIR, "reports"),
+    # §29 — le même piège que `ACA_WEBHOOK_URL` ci-dessus, sous une autre forme : `branding.py` lit
+    # `BRAND_NAME` dynamiquement depuis l'environnement (jamais figé à l'import, par contrat), donc
+    # une vraie personnalisation posée dans le `.env` réel de la machine de développement (ici,
+    # `BRAND_NAME=acami`, §29) fuiterait dans `branding.resolve()` dès qu'un module `aca.*` important
+    # `load_dotenv()` (app.py, sheets.py...) s'exécute pendant la suite — faisant échouer
+    # `test_customised_tokens_ne_liste_que_les_ecarts` selon l'ORDRE de collecte des tests, un défaut
+    # découvert précisément ainsi (passait isolé, échouait dans la suite complète).
+    "BRAND_NAME": "",
 }
 os.environ.update(_ENV_OVERRIDES)
 

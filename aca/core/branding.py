@@ -39,6 +39,7 @@ import colorsys
 import os
 import re
 from functools import lru_cache
+from pathlib import Path
 from urllib.parse import quote
 
 # ── Jetons de marque ──────────────────────────────────────────────────────────────────────────
@@ -401,6 +402,103 @@ LOGO_MIME_TYPES = {
 
 DEFAULT_LOGO_ICON = ":material/smart_toy:"
 
+# §29 — répertoire des artefacts générés par `scripts/build_brand_assets.py`. Utilisé UNIQUEMENT en
+# repli, quand aucun client n'a téléversé son propre logo : avant, ce repli était l'icône Material
+# générique ci-dessus, visible dans l'onglet du navigateur et la barre latérale de CETTE installation
+# tant que personne ne l'a personnalisée — soit exactement le cas de l'instance de démonstration
+# d'acami elle-même. `parent.parent.parent` : ce fichier est `aca/core/branding.py`, donc trois
+# niveaux remontent à la racine du dépôt, là où vit `static/`.
+_BRAND_ASSET_DIR = Path(__file__).resolve().parent.parent.parent / "static" / "brand"
+
+
+@lru_cache(maxsize=1)
+def _default_favicon_bytes():
+    """
+    Octets PNG de l'étoile acami (favicon rond), ou `None` si le fichier est absent.
+
+    PNG et non SVG, pour la même raison que documentée sur `favicon_for_streamlit` plus bas :
+    `st.image` ne rend pas les SVG de façon fiable comme icône d'onglet.
+    """
+    try:
+        return (_BRAND_ASSET_DIR / "acami-favicon-32.png").read_bytes()
+    except OSError:
+        return None
+
+
+@lru_cache(maxsize=2)
+def _default_lockup_bytes(dark: bool):
+    """
+    Octets PNG (fond transparent) du mot-symbole acami (étoile + « acami » dessiné), clair ou sombre.
+
+    §29 — CORRECTION : cette fonction rendait d'abord les octets `.svg`, et `st.logo()` les rejette
+    avec `StreamlitAPIException` (« The image passed to st.logo is invalid ») — confirmé en
+    interrogeant directement `image_utils.image_to_url()`, qui lève `UnidentifiedImageError` sur un
+    SVG brut. `st.logo()`/`st.set_page_config(page_icon=…)` ouvrent l'image reçue via PIL en
+    interne pour la réencoder ; PIL ne sait pas ouvrir un SVG. C'est la MÊME contrainte que
+    `favicon_for_streamlit` documente déjà plus bas — simplement oubliée ici lors du premier câblage
+    du repli. Un `<img src="…">` injecté par `st.html()` (`hero_html`, `agency_mark_html`) n'a pas
+    cette contrainte : c'est le navigateur qui charge l'image, jamais le code Python de Streamlit.
+    """
+    name = "acami-lockup-dark.png" if dark else "acami-lockup.png"
+    try:
+        return (_BRAND_ASSET_DIR / name).read_bytes()
+    except OSError:
+        return None
+
+
+def _default_logo_bytes(tokens: dict):
+    """
+    Repli de `logo_for_streamlit` : le mot-symbole acami plutôt que l'icône Material générique.
+
+    Choisit le tracé clair ou sombre selon la luminance de `BRAND_SIDEBAR` — le mot-symbole est une
+    encre fixe (pas de `currentColor`, cf. `build_brand_assets.py`), donc l'encre sombre par défaut
+    deviendrait illisible sur une barre latérale sombre si rien ne s'adaptait.
+    """
+    sidebar = tokens.get("BRAND_SIDEBAR") or ""
+    dark_bg = is_valid_hex(sidebar) and relative_luminance(sidebar) < 0.45
+    return _default_lockup_bytes(dark_bg) or DEFAULT_LOGO_ICON
+
+
+# ── Identité de l'agence (§28) ────────────────────────────────────────────────────────────────
+# Table VOLONTAIREMENT SÉPARÉE de `TOKENS`, et la séparation est toute la raison d'être du bloc.
+#
+#   `BRAND_*`  décrit le CLIENT. Il change à chaque tenant, le client l'édite lui-même depuis
+#              « Apparence », et il couvre l'interface entière.
+#   `AGENCY_*` décrit acami, qui a installé l'outil. Réglé une fois, il doit survivre à un client
+#              qui reprend toute la charte, et il ne couvre qu'une mention discrète en pied de page.
+#
+# Les fusionner laisserait un client effacer la signature du prestataire en changeant simplement de
+# préréglage — c'est-à-dire reproduire sur l'identité le défaut exact que `signal_separation()` a été
+# écrit pour rattraper sur la couleur : un réglage d'apparence qui emporte avec lui, sans le dire,
+# quelque chose qui n'était pas de l'apparence.
+#
+# Trois couches de noms cohabitent, et elles ne s'écrivent pas pareil (cf. docs/BRAND.md §1) :
+#   acami   l'entité commerciale — toujours en minuscules, y compris en début de phrase ;
+#   ACAM    le moteur multi-agents ;
+#   ACA     le système déployé chez le client.
+AGENCY_TOKENS = {
+    "AGENCY_NAME": {
+        "label": "Nom de l'agence", "kind": KIND_TEXT, "group": "Agence",
+        "default": "acami",
+        "help": "Affiché en pied de page et sur l'écran de connexion. En minuscules : c'est ce qui "
+                "le distingue des acronymes techniques ACA et ACAM.",
+    },
+    "AGENCY_URL": {
+        "label": "Site de l'agence", "kind": KIND_TEXT, "group": "Agence", "default": "",
+        "help": "Vide = la mention s'affiche sans lien. Aucun domaine n'est encore déposé.",
+    },
+    "AGENCY_LOGO": {
+        "label": "Logo de l'agence", "kind": KIND_IMAGE, "group": "Agence", "default": "",
+        "help": "Vide = la marque acami intégrée. Même plafond de 512 Ko que le logo client.",
+    },
+    "AGENCY_SHOW": {
+        "label": "Afficher la mention", "kind": KIND_CHOICE, "group": "Agence",
+        "default": "oui", "choices": ["oui", "non"],
+        "help": "« non » retire complètement la signature de l'agence. Prévu pour un client dont le "
+                "cahier des charges interdit la mention d'un prestataire.",
+    },
+}
+
 _HEX_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 
 
@@ -642,6 +740,119 @@ def customised_tokens(tokens: dict) -> dict:
     return {key: value for key, value in tokens.items() if reference.get(key) != value}
 
 
+# ── Identité de l'agence : résolution et rendu (§28) ──────────────────────────────────────────
+def resolve_agency(overrides: dict = None) -> dict:
+    """
+    Valeur effective de chaque jeton `AGENCY_*`, par ordre de priorité décroissant :
+    `overrides` → `config_store` → variable d'environnement → défaut du jeton.
+
+    Volontairement PLUS COURT que `resolve()` : ni préréglage, ni défauts de mode sombre. Un
+    préréglage est une palette proposée au client ; la signature de l'agence n'a pas à en dépendre,
+    et c'est exactement ce qu'on cherche à empêcher (cf. le commentaire sur `AGENCY_TOKENS`).
+    """
+    overrides = {k: v for k, v in (overrides or {}).items() if v not in (None, "")}
+    stored = _stored_settings()
+
+    resolved = {}
+    for key, spec in AGENCY_TOKENS.items():
+        value = overrides.get(key) or stored.get(key) or os.getenv(key) or spec["default"]
+        resolved[key] = value
+    return resolved
+
+
+def agency_enabled(tokens: dict) -> bool:
+    """Vrai si la mention doit être rendue. Tolérant sur la valeur, faux uniquement sur un « non »."""
+    return str(tokens.get("AGENCY_SHOW", "oui")).strip().lower() not in ("non", "no", "0", "false")
+
+
+@lru_cache(maxsize=None)
+def _brand_png_data_uri(filename: str) -> str:
+    """
+    URI `data:image/png;base64,…` d'un PNG de `static/brand/`, mise en cache — vide si absent.
+
+    §29 — CORRECTION D'UNE PREMIÈRE CORRECTION. La version précédente injectait un `<svg>` EN LIGNE
+    dans le HTML envoyé par `st.html()` (`agency_mark_svg()`/`agency_lockup_svg()`, supprimées).
+    Streamlit « sanitize[s] HTML with DOMPurify » CÔTÉ NAVIGATEUR — sa propre documentation le dit
+    explicitement — et le profil par défaut de DOMPurify élimine l'espace de noms SVG. Le message
+    envoyé restait syntaxiquement correct, donc INVISIBLE pour un test Python type `AppTest` (qui
+    n'inspecte que le proto envoyé, jamais le DOM après sanitisation par le navigateur) — ce qui a
+    fait passer cette régression une première fois. Elle n'a été trouvée qu'en regardant une vraie
+    capture d'écran de navigateur : le titre et la mention de pied de page rendaient une balise
+    vide. `<img src="data:…">` n'a pas ce problème : DOMPurify autorise `img[src]`, le mécanisme
+    déjà utilisé pour un logo client personnalisé (`aca-agency__glyph`, plus bas).
+    """
+    import base64
+
+    try:
+        data = (_BRAND_ASSET_DIR / filename).read_bytes()
+    except OSError:
+        return ""
+    return f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def _brand_mark_uri(tokens: dict, kind: str, background_key: str) -> str:
+    """
+    URI de données du PNG « mark » (étoile seule) ou « lockup » (étoile + mot), clair ou sombre
+    selon la luminance du jeton de fond `background_key` — même logique que `_default_logo_bytes`
+    pour la barre latérale, appliquée ici à l'en-tête de marque et au pied de page, qui ne
+    s'affichent pas nécessairement sur le même fond que la barre latérale.
+    """
+    background = tokens.get(background_key) or ""
+    dark_bg = is_valid_hex(background) and relative_luminance(background) < 0.45
+    suffix = "-dark" if dark_bg else ""
+    return _brand_png_data_uri(f"acami-{kind}{suffix}.png")
+
+
+def agency_mark_html(tokens: dict, prefix: str = "") -> str:
+    """
+    Mention « installé par <agence> », prête à être injectée.
+
+    Renvoie une chaîne VIDE si la mention est désactivée : l'appelant peut concaténer sans tester,
+    et un client qui a coupé la signature n'obtient pas un séparateur orphelin en pied de page.
+
+    Tout ce qui vient d'un réglage passe par `escape` — ces valeurs sont saisies dans un formulaire
+    d'administration, donc du contenu non fiable au sens de `prompt_guard.py`, même si la personne
+    qui les saisit est de confiance.
+    """
+    from html import escape
+
+    if not agency_enabled(tokens):
+        return ""
+
+    name = escape((tokens.get("AGENCY_NAME") or "").strip())
+    if not name:
+        return ""
+
+    logo = tokens.get("AGENCY_LOGO") or ""
+    label = f'{escape(prefix)} ' if prefix else ""
+
+    if logo.startswith("data:"):
+        # Un revendeur en marque blanche a téléversé SON logo : on ne connaît pas son tracé, donc
+        # icône fournie + nom tapé, comme avant.
+        glyph = f'<img src="{escape(logo)}" alt="" class="aca-agency__glyph">'
+        inner = f'{glyph}<span class="aca-agency__name">{name}</span>'
+    elif (tokens.get("AGENCY_NAME") or "").strip().lower() == "acami":
+        # §29 — le cas par défaut (aucun revendeur n'a remplacé la mention) : « acami » dans son
+        # tracé réel plutôt que reconstruit en icône + texte système.
+        uri = _brand_mark_uri(tokens, "lockup", "BRAND_BACKGROUND")
+        inner = (f'<img src="{uri}" alt="acami" class="aca-agency__glyph" '
+                 f'style="width:auto; height:16px;">' if uri
+                 else f'<span class="aca-agency__name">{name}</span>')
+    else:
+        uri = _brand_mark_uri(tokens, "mark", "BRAND_BACKGROUND")
+        glyph = (f'<img src="{uri}" alt="" class="aca-agency__glyph">' if uri else "")
+        inner = f'{glyph}<span class="aca-agency__name">{name}</span>'
+
+    url = (tokens.get("AGENCY_URL") or "").strip()
+    # Seuls http(s) sont acceptés : un réglage contenant « javascript: » deviendrait un lien
+    # exécutable sur toutes les pages de l'application.
+    if url.lower().startswith(("http://", "https://")):
+        inner = (f'<a class="aca-agency__link" href="{escape(url)}" target="_blank" '
+                 f'rel="noopener noreferrer">{inner}</a>')
+
+    return f'<span class="aca-agency">{label}{inner}</span>'
+
+
 # ── Logo ──────────────────────────────────────────────────────────────────────────────────────
 class LogoRejected(ValueError):
     """Levée par `encode_logo` sur un format non géré, un fichier vide ou trop lourd."""
@@ -693,8 +904,14 @@ def decode_logo(data_uri: str):
 
 
 def logo_for_streamlit(tokens: dict):
-    """Valeur à passer à `st.logo()` : octets du logo si configuré, icône Material sinon."""
-    return decode_logo(tokens.get("BRAND_LOGO")) or DEFAULT_LOGO_ICON
+    """
+    Valeur à passer à `st.logo()` : octets du logo client si configuré, sinon le mot-symbole acami.
+
+    §29 — le repli n'est plus l'icône Material générique : tant qu'aucun client n'a téléversé son
+    propre logo (le cas de cette installation elle-même), la barre latérale doit porter la marque
+    réelle d'acami plutôt qu'un robot générique qui ne veut rien dire.
+    """
+    return decode_logo(tokens.get("BRAND_LOGO")) or _default_logo_bytes(tokens)
 
 
 def favicon_for_streamlit(tokens: dict):
@@ -709,10 +926,14 @@ def favicon_for_streamlit(tokens: dict):
     Les SVG sont volontairement écartés : `st.image` ne les rend pas de façon fiable comme favicon,
     et un onglet vide serait pire que l'icône par défaut. Le SVG reste parfaitement utilisable comme
     logo dans la barre latérale.
+
+    §29 — même repli qu'au-dessus : à défaut d'un logo client, l'onglet porte le disque rond
+    d'acami (`_default_favicon_bytes`, un PNG — donc compatible avec la restriction ci-dessus) plutôt
+    que l'icône Material générique.
     """
     if (tokens.get("BRAND_LOGO") or "").startswith("data:image/svg"):
-        return DEFAULT_LOGO_ICON
-    return decode_logo(tokens.get("BRAND_LOGO")) or DEFAULT_LOGO_ICON
+        return _default_favicon_bytes() or DEFAULT_LOGO_ICON
+    return decode_logo(tokens.get("BRAND_LOGO")) or _default_favicon_bytes() or DEFAULT_LOGO_ICON
 
 
 # ── Feuille de style ──────────────────────────────────────────────────────────────────────────
@@ -1715,6 +1936,15 @@ _COMPONENTS = """
 .aca-pulse { position: relative; display: inline-flex; width: 9px; height: 9px; border-radius: 50%; background: var(--aca-primary); }
 .aca-pulse::after { content: ""; position: absolute; inset: -5px; border-radius: 50%; background: rgba(var(--aca-primary-rgb), .35); }
 .aca-footer { color: var(--aca-muted); font-size: .78rem; text-align: center; padding: 1.4rem 0 .4rem; border-top: 1px solid var(--aca-border); margin-top: 1.6rem; }
+/* Signature de l'agence (§28). Elle emprunte `--aca-muted` et JAMAIS `--aca-accent` : l'ambre veut
+   dire « une personne doit trancher ici », et une signature permanente dans cette couleur viderait
+   le signal partout ailleurs. Volontairement plus discrete que le pied de page qui la contient. */
+.aca-agency { display: inline-flex; align-items: center; gap: .3rem; opacity: .78; }
+.aca-agency__glyph { width: 14px; height: 14px; object-fit: contain; vertical-align: -.12em; }
+.aca-agency__name { font-weight: 600; letter-spacing: .01em; }
+.aca-agency__link { color: inherit; text-decoration: none; display: inline-flex; align-items: center; gap: .3rem; border-bottom: 1px solid transparent; }
+@media (hover: hover) and (pointer: fine) { .aca-agency__link:hover { color: var(--aca-text); border-bottom-color: currentColor; } }
+.aca-agency__link:focus-visible { outline: 2px solid var(--aca-primary); outline-offset: 3px; border-radius: 2px; }
 .aca-swatch-row { display: flex; gap: .4rem; flex-wrap: wrap; margin: .3rem 0 .1rem; }
 .aca-swatch { width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--aca-border); box-shadow: var(--aca-shadow); }
 .aca-chip { display: inline-flex; align-items: center; gap: .3rem; font-size: .74rem; font-weight: 600; padding: .16rem .5rem; border-radius: 999px; border: 1px solid var(--aca-border); background: var(--aca-surface); color: var(--aca-muted); }
@@ -2036,11 +2266,24 @@ def hero_html(tokens: dict, pills=()) -> str:
         for text, kind in pills
     )
     tagline = tokens.get("BRAND_TAGLINE") or ""
+    name = tokens.get("BRAND_NAME", "")
+    # §29 — quand le nom de marque résolu est littéralement « acami » (le défaut, avant toute
+    # personnalisation client — c'est le cas de cette installation elle-même), le titre porte le
+    # mot-symbole RÉEL plutôt que le nom recomposé dans la police système : même distinction que
+    # `agency_mark_html()` plus haut. Un CLIENT dont `BRAND_NAME` a été personnalisé continue de
+    # voir SON nom en texte — jamais une image qu'il n'a pas fournie. `<img src="data:…">`, pas un
+    # `<svg>` en ligne : voir `_brand_png_data_uri` pour la raison (DOMPurify).
+    if name.strip().lower() == "acami":
+        uri = _brand_mark_uri(tokens, "lockup", "BRAND_SURFACE")
+        title_inner = (f'<img src="{uri}" alt="acami" style="height:37px; width:auto; '
+                       f'display:block; margin-bottom:.2rem;">' if uri else escape(name))
+    else:
+        title_inner = escape(name)
     return (
         '<div class="aca-hero">'
         '<div class="aca-hero__orb aca-hero__orb--a"></div>'
         '<div class="aca-hero__orb aca-hero__orb--b"></div>'
-        f'<h1 class="aca-hero__title">{escape(tokens.get("BRAND_NAME", ""))}</h1>'
+        f'<h1 class="aca-hero__title">{title_inner}</h1>'
         + (f'<p class="aca-hero__tagline">{escape(tagline)}</p>' if tagline else "")
         + (f'<div class="aca-hero__pills">{rendered}</div>' if rendered else "")
         + "</div>"

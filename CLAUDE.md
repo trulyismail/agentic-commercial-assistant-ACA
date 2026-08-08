@@ -2275,6 +2275,75 @@ afterward.
   it now would undo the work that made it visible. Still open: the new distributions have never run
   at volume (the demo DB holds ~20 analyses over 11 days — enough to validate chart shape, not
   legibility with hundreds of correspondents), and nothing was checked on a phone.
+- ✅ **Fixed (2026-08-08)** — §28 "acami: the agency brand, its legal pages and its marketing
+  surface". The pass began from a classification question — *is this a SaaS or an AI agency?* — and
+  the answer is the finding: **agency** (zero licence fee, deployment on client infrastructure,
+  client-owned keys, price quoted after a call). That exposed the real defect: **the marketing site
+  branded itself as the product, not the business.** `<title>` was "ACA — Agentic Commercial
+  Assistant" and the Organization JSON-LD named ACA, so the page argued "buy this software" while
+  the copy beneath it argued "hire us to install it". Settled with the user as a three-layer
+  architecture: **acami** the commercial entity (always lowercase — that is what separates the
+  ownable, trademarkable name from the two acronyms), **ACAM** the multi-agent engine, **ACA** the
+  installed framework. Delivered: a generated logo system
+  ([scripts/build_brand_assets.py](scripts/build_brand_assets.py) → 4 SVG + 3 PNG, byte-identical
+  across runs so CI can detect drift exactly as it does for `export_graph.py`);
+  [docs/BRAND.md](docs/BRAND.md), [docs/BRAND_GUIDELINES.md](docs/BRAND_GUIDELINES.md),
+  [docs/MARKETING.md](docs/MARKETING.md), [docs/AGENCY_VS_SAAS.md](docs/AGENCY_VS_SAAS.md); an
+  `AGENCY_*` token layer in [branding.py](aca/core/branding.py) (`resolve_agency`,
+  `agency_mark_html`, `star_path`) wired into `ui.py`'s footer, `aca/ui/shared.py`'s login screen
+  and a new `5_settings.py` panel — kept in a table **separate** from `BRAND_*` precisely so a
+  client re-theming the app cannot erase the maker's mark by accident; and a substantially completed
+  [legal.html](static/legal.html). Suite 805 → **829 passing** (+19 §28 tests, +5 parametrized),
+  zero new failures.
+  **Six things the pass found rather than built**, five of them this project's recurring shape —
+  silent failures no amount of re-reading would catch: (1) **`acami-mark.svg` was not well-formed
+  XML** — two consecutive hyphens inside an XML comment (`--ink-accent`) make the file invalid; a
+  browser renders it anyway, which is exactly what lets the fault survive, and the first attempt at
+  the fix *reintroduced it* by quoting the character pair; (2) **a hand-written Bézier control point
+  was wrong** (84.32 for 86.32) — a wrong curve raises nothing, breaks no test and is barely
+  visible, so the geometry now computes all eight control points from three numbers and the SVGs
+  became generated artifacts; (3) **the landing page contradicted itself about its own prices** —
+  two comments claimed the figures "have been removed rather than guessed at" and "are still
+  placeholders" while the cards rendered 0 / 1 490 / 8 900 / 290 EUR; (4) **switching the legal page
+  to French deleted every `[TO COMPLETE]` marker** — they sat inside elements whose `data-fr` string
+  did not contain them, so French would have dropped the real company name once filled in, leaving a
+  privacy policy naming no controller at all (now one `ENTITY` seam, both languages carrying the
+  span, verified 9-of-9 paired); (5) **the privacy policy confused controller roles** — written as
+  though the deploying client were the controller, on a page served by acami, while claiming "no
+  tracking cookies… solely from the email you send us" two paragraphs below a table listing the
+  Cal.com iframe and Web3Forms; (6) **international transfers were absent entirely** —
+  Groq/HubSpot/Web3Forms are US and acami operates from Tunisia, a non-adequacy country, which made
+  this the policy's most serious legal gap. Also added to the legal pages: cookie/iframe honesty,
+  breach notification, children's data, a DPA offer, AI-output ownership (the client's), EU AI Act
+  positioning (limited-risk under art. 50, explicitly not Annex III), deposit and refund terms,
+  end-of-engagement data return, a monthly-care SLA table, and AUP enforcement steps.
+  **A separate finding, not this pass's work**: `tests/test_branding.py` carries **117 uncommitted
+  lines** from an earlier, unfinished **§27 "readable borders"** pass — tests for
+  `readable_border_on()`, `BORDER_MIN_CONTRAST`, an `--aca-border-soft`/`--aca-border` split, a
+  Streamlit 1.59 card-selector fix and a DOMPurify guard, **none of which is implemented**. Those 29
+  failures pre-date this session (confirmed against HEAD) and this pass deliberately did not absorb
+  them: finishing it means changing `BRAND_BORDER` on all 19 shipped palettes, a design decision of
+  its own. §28 was renumbered from §27 to avoid colliding with it.
+  **The pSEO layer was also delivered**: [scripts/build_seo_pages.py](scripts/build_seo_pages.py)
+  generates `static/fr/index.html` (a genuinely French-rendered landing page — see below), 10
+  pSEO pages (4 integrations, 3 comparisons, 3 glossary entries, each in both languages = 20 files)
+  from [static/seo/pages.json](static/seo/pages.json), plus `robots.txt`/`sitemap.xml`. The French
+  page is the one place this pass touched the flagship `landing.html`'s *rendering*, so it was
+  built deliberately conservatively: a stdlib-only `html.parser.HTMLParser` locates the exact byte
+  offsets of every top-level `[data-fr]` element (mirroring the page's own toggle script, including
+  its rule that a `[data-fr]` element nested inside another one is inert) and splices in the French
+  text — never reconstructing the document from a parsed tree. `lxml` was available and deliberately
+  **not used**: it is present only as a transitive dependency of `python-docx`, and importing it
+  directly would replay the exact trap `totp.py` documents for `cryptography`. Verified rather than
+  assumed: the `<style>` and `<script>` blocks are asserted byte-identical between the English and
+  French files, the 235-entry diff touches only text content plus `lang`/`title`/meta/`aria-pressed`,
+  and the generator is idempotent (24 output files, byte-identical across two runs). **Still open,
+  stated plainly**: none of this can rank without a domain, and none exists — canonical URLs,
+  `sitemap.xml` and `robots.txt` all point at the reserved placeholder `acami.example`; the
+  wordmark's original typeface remains unknown; no trademark search (INPI / INNORPI) has been run;
+  the pricing-card reorder for anchoring was identified and deliberately left alone; and no browser
+  was available this session, so every page was verified by parsing (XML/JS/JSON-LD/HTML balance)
+  and PyMuPDF rasterisation rather than against a live DOM.
 
 
 ## Status vs. the 8-week roadmap

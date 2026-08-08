@@ -35,8 +35,11 @@ BRAND = branding.resolve()
 _LANDING_PAGE = Path(__file__).resolve().parent / "static" / "landing.html"
 
 st.set_page_config(
+    # §29 — l'onglet portait l'icône Material générique quelle que soit la marque configurée :
+    # `favicon_for_streamlit()` existait déjà pour cet usage précis (cf. sa docstring) mais n'était
+    # jamais appelée ici. Corrigé : le logo du client s'il est configuré, sinon le disque acami.
     page_title=BRAND["BRAND_NAME"],
-    page_icon=":material/smart_toy:",
+    page_icon=branding.favicon_for_streamlit(BRAND),
     layout="wide",
 )
 
@@ -440,4 +443,12 @@ _footer_bits = [BRAND["BRAND_NAME"]]
 if BRAND["BRAND_COMPANY"]:
     _footer_bits.append(t("footer.deployed_for", company=BRAND["BRAND_COMPANY"]))
 _footer_bits.append(t("footer.human_validation"))
+
+# §28 — signature de l'agence, en DERNIÈRE position. Le pied de page se lit de gauche à droite dans
+# l'ordre d'importance pour le client : son produit, son entreprise, la garantie que porte le
+# produit, et seulement ensuite qui l'a installé. `agency_mark_html` renvoie une chaîne vide quand
+# la mention est coupée, donc il n'y a rien à tester ici — et surtout aucun séparateur orphelin.
+_agency_mark = branding.agency_mark_html(branding.resolve_agency(), prefix=t("footer.installed_by"))
+if _agency_mark:
+    _footer_bits.append(_agency_mark)
 st.html(f'<div class="aca-footer">{" · ".join(_footer_bits)}</div>')

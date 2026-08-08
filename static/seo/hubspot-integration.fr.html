@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACA + HubSpot — une écriture CRM réelle, derrière une validation humaine</title>
+<meta name="description" content="ACA crée ou met à jour un Contact, un Deal et une Note HubSpot uniquement après qu&#x27;une personne a cliqué Valider. Fonctionne aux côtés de Google Sheets, sans jamais remplacer votre mémoire de leads existante.">
+<link rel="canonical" href="https://acami.example/seo/hubspot-integration.fr.html">
+<style>
+:root{--paper:#fdfdfd;--ink:#12171c;--ink-2:#4b5560;--ink-3:#636363;--rule:#e3e3e3;
+--primary:#125e6b;--accent:#b4622a;--radius:10px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+font-family:Figtree,Inter,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+line-height:1.6}
+.wrap{max-width:760px;margin:0 auto;padding:48px 24px 96px}
+nav{border-bottom:1px solid var(--rule);padding:16px 24px}
+nav a{color:var(--ink);text-decoration:none;font-weight:600;font-size:.9rem}
+nav a.back{color:var(--ink-2);font-weight:500;float:right}
+h1{font-family:'Instrument Serif',Georgia,serif;font-size:2.1rem;line-height:1.15;margin:.4em 0 .3em}
+h2{font-size:1.2rem;margin-top:2.2em}
+.kicker{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.72rem;letter-spacing:.08em;
+text-transform:uppercase;color:var(--primary)}
+.lede{color:var(--ink-2);font-size:1.05rem;max-width:60ch}
+p{max-width:68ch}
+code{background:#f1f4f5;padding:.1em .35em;border-radius:4px;font-size:.9em}
+ol,ul{max-width:66ch;padding-left:1.3em}
+li{margin-bottom:.6em}
+table{border-collapse:collapse;width:100%;margin:1.4em 0;font-size:.92rem}
+th,td{border:1px solid var(--rule);padding:.55em .7em;text-align:left;vertical-align:top}
+th{background:#f6f8f8;font-weight:600}
+.verified{border-left:3px solid var(--primary);padding:.2em 0 .2em 1em;margin:2em 0;
+color:var(--ink-2);font-size:.92rem}
+.verified.live{border-left-color:var(--accent)}
+.sources{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.78rem;color:var(--ink-3)}
+.sources a{color:inherit}
+footer{border-top:1px solid var(--rule);padding:32px 24px;text-align:center;
+color:var(--ink-3);font-size:.82rem}
+footer a{color:inherit}
+</style>
+</head>
+<body>
+<nav><a href="../fr/index.html">acami</a><a class="back" href="../fr/index.html">&larr; Retour sur acami.com</a></nav>
+<main class="wrap">
+<p class="kicker">Intégration</p>
+<h1>ACA + HubSpot — une écriture CRM réelle, derrière une validation humaine</h1>
+<p class="lede">HubSpot est le CRM que la plupart des prospects d'ACA utilisent déjà — ACA y écrit donc directement plutôt que de demander à une équipe de recopier des leads depuis un tableur. L'écriture est réelle (Contact, Deal, Note, tous trois réellement associés via l'API v4 de HubSpot), et elle a lieu exactement une fois, uniquement après la validation.</p>
+<h2>Comment ça marche</h2><ol><li>Sur « Valider », <b>create_lead()</b> recherche dans HubSpot un Contact existant par e-mail — le met à jour s'il existe, le crée sinon.</li><li>Un Deal est créé dans le pipeline/étape configuré (par défaut « default »/« appointmentscheduled », présents dans tout portail neuf) et associé au Contact.</li><li>L'urgence, le besoin exprimé et la proposition rédigée sont joints en tant que Note — les Deals n'ont pas de champ texte libre par défaut.</li><li>Sheets est écrit à la même étape, pas remplacé par elle : Sheets reste la mémoire de détection des doublons (<code>find_leads_by_sender</code>) et la source du tableau de bord.</li></ol>
+<div class="verified live">Vérifié en direct sur un vrai portail HubSpot : contact, deal, note et associations tous créés correctement, puis supprimés en nettoyage de test. Un vrai bug a été détecté pendant cette vérification — un plantage d'encodage console Windows <em>après</em> une écriture réussie, que la politique de reprise du graphe aurait transformé en écriture en double — corrigé en faisant en sorte que la valeur de retour de l'écriture ne dépende jamais d'un affichage réussi.</div>
+<p class="sources">Sources : <code>aca/integrations/hubspot.py</code><br>Mis à jour : 2026-08-08</p>
+<p><a href="../seo/hubspot-integration.html">English version</a></p>
+</main>
+<footer>acami — Agence IA. <a href="../legal.html#privacy">Confidentialité</a> &middot; <a href="../legal.html#terms">Conditions</a></footer>
+</body>
+</html>

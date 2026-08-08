@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACA + HubSpot — a real CRM write, behind a human gate</title>
+<meta name="description" content="ACA upserts a HubSpot Contact, Deal and Note only after a person clicks Validate. Runs alongside Google Sheets, never replacing your existing lead memory.">
+<link rel="canonical" href="https://acami.example/seo/hubspot-integration.html">
+<style>
+:root{--paper:#fdfdfd;--ink:#12171c;--ink-2:#4b5560;--ink-3:#636363;--rule:#e3e3e3;
+--primary:#125e6b;--accent:#b4622a;--radius:10px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+font-family:Figtree,Inter,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+line-height:1.6}
+.wrap{max-width:760px;margin:0 auto;padding:48px 24px 96px}
+nav{border-bottom:1px solid var(--rule);padding:16px 24px}
+nav a{color:var(--ink);text-decoration:none;font-weight:600;font-size:.9rem}
+nav a.back{color:var(--ink-2);font-weight:500;float:right}
+h1{font-family:'Instrument Serif',Georgia,serif;font-size:2.1rem;line-height:1.15;margin:.4em 0 .3em}
+h2{font-size:1.2rem;margin-top:2.2em}
+.kicker{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.72rem;letter-spacing:.08em;
+text-transform:uppercase;color:var(--primary)}
+.lede{color:var(--ink-2);font-size:1.05rem;max-width:60ch}
+p{max-width:68ch}
+code{background:#f1f4f5;padding:.1em .35em;border-radius:4px;font-size:.9em}
+ol,ul{max-width:66ch;padding-left:1.3em}
+li{margin-bottom:.6em}
+table{border-collapse:collapse;width:100%;margin:1.4em 0;font-size:.92rem}
+th,td{border:1px solid var(--rule);padding:.55em .7em;text-align:left;vertical-align:top}
+th{background:#f6f8f8;font-weight:600}
+.verified{border-left:3px solid var(--primary);padding:.2em 0 .2em 1em;margin:2em 0;
+color:var(--ink-2);font-size:.92rem}
+.verified.live{border-left-color:var(--accent)}
+.sources{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.78rem;color:var(--ink-3)}
+.sources a{color:inherit}
+footer{border-top:1px solid var(--rule);padding:32px 24px;text-align:center;
+color:var(--ink-3);font-size:.82rem}
+footer a{color:inherit}
+</style>
+</head>
+<body>
+<nav><a href="../landing.html">acami</a><a class="back" href="../landing.html">&larr; Back to acami.com</a></nav>
+<main class="wrap">
+<p class="kicker">Integration</p>
+<h1>ACA + HubSpot — a real CRM write, behind a human gate</h1>
+<p class="lede">HubSpot is the CRM most of ACA's prospects already run — so ACA writes to it directly rather than asking a team to copy leads out of a spreadsheet. The write is real (Contact, Deal, Note, all three genuinely associated via HubSpot's v4 API), and it happens exactly once, only after the validation gate.</p>
+<h2>How it works</h2><ol><li>On "Valider", <b>create_lead()</b> searches HubSpot for an existing Contact by e-mail — patches it if found, creates it if not.</li><li>A Deal is created in the configured pipeline/stage (defaults to any fresh portal's "default"/"appointmentscheduled") and associated to the Contact.</li><li>Urgency, stated need and the drafted proposal are attached as a Note — Deals carry no free-text field by default.</li><li>Sheets is written in the same step, not replaced by it: Sheets stays the duplicate-detection memory (<code>find_leads_by_sender</code>) and the dashboard's data source.</li></ol>
+<div class="verified live">Live-verified against a real HubSpot portal: contact, deal, note and associations all created correctly, then deleted as test cleanup. A real bug was caught during that verification — a Windows console encoding crash <em>after</em> a successful write, which the graph's retry policy would have turned into a duplicate write — fixed by making the write's return value never depend on a print succeeding.</div>
+<p class="sources">Sources : <code>aca/integrations/hubspot.py</code><br>Updated : 2026-08-08</p>
+<p><a href="../seo/hubspot-integration.fr.html">Version française</a></p>
+</main>
+<footer>acami — AI agency. <a href="../legal.html#privacy">Privacy</a> &middot; <a href="../legal.html#terms">Terms</a></footer>
+</body>
+</html>

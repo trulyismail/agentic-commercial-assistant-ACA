@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACA vs. Zapier / Make — the orchestrator isn&#x27;t the judgement</title>
+<meta name="description" content="Zapier and Make move data between apps on a trigger. Neither reads an email, decides what a prospect needs, drafts a reply, or knows when it doesn&#x27;t know the answer. That reasoning is what ACA adds.">
+<link rel="canonical" href="https://acami.example/seo/vs-zapier-make.html">
+<style>
+:root{--paper:#fdfdfd;--ink:#12171c;--ink-2:#4b5560;--ink-3:#636363;--rule:#e3e3e3;
+--primary:#125e6b;--accent:#b4622a;--radius:10px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+font-family:Figtree,Inter,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+line-height:1.6}
+.wrap{max-width:760px;margin:0 auto;padding:48px 24px 96px}
+nav{border-bottom:1px solid var(--rule);padding:16px 24px}
+nav a{color:var(--ink);text-decoration:none;font-weight:600;font-size:.9rem}
+nav a.back{color:var(--ink-2);font-weight:500;float:right}
+h1{font-family:'Instrument Serif',Georgia,serif;font-size:2.1rem;line-height:1.15;margin:.4em 0 .3em}
+h2{font-size:1.2rem;margin-top:2.2em}
+.kicker{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.72rem;letter-spacing:.08em;
+text-transform:uppercase;color:var(--primary)}
+.lede{color:var(--ink-2);font-size:1.05rem;max-width:60ch}
+p{max-width:68ch}
+code{background:#f1f4f5;padding:.1em .35em;border-radius:4px;font-size:.9em}
+ol,ul{max-width:66ch;padding-left:1.3em}
+li{margin-bottom:.6em}
+table{border-collapse:collapse;width:100%;margin:1.4em 0;font-size:.92rem}
+th,td{border:1px solid var(--rule);padding:.55em .7em;text-align:left;vertical-align:top}
+th{background:#f6f8f8;font-weight:600}
+.verified{border-left:3px solid var(--primary);padding:.2em 0 .2em 1em;margin:2em 0;
+color:var(--ink-2);font-size:.92rem}
+.verified.live{border-left-color:var(--accent)}
+.sources{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.78rem;color:var(--ink-3)}
+.sources a{color:inherit}
+footer{border-top:1px solid var(--rule);padding:32px 24px;text-align:center;
+color:var(--ink-3);font-size:.82rem}
+footer a{color:inherit}
+</style>
+</head>
+<body>
+<nav><a href="../landing.html">acami</a><a class="back" href="../landing.html">&larr; Back to acami.com</a></nav>
+<main class="wrap">
+<p class="kicker">Comparison</p>
+<h1>ACA vs. Zapier / Make — the orchestrator isn&#x27;t the judgement</h1>
+<p class="lede">"Can't I just build this in Zapier?" is a fair question, and the honest answer is: you can wire the plumbing in Zapier, but Zapier will not do the thinking. A Zapier automation is a fixed sequence of steps triggered by an event; it has no judgement about whether a lead is worth a fast reply, no memory of what was said to that sender before, and no way to say "I don't actually know the answer to this question" instead of inventing one.</p>
+<table><thead><tr><th></th><th>Zapier / Make</th><th>ACA</th></tr></thead><tbody><tr><td>Reads and classifies the email</td><td>No — a keyword filter at best</td><td>Yes — a language model, with a confidence score</td></tr><tr><td>Researches the sender&#x27;s company</td><td>No, unless you build and pay for a separate step</td><td>Built in, cached, free-tier</td></tr><tr><td>Answers from your own knowledge base</td><td>No</td><td>Yes — hybrid dense + sparse retrieval over your FAQ</td></tr><tr><td>Drafts a personalised reply</td><td>No</td><td>Yes, with a self-critique pass before a human sees it</td></tr><tr><td>Knows when it doesn&#x27;t know</td><td>N/A</td><td>Yes — flags the gap instead of guessing</td></tr><tr><td>Stops for human approval before acting</td><td>Only if you build that step yourself</td><td>Architectural — cannot be skipped</td></tr><tr><td>Where n8n fits</td><td>—</td><td>Optional wiring layer on top — see the n8n integration page</td></tr></tbody></table>
+<div class="verified">This is a structural comparison, not a benchmark against a live Zapier account — no such account exists for this project. Every ACA-side claim in the table links to a verified capability described on its own integration or capability page.</div>
+<p class="sources">Sources : <code>aca/core/app.py</code><br>Updated : 2026-08-08</p>
+<p><a href="../seo/vs-zapier-make.fr.html">Version française</a></p>
+</main>
+<footer>acami — AI agency. <a href="../legal.html#privacy">Privacy</a> &middot; <a href="../legal.html#terms">Terms</a></footer>
+</body>
+</html>

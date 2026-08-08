@@ -197,6 +197,31 @@ def test_hero_masque_ne_rend_rien():
     assert branding.hero_html(branding.resolve({"BRAND_HERO": "masqué"})) == ""
 
 
+def test_hero_porte_le_mot_symbole_reel_quand_le_nom_est_acami():
+    """
+    §29 — quand `BRAND_NAME` résout à « acami » (le défaut avant toute personnalisation client),
+    le titre doit porter le mot-symbole RÉEL en `<img src="data:…">`, pas le nom recomposé dans la
+    police système. PAS un `<svg>` en ligne : DOMPurify (Streamlit sanitise le HTML de `st.html()`
+    côté navigateur) élimine l'espace de noms SVG par défaut — une régression réellement commise
+    puis corrigée dans cette même série de changements, invisible pour tout test qui n'inspecte que
+    le HTML envoyé plutôt que ce qu'un navigateur en garde après sanitisation.
+    """
+    html = branding.hero_html(branding.resolve({"BRAND_NAME": "acami"}))
+    assert "<svg" not in html
+    assert 'src="data:image/png;base64,' in html
+    assert 'alt="acami"' in html
+    assert ">acami<" not in html  # pas le nom en texte brut à côté de l'image
+
+
+def test_hero_garde_le_nom_du_client_en_texte():
+    """Un client dont `BRAND_NAME` a été personnalisé continue de voir SON nom en texte — jamais
+    une image qu'il n'a pas fournie."""
+    html = branding.hero_html(branding.resolve({"BRAND_NAME": "Acme Corp"}))
+    assert "Acme Corp" in html
+    assert "<img" not in html
+    assert "<svg" not in html
+
+
 # ── Logo ──────────────────────────────────────────────────────────────────────────────────────
 _PNG = bytes.fromhex("89504e470d0a1a0a0000000d49484452")  # en-tête PNG, suffisant pour ces tests
 
@@ -224,8 +249,31 @@ def test_logo_refuse_un_fichier_trop_lourd():
         branding.encode_logo("logo.png", b"\x00" * (branding.MAX_LOGO_BYTES + 1))
 
 
-def test_sans_logo_on_retombe_sur_une_icone_material():
-    assert branding.logo_for_streamlit(branding.resolve()) == branding.DEFAULT_LOGO_ICON
+def test_sans_logo_on_retombe_sur_le_mot_symbole_acami():
+    """§29 — le repli n'est plus l'icône Material générique : tant qu'aucun client n'a téléversé
+    son propre logo, la barre latérale porte le mot-symbole d'acami lui-même. PNG et non SVG :
+    `st.logo()` ouvre l'image via PIL, qui ne sait pas ouvrir un SVG (régression directe — voir
+    `_default_lockup_bytes`)."""
+    result = branding.logo_for_streamlit(branding.resolve())
+    assert result != branding.DEFAULT_LOGO_ICON
+    assert result == (branding._BRAND_ASSET_DIR / "acami-lockup.png").read_bytes()
+    from PIL import Image
+    from io import BytesIO
+    Image.open(BytesIO(result)).verify()  # lève si PIL ne sait pas l'ouvrir
+
+
+def test_sans_logo_ni_asset_de_marque_on_retombe_sur_une_icone_material(monkeypatch):
+    """Filet de sécurité : si les fichiers `static/brand/` sont absents (ex. avant leur première
+    génération), le repli final reste l'icône Material plutôt qu'une exception ou un onglet vide."""
+    branding._default_lockup_bytes.cache_clear()
+    branding._default_favicon_bytes.cache_clear()
+    monkeypatch.setattr(branding, "_BRAND_ASSET_DIR", branding._BRAND_ASSET_DIR / "introuvable")
+    try:
+        assert branding.logo_for_streamlit(branding.resolve()) == branding.DEFAULT_LOGO_ICON
+        assert branding.favicon_for_streamlit(branding.resolve()) == branding.DEFAULT_LOGO_ICON
+    finally:
+        branding._default_lockup_bytes.cache_clear()
+        branding._default_favicon_bytes.cache_clear()
 
 
 def test_logo_configure_est_rendu_en_octets():
@@ -783,3 +831,285 @@ def test_la_tuile_est_deterministe_et_sans_axe():
     # vide, et une rangée vide dans une tuile répétée tous les 96 px se lit comme une couture.
     assert min(par_ligne) >= 2 and max(par_ligne) < 16, par_ligne
     assert min(par_colonne) >= 2 and max(par_colonne) < 16, par_colonne
+
+
+# ── §27 — bordures lisibles ───────────────────────────────────────────────────────────────────
+def test_aucun_chevron_ouvrant_dans_la_feuille():
+    """
+    LE garde-fou de cette passe, et le plus brutal du fichier : un seul `<` suivi d'une lettre
+    n'importe où dans la feuille — **y compris au milieu d'un commentaire** — et TOUTE l'apparence
+    de l'application disparaît.
+
+    Ce n'est pas une hypothèse, c'est ce qui s'est produit : le commentaire expliquant que
+    Streamlit 1.59 n'utilise plus `data-baseweb` citait la balise de champ entre chevrons. Le
+    navigateur, lui, parse parfaitement la feuille (vérifié : 206 règles, variables résolues) —
+    mais `st.html()` fait passer le contenu par DOMPurify, qui supprime un nœud texte de `<style>`
+    dès qu'il y repère `<` suivi d'une lettre, d'un `/` ou d'un `!`, par crainte d'une évasion de
+    balise. Le `<style>` entier part avec. Aucune exception, aucun journal, aucun test en échec :
+    l'application s'affiche simplement toute nue, et le premier réflexe est de chercher le défaut
+    dans la dernière règle CSS écrite plutôt que dans un commentaire.
+
+    Même famille que `test_les_commentaires_css_sont_tous_refermes` ci-dessus (un caractère de
+    ponctuation dans un commentaire casse silencieusement du rendu), en pire : là c'était une règle,
+    ici c'est la feuille complète.
+    """
+    css = branding.css(branding.resolve())
+    interieur = css.replace("<style>", "", 1)
+    interieur = "".join(interieur.rsplit("</style>", 1))
+    fautif = re.search(r"<[/\w!]", interieur)
+    assert fautif is None, (
+        "chevron ouvrant dans la feuille — DOMPurify supprimera tout le <style> : "
+        f"{interieur[max(0, fautif.start() - 80):fautif.start() + 40]!r}"
+    )
+
+
+def test_readable_border_on_laisse_une_bordure_deja_contrastee():
+    """Un plancher, pas une substitution : ce qui passe déjà n'est pas touché (contrat §17)."""
+    assert branding.readable_border_on("#555B5E", "#12171C", "#FFFFFF") == "#555B5E"
+
+
+def test_readable_border_on_remonte_une_bordure_trop_pale():
+    obtenu = branding.readable_border_on("#D5DDE0", "#12171C", "#FFFFFF", "#F1F4F5")
+    assert obtenu != "#D5DDE0"
+    assert min(branding.contrast_ratio(obtenu, "#FFFFFF"),
+               branding.contrast_ratio(obtenu, "#F1F4F5")) >= branding.BORDER_MIN_CONTRAST
+
+
+def test_readable_border_on_eclaircit_en_mode_sombre():
+    """
+    Sur une palette sombre il faut ÉCLAIRCIR. C'est tout l'intérêt de mélanger vers le texte plutôt
+    que vers le noir : un `mix(..., "#000000")` aurait renforcé le mode clair et effacé le sombre.
+    """
+    obtenu = branding.readable_border_on("#262A2E", "#E4E6E8", "#101214", "#181B1E")
+    assert branding.relative_luminance(obtenu) > branding.relative_luminance("#262A2E")
+    assert min(branding.contrast_ratio(obtenu, "#101214"),
+               branding.contrast_ratio(obtenu, "#181B1E")) >= branding.BORDER_MIN_CONTRAST
+
+
+@pytest.mark.parametrize("valeur", ["", "pas-une-couleur", "#GGG", None])
+def test_readable_border_on_ne_leve_jamais_sur_une_entree_invalide(valeur):
+    """Appelée à chaque rerun depuis `css()` : une valeur douteuse ne doit pas casser la page."""
+    assert branding.readable_border_on(valeur, "#12171C", "#FFFFFF") == valeur
+
+
+@pytest.mark.parametrize("preset", list(branding.PRESETS))
+def test_chaque_palette_livree_a_une_bordure_visible(preset):
+    """
+    Verrouille la leçon §27 : les DIX-NEUF palettes livrées étaient sous le seuil WCAG 1.4.11
+    (entre 1,16:1 et 1,63:1), y compris « Accessibilité renforcée ». Aucune interface ACA n'avait
+    donc de bordure réellement visible, sur aucune palette — et rien ne pouvait le signaler.
+    Ce test échoue désormais si un futur profil est ajouté avec un filet décoratif trop pâle.
+    """
+    tokens = branding.resolve(overrides={"BRAND_PRESET": preset})
+    pire = min(branding.contrast_ratio(tokens["BRAND_BORDER"], tokens["BRAND_SURFACE"]),
+               branding.contrast_ratio(tokens["BRAND_BORDER"], tokens["BRAND_BACKGROUND"]))
+    assert pire >= branding.BORDER_MIN_CONTRAST, f"{preset} : bordure à {pire:.2f}:1"
+
+
+def test_la_feuille_expose_les_deux_bordures():
+    """La limite de composant est renforcée ; le filet décoratif garde la teinte du client."""
+    css = branding.css(branding.resolve(overrides={"BRAND_BORDER": "#D5DDE0",
+                                                   "BRAND_SURFACE": "#FFFFFF"}))
+    assert "--aca-border-soft: #D5DDE0;" in css
+    assert "--aca-border: #D5DDE0;" not in css
+
+
+def test_le_selecteur_de_carte_vise_un_conteneur_qui_existe():
+    """
+    `stVerticalBlockBorderWrapper` n'existe plus dans Streamlit 1.59 : mesuré sur le DOM rendu,
+    `document.querySelector()` renvoyait `null` et la liste complète des `data-testid` de la page
+    ne le contenait pas. Tout le bloc « Cartes » — dont l'ombre permanente ajoutée au §21 pour que
+    les cartes ne dépendent plus de la palette — ne s'appliquait donc à RIEN depuis la mise à jour.
+    """
+    css = branding.css(branding.resolve())
+    assert "stVerticalBlockBorderWrapper" not in css
+    assert '.stLayoutWrapper > [data-testid="stVerticalBlock"]' in css
+
+
+def test_config_toml_ecrit_la_bordure_renforcee():
+    """
+    Les deux couches doivent écrire la MÊME teinte : `config.toml` atteint l'intérieur des
+    composants React, la feuille injectée rattrape le reste. Deux valeurs différentes donneraient
+    une bordure qui change de couleur d'un widget à l'autre sans raison visible.
+    """
+    tokens = branding.resolve(overrides={"BRAND_BORDER": "#D5DDE0", "BRAND_SURFACE": "#FFFFFF",
+                                         "BRAND_BACKGROUND": "#F1F4F5", "BRAND_TEXT": "#12171C"})
+    attendu = branding.readable_border_on("#D5DDE0", "#12171C", "#FFFFFF", "#F1F4F5")
+    toml = branding.config_toml(tokens)
+    assert f'borderColor = "{attendu}"' in toml
+    assert f'dataframeBorderColor = "{attendu}"' in toml
+    assert '"#D5DDE0"' not in toml
+
+
+def test_le_rapport_signale_une_bordure_trop_pale_sans_refuser():
+    """Avertir, jamais refuser — et dire quelle teinte sera réellement dessinée, sinon le client
+    croit que le sélecteur de couleur est cassé."""
+    problemes = branding.accessibility_report(
+        branding.resolve(overrides={"BRAND_BORDER": "#FAFBFC"}))
+    assert any("Bordures" in p for p in problemes)
+
+
+# ── §28 — identité de l'agence ────────────────────────────────────────────────────────────────
+# Ces tests protègent une seule propriété, et c'est la raison d'être du bloc `AGENCY_*` :
+# l'apparence appartient au CLIENT, la signature appartient à l'agence, et rien de ce que le client
+# règle ne doit pouvoir effacer la seconde. Le reste (échappement, URL, valeurs vides) découle du
+# fait que ces chaînes viennent d'un formulaire et finissent injectées en HTML brut.
+def test_un_prereglage_client_nefface_pas_la_signature_de_lagence():
+    """
+    LA propriété du bloc. Un préréglage réécrit vingt jetons d'un coup ; s'il pouvait emporter
+    `AGENCY_NAME`, un client changerait de palette et supprimerait la mention du prestataire sans
+    l'avoir voulu ni s'en apercevoir.
+    """
+    avant = branding.resolve_agency()["AGENCY_NAME"]
+    branding.resolve(overrides={"BRAND_PRESET": "Luxe & retail"})
+    assert branding.resolve_agency()["AGENCY_NAME"] == avant == "acami"
+
+
+def test_reinitialiser_lapparence_neffacerait_pas_les_jetons_agence():
+    """
+    Le bouton « Réinitialiser l'apparence » efface les réglages commençant par `BRAND_`. Ce test
+    fige la conséquence de la séparation des préfixes : aucun jeton d'agence n'est balayé par ce
+    filtre, donc la signature survit à une remise à zéro complète de la charte.
+    """
+    assert all(not key.startswith("BRAND_") for key in branding.AGENCY_TOKENS)
+
+
+def test_la_signature_est_vide_quand_elle_est_desactivee():
+    """Chaîne vide et non `None` : l'appelant concatène sans tester, donc pas de séparateur
+    orphelin en pied de page — le défaut le plus visible qu'un client remarquerait."""
+    tokens = dict(branding.resolve_agency(), AGENCY_SHOW="non")
+    assert branding.agency_mark_html(tokens, prefix="installé par") == ""
+
+
+def test_la_signature_est_vide_sans_nom():
+    tokens = dict(branding.resolve_agency(), AGENCY_NAME="   ")
+    assert branding.agency_mark_html(tokens) == ""
+
+
+@pytest.mark.parametrize("valeur", ["oui", "OUI", "yes", "", "1", "nimporte quoi"])
+def test_agency_enabled_ne_coupe_que_sur_un_non_explicite(valeur):
+    """Tolérant par défaut : seule une valeur qui dit clairement « non » retire la mention."""
+    assert branding.agency_enabled({"AGENCY_SHOW": valeur}) is True
+
+
+@pytest.mark.parametrize("valeur", ["non", "NON", "no", "0", "false"])
+def test_agency_enabled_coupe_sur_les_formes_de_non(valeur):
+    assert branding.agency_enabled({"AGENCY_SHOW": valeur}) is False
+
+
+def test_le_nom_de_lagence_est_echappe():
+    """Saisi dans un formulaire puis injecté en HTML brut : la personne est de confiance, la
+    chaîne ne l'est pas (même posture que `ui_kit.py`)."""
+    tokens = dict(branding.resolve_agency(), AGENCY_NAME="<script>alert(1)</script>")
+    rendu = branding.agency_mark_html(tokens)
+    assert "<script>" not in rendu
+    assert "&lt;script&gt;" in rendu
+
+
+def test_une_url_non_http_ne_devient_pas_un_lien():
+    """`javascript:` dans un réglage deviendrait un lien exécutable sur TOUTES les pages."""
+    tokens = dict(branding.resolve_agency(), AGENCY_URL="javascript:alert(1)")
+    rendu = branding.agency_mark_html(tokens)
+    assert "javascript:" not in rendu
+    assert "<a " not in rendu
+
+
+def test_une_url_http_devient_un_lien_sur():
+    tokens = dict(branding.resolve_agency(), AGENCY_URL="https://example.com")
+    rendu = branding.agency_mark_html(tokens)
+    assert 'href="https://example.com"' in rendu
+    assert 'rel="noopener noreferrer"' in rendu
+
+
+def test_les_regles_de_la_signature_sont_dans_la_feuille():
+    css = branding.css(branding.resolve())
+    assert ".aca-agency {" in css
+    assert ".aca-agency__link:focus-visible" in css
+
+
+def test_la_mention_par_defaut_utilise_le_lockup_reel():
+    """
+    §29 — quand acami n'a pas été remplacé par un revendeur (le cas par défaut), la mention doit
+    porter le mot « acami » dans son tracé réel (`<img src="data:…">`, jamais un `<svg>` en ligne —
+    voir `_brand_png_data_uri` pour la raison DOMPurify) plutôt qu'une icône générique + le nom
+    tapé dans la police système.
+    """
+    rendu = branding.agency_mark_html(branding.resolve_agency())
+    assert "<svg" not in rendu
+    assert 'src="data:image/png;base64,' in rendu
+    assert 'alt="acami"' in rendu
+    assert '<span class="aca-agency__name">' not in rendu
+
+
+def test_un_revendeur_avec_son_propre_logo_garde_icone_plus_texte():
+    """Un revendeur en marque blanche a téléversé SON logo : son tracé n'est pas connu, donc icône
+    fournie + nom tapé, comme avant §29."""
+    tokens = dict(branding.resolve_agency(),
+                   AGENCY_NAME="Acme Resell", AGENCY_LOGO=branding.encode_logo("l.png", _PNG))
+    rendu = branding.agency_mark_html(tokens)
+    assert '<span class="aca-agency__name">Acme Resell</span>' in rendu
+    assert 'class="aca-agency__glyph"' in rendu
+
+
+def test_la_signature_nemprunte_jamais_la_couleur_daccent():
+    """
+    L'ambre veut dire « une personne doit trancher ici ». Une signature permanente dans cette
+    couleur viderait le signal partout ailleurs — exactement le défaut que §21 a trouvé sur quatre
+    palettes livrées.
+    """
+    css = branding.css(branding.resolve())
+    bloc = css[css.index(".aca-agency {"):css.index(".aca-agency__link:focus-visible")]
+    assert "--aca-accent" not in bloc
+
+
+# ── §29 — géométrie de la marque : le tracé RÉEL fourni par l'utilisateur ───────────────────────
+def test_les_fichiers_de_marque_sont_du_xml_bien_forme():
+    """
+    Régression : `acami-mark.svg` a d'abord été écrit avec deux traits d'union consécutifs dans un
+    commentaire XML — illégal, donc fichier mal formé. Un navigateur le rend quand même, ce qui
+    laisse passer la faute ; un parseur strict, non.
+    """
+    import glob
+    import os
+    import xml.etree.ElementTree as ET
+
+    racine = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "static", "brand")
+    fichiers = sorted(glob.glob(os.path.join(racine, "*.svg")))
+    assert fichiers, "aucun SVG de marque — lancer scripts/build_brand_assets.py"
+    for chemin in fichiers:
+        ET.parse(chemin)  # lève si mal formé
+
+
+def test_la_marque_en_ligne_reprend_les_octets_reels():
+    """
+    §29 — `_brand_png_data_uri()` doit encoder les MÊMES octets que `static/brand/acami-mark.png`,
+    la source réelle unique : deux copies auraient divergé au premier remplacement de fichier, et
+    personne ne compare un logo de pied de page à un favicon.
+    """
+    import base64
+
+    reel = (branding._BRAND_ASSET_DIR / "acami-mark.png").read_bytes()
+    uri = branding._brand_png_data_uri("acami-mark.png")
+    assert uri == f"data:image/png;base64,{base64.b64encode(reel).decode('ascii')}"
+
+
+def test_la_marque_en_ligne_ne_leve_jamais_si_le_fichier_est_absent(monkeypatch):
+    """Filet de sécurité : un pied de page sans icône vaut mieux qu'une exception qui casse toute
+    la page si le PNG venait à manquer."""
+    branding._brand_png_data_uri.cache_clear()
+    monkeypatch.setattr(branding, "_BRAND_ASSET_DIR", branding._BRAND_ASSET_DIR / "introuvable")
+    try:
+        assert branding._brand_png_data_uri("acami-mark.png") == ""
+    finally:
+        branding._brand_png_data_uri.cache_clear()
+
+
+def test_brand_mark_uri_choisit_la_variante_selon_la_luminance_du_fond():
+    """Un fond sombre doit recevoir l'encre claire (`-dark.png`), pas l'encre sombre par défaut —
+    sinon le mot-symbole devient illisible sur un fond sombre choisi par un client."""
+    clair = branding._brand_mark_uri({"BRAND_BACKGROUND": "#FFFFFF"}, "mark", "BRAND_BACKGROUND")
+    sombre = branding._brand_mark_uri({"BRAND_BACKGROUND": "#0B0F14"}, "mark", "BRAND_BACKGROUND")
+    assert clair != sombre
+    assert clair == branding._brand_png_data_uri("acami-mark.png")
+    assert sombre == branding._brand_png_data_uri("acami-mark-dark.png")

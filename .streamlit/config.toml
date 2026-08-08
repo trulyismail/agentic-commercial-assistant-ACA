@@ -20,28 +20,28 @@ backgroundColor = "#F1F4F5"
 secondaryBackgroundColor = "#FFFFFF"
 textColor = "#12171C"
 linkColor = "#125E6B"
-borderColor = "#D5DDE0"
+borderColor = "#82898D"
 showWidgetBorder = true
 showSidebarBorder = true
-baseRadius = "12px"
-buttonRadius = "12px"
+baseRadius = "8px"
+buttonRadius = "8px"
 font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
 baseFontSize = 14
 linkUnderline = false
 headingFontSizes = ["28px", "22px", "18px", "16px", "14px", "12px"]
 headingFontWeights = [650, 640, 620, 600, 600, 600]
-chartCategoricalColors = ["#125E6B", "#1F6F4A", "#B4622A", "#A32C1E", "#63604A", "#76A2A9", "#CFA485", "#12454F"]
+chartCategoricalColors = ["#125E6B", "#107C10", "#B4622A", "#A32C1E", "#63604A", "#76A2A9", "#CFA485", "#12454F"]
 blueColor = "#125E6B"
-greenColor = "#1F6F4A"
+greenColor = "#107C10"
 redColor = "#A32C1E"
 orangeColor = "#B4622A"
 violetColor = "#B4622A"
-dataframeBorderColor = "#D5DDE0"
+dataframeBorderColor = "#82898D"
 dataframeHeaderBackgroundColor = "#FFFFFF"
 
 [theme.sidebar]
 backgroundColor = "#E9EEEF"
 secondaryBackgroundColor = "#DCE1E2"
 textColor = "#12171C"
-borderColor = "#D5DDE0"
+borderColor = "#82898D"
 primaryColor = "#125E6B"

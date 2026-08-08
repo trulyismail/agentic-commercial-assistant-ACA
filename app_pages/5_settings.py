@@ -441,6 +441,95 @@ if _can(user_store.PERM_EDIT_SETTINGS):
     else:
         st.caption("Apparence par défaut (aucune personnalisation enregistrée).")
 
+# ── Identité de l'agence (§28) ──────────────────────────────────────────────────────────────
+# Panneau SÉPARÉ de « Apparence », et placé après lui délibérément. Les deux répondent à des
+# questions différentes : « Apparence » habille l'outil aux couleurs du CLIENT, ce bloc-ci dit qui
+# l'a installé. Les réunir dans un même formulaire laisserait un client effacer la signature du
+# prestataire en réinitialisant sa palette — ce que fait justement le bouton « Réinitialiser
+# l'apparence » ci-dessus, qui n'efface que les jetons `BRAND_*`.
+if _can(user_store.PERM_MANAGE_USERS):
+    st.divider()
+    st.subheader("Identité de l'agence", anchor=False)
+    st.caption(
+        "La mention « installé par … » affichée en pied de page et sur l'écran de connexion. "
+        "Elle survit à un changement complet de palette : elle ne fait pas partie de l'apparence "
+        "du client. Trois noms cohabitent et ne désignent pas la même chose — **acami** l'agence, "
+        "**ACAM** le moteur multi-agents, **ACA** le système installé ici."
+    )
+
+    _agency = branding.resolve_agency()
+
+    with st.form("agency_form"):
+        _agency_inputs = {}
+        for key, spec in branding.AGENCY_TOKENS.items():
+            if spec["kind"] == branding.KIND_CHOICE:
+                _agency_inputs[key] = st.selectbox(
+                    spec["label"], options=spec["choices"],
+                    index=spec["choices"].index(_agency[key])
+                    if _agency[key] in spec["choices"] else 0,
+                    help=spec.get("help"), key=f"agency_{key}",
+                )
+            elif spec["kind"] == branding.KIND_IMAGE:
+                _agency_inputs[key] = None  # traité hors du formulaire texte, cf. plus bas
+                st.file_uploader(
+                    spec["label"], type=sorted(branding.LOGO_MIME_TYPES),
+                    help=spec.get("help"), key=f"agency_upload_{key}",
+                )
+            else:
+                _agency_inputs[key] = st.text_input(
+                    spec["label"], value=_agency[key], help=spec.get("help"),
+                    key=f"agency_{key}",
+                )
+        _agency_submitted = st.form_submit_button(
+            "Enregistrer l'identité de l'agence", type="primary", icon=":material/verified:",
+        )
+
+    if _agency_submitted:
+        _agency_changes = {}
+
+        _uploaded_agency_logo = st.session_state.get("agency_upload_AGENCY_LOGO")
+        if _uploaded_agency_logo is not None:
+            try:
+                _encoded = branding.encode_logo(
+                    _uploaded_agency_logo.name, _uploaded_agency_logo.getvalue(),
+                )
+            except branding.LogoRejected as exc:
+                st.error(str(exc), icon=":material/error:")
+            else:
+                config_store.set_setting("AGENCY_LOGO", _encoded)
+                _agency_changes["AGENCY_LOGO"] = _uploaded_agency_logo.name
+
+        for key, value in _agency_inputs.items():
+            if value is None or key == "AGENCY_LOGO":
+                continue
+            value = str(value).strip()
+            # Même filtre que le formulaire d'apparence : on n'enregistre que ce qui DIFFÈRE de la
+            # valeur effective. Sans lui, ouvrir puis soumettre le formulaire figerait les quatre
+            # jetons dans `config_store`, et un futur changement de défaut n'aurait plus d'effet.
+            if value != _agency[key]:
+                config_store.set_setting(key, value)
+                _agency_changes[key] = value
+
+        if _agency_changes:
+            _audit(
+                activity_log.ACTION_BRANDING_CHANGED, target_type="agence",
+                target_id="identité", details=_agency_changes,
+            )
+            st.success(
+                f"{len(_agency_changes)} réglage(s) enregistré(s).",
+                icon=":material/check_circle:",
+            )
+            st.rerun()
+        else:
+            st.info("Aucun changement.", icon=":material/info:")
+
+    _preview = branding.agency_mark_html(_agency, prefix=t("footer.installed_by"))
+    if _preview:
+        st.caption("Aperçu :")
+        st.html(f'<div class="aca-footer" style="border-top:none;margin-top:0">{_preview}</div>')
+    else:
+        st.caption("Mention désactivée : rien ne s'affichera en pied de page.")
+
 # ── Comptes et rôles (§15.1.6) ──────────────────────────────────────────────────────────────
 if _can(user_store.PERM_MANAGE_USERS):
     st.divider()

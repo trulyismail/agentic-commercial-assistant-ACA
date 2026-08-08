@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACA vs. a RAG chatbot — answering questions isn&#x27;t running the workflow</title>
+<meta name="description" content="A typical agency RAG chatbot answers questions about your documents. It doesn&#x27;t classify an inbound lead, enrich it, draft a personalised proposal, self-critique the draft, or stop for a human before acting.">
+<link rel="canonical" href="https://acami.example/seo/vs-rag-chatbot.html">
+<style>
+:root{--paper:#fdfdfd;--ink:#12171c;--ink-2:#4b5560;--ink-3:#636363;--rule:#e3e3e3;
+--primary:#125e6b;--accent:#b4622a;--radius:10px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+font-family:Figtree,Inter,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+line-height:1.6}
+.wrap{max-width:760px;margin:0 auto;padding:48px 24px 96px}
+nav{border-bottom:1px solid var(--rule);padding:16px 24px}
+nav a{color:var(--ink);text-decoration:none;font-weight:600;font-size:.9rem}
+nav a.back{color:var(--ink-2);font-weight:500;float:right}
+h1{font-family:'Instrument Serif',Georgia,serif;font-size:2.1rem;line-height:1.15;margin:.4em 0 .3em}
+h2{font-size:1.2rem;margin-top:2.2em}
+.kicker{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.72rem;letter-spacing:.08em;
+text-transform:uppercase;color:var(--primary)}
+.lede{color:var(--ink-2);font-size:1.05rem;max-width:60ch}
+p{max-width:68ch}
+code{background:#f1f4f5;padding:.1em .35em;border-radius:4px;font-size:.9em}
+ol,ul{max-width:66ch;padding-left:1.3em}
+li{margin-bottom:.6em}
+table{border-collapse:collapse;width:100%;margin:1.4em 0;font-size:.92rem}
+th,td{border:1px solid var(--rule);padding:.55em .7em;text-align:left;vertical-align:top}
+th{background:#f6f8f8;font-weight:600}
+.verified{border-left:3px solid var(--primary);padding:.2em 0 .2em 1em;margin:2em 0;
+color:var(--ink-2);font-size:.92rem}
+.verified.live{border-left-color:var(--accent)}
+.sources{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.78rem;color:var(--ink-3)}
+.sources a{color:inherit}
+footer{border-top:1px solid var(--rule);padding:32px 24px;text-align:center;
+color:var(--ink-3);font-size:.82rem}
+footer a{color:inherit}
+</style>
+</head>
+<body>
+<nav><a href="../landing.html">acami</a><a class="back" href="../landing.html">&larr; Back to acami.com</a></nav>
+<main class="wrap">
+<p class="kicker">Comparison</p>
+<h1>ACA vs. a RAG chatbot — answering questions isn&#x27;t running the workflow</h1>
+<p class="lede">A "custom RAG chatbot over your documents" is the most common thing an AI agency ships, because it is genuinely the easiest thing to build well. It is also a different product from ACA, and the difference is the whole workflow around the single Q&A step.</p>
+<table><thead><tr><th></th><th>Generic RAG chatbot</th><th>ACA</th></tr></thead><tbody><tr><td>Classifies an inbound lead</td><td>No</td><td>Yes, with a confidence threshold that escalates low-confidence cases to a human</td></tr><tr><td>Retrieves from a knowledge base</td><td>Yes — its whole job</td><td>Yes — one worker among several, hybrid dense+sparse</td></tr><tr><td>Enriches with company research</td><td>No</td><td>Yes, cached</td></tr><tr><td>Drafts a full commercial proposal</td><td>No — answers a question, does not compose a document</td><td>Yes</td></tr><tr><td>Self-critiques its own draft</td><td>No</td><td>Yes, capped at one rewrite</td></tr><tr><td>Escalates an unanswered question to a human, and stages the web answer for review</td><td>No — usually just says it doesn&#x27;t know</td><td>Yes — the veille worker + FAQ staging</td></tr><tr><td>Writes to a CRM</td><td>No, typically</td><td>Yes, after human approval</td></tr><tr><td>Needs a paid vector database</td><td>Often</td><td>No — pgvector optional, an in-memory fallback otherwise</td></tr></tbody></table>
+<div class="verified">Structural comparison against the category, drawn from docs/ACA_presentation_source.md. Each ACA-side row is a real, tested capability of this project.</div>
+<p class="sources">Sources : <code>docs/ACA_presentation_source.md</code>, <code>aca/core/app.py</code><br>Updated : 2026-08-08</p>
+<p><a href="../seo/vs-rag-chatbot.fr.html">Version française</a></p>
+</main>
+<footer>acami — AI agency. <a href="../legal.html#privacy">Privacy</a> &middot; <a href="../legal.html#terms">Terms</a></footer>
+</body>
+</html>
