@@ -78,6 +78,11 @@ _ENV_OVERRIDES = {
     # verrait apparaître à sa connexion des demandes fictives portant de faux prospects — dans
     # l'écran même dont l'intérêt est de ne montrer que du travail réel.
     "ACA_REVIEW_DB": os.path.join(_TMP_DIR, "reviews.sqlite"),
+    # §24 : redirigée pour la même raison que les précédentes, avec un enjeu qui lui est propre —
+    # une ligne écrite ici autorise un navigateur à SAUTER le second facteur. Un test qui en
+    # créerait une dans la vraie base affaiblirait l'authentification de l'installation réelle,
+    # ce qu'aucune suite ne doit pouvoir faire par effet de bord.
+    "ACA_DEVICE_TRUST_DB": os.path.join(_TMP_DIR, "device_trust.sqlite"),
     # Répertoire des rapports mensuels (§20). Redirigé pour la même raison que les bases : le
     # travail planifié `report` écrit un PDF sur disque, et une exécution de la suite ne doit pas
     # déposer de document dans `data/reports/` — ni, pire, en écraser un vrai.

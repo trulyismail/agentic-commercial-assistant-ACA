@@ -38,6 +38,8 @@ tout est pur et testable hors ligne, `ui.py` se charge du rendu.
 import colorsys
 import os
 import re
+from functools import lru_cache
+from urllib.parse import quote
 
 # ── Jetons de marque ──────────────────────────────────────────────────────────────────────────
 # Table déclarative : ajouter un paramètre d'apparence = UNE entrée ici, et le formulaire de
@@ -175,6 +177,35 @@ TOKENS = {
         "label": "En-tête de marque", "kind": KIND_CHOICE, "group": "Animations",
         "default": "dégradé animé",
         "choices": ["dégradé animé", "dégradé fixe", "sobre", "masqué"],
+    },
+    # §26.3 — le fond d'ambiance devient réglable. Il était figé depuis le §21 (deux voiles
+    # radiaux), puis §26 y a ajouté des blocs, sans jamais aucun moyen d'y toucher sans modifier le
+    # code. Sur un produit livré en marque blanche c'est l'incohérence la plus voyante : tout le
+    # reste de l'apparence se règle depuis l'écran « Apparence », et c'est justement l'élément qui
+    # couvre le plus de surface à l'écran.
+    "BRAND_AMBIENT": {
+        "label": "Fond d'ambiance", "kind": KIND_CHOICE, "group": "Animations",
+        "default": "particules",
+        "choices": ["particules", "voile", "grille", "cadre", "aucun"],
+        "help": "« Particules » : la trame de blocs, le motif de la page de présentation. "
+                "« Voile » : les dégradés seuls. « Grille » : un quadrillage fin. "
+                "« Cadre » : les dégradés plus un filet autour du plan de travail. "
+                "« Aucun » : fond uni.",
+    },
+    "BRAND_AMBIENT_INTENSITY": {
+        "label": "Intensité du fond", "kind": KIND_CHOICE, "group": "Animations",
+        "default": "normal",
+        "choices": ["discret", "normal", "marqué"],
+        "help": "Agit sur les voiles ET sur la trame, pour qu'un seul réglage suffise.",
+    },
+    "BRAND_AMBIENT_COLOR": {
+        "label": "Couleur du fond", "kind": KIND_COLOR, "group": "Animations",
+        # Vide = suit `BRAND_PRIMARY`, et c'est le défaut le plus sûr : sans lui, un client qui
+        # change sa couleur principale garderait un fond dans l'ancienne, et le réglage censé
+        # unifier l'identité produirait exactement l'incohérence qu'il doit empêcher.
+        "default": "",
+        "help": "Vide = suit la couleur principale. Une couleur fixée ici ne bouge plus quand la "
+                "couleur principale change.",
     },
 }
 
@@ -749,6 +780,16 @@ def _variables(tokens: dict) -> str:
   --aca-primary-rgb: {rgb_string(primary)};
   --aca-primary-hover: {mix(primary, "#FFFFFF" if dark else "#000000", 0.14)};
   --aca-primary-soft: {mix(primary, background, 0.88)};
+  /* §25 — l'onglet de navigation ACTIF. La primaire pure (#0F4C81 sur ce déploiement) était jugée
+     trop sombre en pleine surface : sur une barre claire, une pastille aussi dense se lit comme un
+     bloc posé là plutôt que comme « vous êtes ici ». On l'éclaircit de 26 % — assez pour respirer,
+     pas assez pour la confondre avec le survol, bien plus pâle (`--aca-primary-soft`, 88 %) :
+     l'inversion de hiérarchie corrigée au §21 tient donc toujours.
+     La couleur du texte est RECALCULÉE sur cette teinte-là plutôt qu'héritée de la primaire : sur
+     une marque déjà claire, éclaircir encore le fond ferait passer un texte blanc sous le seuil de
+     contraste, et l'onglet courant deviendrait le moins lisible de la barre. */
+  --aca-nav-active: {mix(primary, "#000000" if dark else "#FFFFFF", 0.26)};
+  --aca-nav-active-text: {readable_text_on(mix(primary, "#000000" if dark else "#FFFFFF", 0.26))};
   --aca-accent: {accent};
   --aca-accent-rgb: {rgb_string(accent)};
   --aca-bg: {background};
@@ -851,6 +892,29 @@ _KEYFRAMES = """
   50%  { transform: translate3d(2.5%, -2%, 0) scale(1.06); }
   100% { transform: translate3d(0, 0, 0) scale(1); }
 }
+/* §26.2 — la TEXTURE a sa propre dérive, et c'est un écart délibéré au §21.
+
+   Le voile dégradé partageait la boucle ci-dessus : 2,5 % d'un calque d'environ 1650 px, soit
+   41 px en 24 s — 1,7 px/s. Sur un dégradé énorme et sans contour, c'est exactement ce qu'on veut
+   (une matière dont on ne peut pas dire ce qui a changé). Sur une texture RÉPÉTÉE tous les 96 px,
+   c'est invisible : un motif périodique translaté de moins d'une période, à cette vitesse, se lit
+   comme immobile — rapporté comme tel après rendu, pas supposé.
+
+   Trois amplitudes plutôt que deux, sur une période plus courte, et une trajectoire qui ne revient
+   pas sur ses pas : ce qui rend un mouvement perceptible n'est pas sa vitesse mais son CHANGEMENT
+   DE DIRECTION. La texture dérive donc contre le voile au lieu d'avec lui, et le grain se lit comme
+   des particules qui traversent le fond — ce que fait précisément la masse de la page de
+   présentation. Toujours `transform` seul, donc toujours composé par le GPU : aucune disposition,
+   aucune repeinture. Animer `background-position` aurait fait scintiller les blocs un par un, plus
+   proche encore de la page de présentation, au prix d'une repeinture plein écran à chaque image
+   pour la seule boucle de la feuille qui ne s'arrête jamais — refusé pour un outil ouvert huit
+   heures par jour. */
+@keyframes aca-grain {
+  0%   { transform: translate3d(0, 0, 0) scale(1.02); }
+  34%  { transform: translate3d(-3.6%, 2.4%, 0) scale(1.07); }
+  67%  { transform: translate3d(2.9%, -1.7%, 0) scale(1.03); }
+  100% { transform: translate3d(0, 0, 0) scale(1.02); }
+}
 """
 
 _ANIMATIONS_FULL = """
@@ -875,14 +939,50 @@ _ANIMATIONS_FULL = """
 [data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(3) { animation-delay: .08s; }
 [data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(n+4) { animation-delay: .12s; }
 
+/* §25 — CHAQUE CARTE À SON APPARITION, pas toutes au montage.
+   La cascade ci-dessus se joue une fois, au chargement : sur un tableau de bord de dix cartes dont
+   sept sont sous la ligne de flottaison, la moitié de l'animation est donc jouée pour personne, et
+   ce qu'on découvre en faisant défiler arrive déjà figé. `animation-timeline: view()` lie la
+   progression à la position de l'élément dans la fenêtre : la carte se révèle quand on l'atteint,
+   au rythme du défilement, et non sur une horloge.
+   Zéro JavaScript, zéro IntersectionObserver, et le calcul reste hors du fil principal.
+   Sous `@supports` : c'est du Chrome 115+/Edge, et un navigateur qui l'ignore garde simplement la
+   cascade au montage — la carte s'affiche dans tous les cas, jamais masquée par une animation
+   qu'on ne sait pas jouer (le piège classique du reveal au défilement).
+   `range: entry 0% cover 22%` : terminé bien avant que la carte soit centrée, sinon on lit un
+   graphe qui bouge encore. */
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    [data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] {
+      /* La durée est IGNORÉE dès qu'une timeline de défilement est attachée — la progression suit
+         la position dans la fenêtre, pas une horloge. On la laisse néanmoins sous les 300 ms de la
+         règle maison : elle sert de repli exact si `animation-timeline` venait à être retiré, et
+         une valeur qui contredirait la règle sans effet visible serait un piège pour la relecture
+         suivante. */
+      animation: aca-rise .24s var(--aca-ease-out) both;
+      animation-timeline: view();
+      animation-range: entry 0% cover 22%;
+      animation-delay: 0s;
+    }
+  }
+}
+
 /* Fond d'ambiance : 48 s par cycle, et cette lenteur EST le réglage. À 10 s on suit le mouvement
    des yeux ; à 48 s l'écran n'est jamais tout à fait le même sans qu'on puisse dire ce qui a
    changé — c'est-à-dire une matière, pas un objet en déplacement. Bornée au niveau « complet » :
    un client qui a choisi « sobre » demande le calme, et le dégradé statique lui reste acquis
    (cf. `_SURFACES`). `prefers-reduced-motion` gèle la boucle en gardant le dégradé, ce qui est
-   exactement le comportement attendu — moins de mouvement, pas moins d'interface. */
+   exactement le comportement attendu — moins de mouvement, pas moins d'interface.
+
+   §26.2 — la texture de blocs a sa PROPRE boucle (`aca-grain`, 26 s), et non celle-ci. Partagée,
+   elle était invisible : voir le commentaire de l'image-clé. Ce qui vaut pour un dégradé énorme ne
+   vaut pas pour un motif qui se répète tous les 96 px. */
 [data-testid="stAppViewContainer"]::before {
   animation: aca-ambient 48s var(--aca-ease-in-out) infinite;
+  will-change: transform;
+}
+[data-testid="stAppViewContainer"]::after {
+  animation: aca-grain 26s var(--aca-ease-in-out) infinite;
   will-change: transform;
 }
 
@@ -982,50 +1082,11 @@ _ANIMATIONS_SUBTLE = """
 _SURFACES = """
 [data-testid="stAppViewContainer"] { background: var(--aca-bg); }
 
-/* ── Fond d'ambiance (§21) ─────────────────────────────────────────────────────────────────────
-   Deux voiles radiaux très faibles posés sur le plan de travail. Ce qu'ils disent, et c'est la
-   seule raison de les accepter : **la machine tourne même quand personne ne regarde.** Le relevé
-   d'e-mails tourne en tâche de fond, le planificateur aussi ; un écran parfaitement inerte quand la
-   file est vide dit le contraire de ce que fait le produit.
+/* §26.3 — les deux voiles d'ambiance ne sont plus ici. Ils dépendent désormais de trois réglages
+   (style, intensité, couleur) et vivent donc dans `_ambient()`, qui est calculé ; une constante ne
+   peut pas en tenir compte. Ce qui reste ici est structurel, pas décoratif.
 
-   Trois contraintes, chacune tirée d'une décision déjà prise ailleurs dans cette feuille :
-
-   1. **Froid uniquement.** Les voiles empruntent `--aca-primary`, jamais `--aca-accent` : l'ambre
-      ne signifie qu'une chose dans toute l'application, « une personne doit trancher ». Un fond
-      qui l'utiliserait décorativement viderait le signal de son sens — exactement le défaut qu'on
-      vient de corriger sur quatre palettes.
-   2. **Sous le seuil de l'attention.** 7 % de la couleur de marque, des rayons énormes et aucun
-      contour : à l'échelle de la page cela se lit comme une matière, pas comme un objet. C'est ce
-      qui le distingue de l'icône flottante retirée le même jour, qui était un ÉLÉMENT en
-      mouvement dans le champ périphérique.
-   3. **Le fond seul.** La barre latérale et l'en-tête ont leurs propres fonds opaques et passent
-      donc par-dessus : le plan de travail respire, le chrome reste stable.
-
-   Posé ici (bloc statique) et non dans le bloc d'animations : le dégradé apporte de la profondeur
-   même immobile, donc « animations : aucune » garde un fond agréable au lieu d'un aplat — seul le
-   MOUVEMENT est conditionnel (cf. `_ANIMATIONS_FULL`). */
-[data-testid="stAppViewContainer"]::before {
-  content: "";
-  position: fixed;
-  /* Débordement volontaire mais MODESTE : la dérive ne déplace le voile que de ~2,5 %, donc 10 %
-     suffisent pour qu'aucun bord de dégradé n'entre jamais dans le cadre. Un premier essai à 25 %
-     rendait la couche 1,5 fois plus grande que l'écran : les voiles, positionnés en pourcentage de
-     CETTE couche, se retrouvaient rejetés hors du champ visible. */
-  inset: -10%;
-  z-index: 0;
-  pointer-events: none;
-  /* Rayons en `vmax` et non en `rem`. C'est le correctif de fond : `42rem` valait 588 px fixes
-     (racine à 14 px imposée par `config.toml`), donc sur un écran large les voiles devenaient deux
-     petits îlots dans une page immense — relevé sur un écran de 1892 px, six points de fond sur
-     sept étaient rigoureusement intacts, et un seul coin portait la couleur. Une décoration de fond
-     doit se mesurer à la FENÊTRE, pas à la taille du texte. */
-  background:
-    radial-gradient(78vmax 78vmax at 22% 18%,
-      color-mix(in srgb, var(--aca-primary) var(--aca-veil-1), transparent), transparent 58%),
-    radial-gradient(66vmax 66vmax at 84% 88%,
-      color-mix(in srgb, var(--aca-primary) var(--aca-veil-2), transparent), transparent 56%);
-}
-/* Le voile est en `position: fixed` dans le même contexte d'empilement que le contenu : sans cette
+   Le voile est en `position: fixed` dans le même contexte d'empilement que le contenu : sans cette
    ligne, il passerait DEVANT la page au lieu de derrière. Règle structurelle, pas décorative. */
 [data-testid="stMain"], [data-testid="stSidebar"], [data-testid="stHeader"] {
   position: relative;
@@ -1127,6 +1188,29 @@ h4, h5, h6 { font-family: var(--aca-font); letter-spacing: -.008em; }
   padding: calc(var(--aca-pad) * .9) var(--aca-pad); position: relative; overflow: hidden;
   transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease;
 }
+/* §22 — RANGÉES D'INDICATEURS À HAUTEUR ÉGALE. Streamlit pose `align-items: start` sur ses blocs
+   horizontaux (relevé sur le DOM), si bien que chaque carte se dimensionne sur son propre contenu :
+   il suffit qu'un indicateur n'ait pas d'écart à afficher — faute de période de comparaison — pour
+   qu'il soit 22 px plus court que ses voisins et que la rangée parte en dents de scie. Le défaut
+   n'apparaît donc que sur certains jeux de données, ce qui est la meilleure façon de ne jamais le
+   corriger.
+
+   Le `:has()` restreint la règle aux rangées qui contiennent VRAIMENT des indicateurs : les autres
+   blocs horizontaux (une barre de contrôles alignée en bas, une ligne de boutons) doivent garder
+   l'alignement demandé par le code appelant. */
+[data-testid="stHorizontalBlock"]:has([data-testid="stMetric"]) { align-items: stretch; }
+/* `align-items: stretch` ne suffit PAS seul, et la raison est une subtilité de flexbox qui coûte
+   une demi-heure quand on ne la connaît pas : un élément flex dont la taille transversale est
+   DÉFINIE ignore l'étirement. Streamlit fixe une hauteur calculée sur ces conteneurs, si bien que
+   la règle ci-dessus s'appliquait sans aucun effet visible (constaté sur le DOM : la rangée passait
+   bien à `stretch`, les cartes gardaient 144 / 144 / 122 / 144). Il faut donc rendre la hauteur
+   `auto` avant de pouvoir l'étirer. */
+[data-testid="stHorizontalBlock"]:has([data-testid="stMetric"]) > [data-testid="stElementContainer"] {
+  height: auto;
+  align-self: stretch;
+}
+[data-testid="stHorizontalBlock"] [data-testid="stMetric"] { height: 100%; }
+
 [data-testid="stMetric"]::before {
   content: ""; position: absolute; inset: 0 auto 0 0; width: 2px;
   background: var(--aca-primary); opacity: .55;
@@ -1166,6 +1250,28 @@ h4, h5, h6 { font-family: var(--aca-font); letter-spacing: -.008em; }
 .stButton button:active, .stFormSubmitButton button:active, .stDownloadButton button:active {
   transform: scale(.97);
   transition-duration: var(--aca-t-press);
+}
+
+/* §22 — les CONTRÔLES DE SÉLECTION reçoivent enfin le même retour d'appui que les boutons. Le §21
+   n'avait couvert que `.stButton`, `.stFormSubmitButton` et `.stDownloadButton` ; or un
+   `st.segmented_control` et un `st.pills` rendent un `[data-testid="stButtonGroup"]`, qui ne
+   correspond à aucun des trois. Les deux commandes principales du tableau de bord (la période et
+   la bascule de comparaison) étaient donc les seuls éléments cliquables de l'application à
+   n'accuser aucun enfoncement — précisément ceux qu'on actionne le plus souvent sur cet écran.
+
+   Au passage, Streamlit anime `all` sur ces boutons. `all` inclut la géométrie : à chaque rerun,
+   une largeur qui change d'un pixel devient une transition visible, et le composant paraît
+   « mou ». On restreint aux propriétés réellement concernées. */
+[data-testid="stButtonGroup"] button {
+  transition: background-color var(--aca-t-hover) ease,
+              color var(--aca-t-hover) ease,
+              border-color var(--aca-t-hover) ease,
+              transform var(--aca-t-press) var(--aca-ease-out);
+}
+[data-testid="stButtonGroup"] button:active { transform: scale(.97); }
+[data-testid="stButtonGroup"] button:focus-visible {
+  outline: 2px solid var(--aca-primary);
+  outline-offset: 2px;
 }
 
 /* §21 — visibilité au clavier. Les champs avaient déjà un anneau de marque ; les BOUTONS et les
@@ -1220,7 +1326,12 @@ a:focus-visible {
 [data-testid="stTopNavLink"] {
   border-radius: var(--aca-radius);
   font-weight: 600;
-  transition: background var(--aca-t-hover) ease, color var(--aca-t-hover) ease;
+  /* `transform`/`filter` listés explicitement : sans eux l'enfoncement ci-dessous serait instantané
+     au clic puis reviendrait sec au relâchement. Jamais `all` — on n'anime que ce qu'on nomme. */
+  transition: background var(--aca-t-hover) ease, color var(--aca-t-hover) ease,
+              transform var(--aca-t-press) var(--aca-ease-out),
+              filter var(--aca-t-press) var(--aca-ease-out),
+              box-shadow var(--aca-t-hover) ease;
 }
 /* §21 — la PAGE COURANTE porte la marque. Relevé sur le DOM réel : l'onglet actif recevait
    `rgba(173,173,173,.25)`, un gris de Streamlit, tandis que le survol recevait la couleur de
@@ -1228,11 +1339,34 @@ a:focus-visible {
    passe, pas l'endroit où l'on se trouve — la hiérarchie était littéralement inversée, et sur une
    barre à sept entrées c'est la seule information qui compte. `aria-current` est posé par
    Streamlit lui-même : on s'ancre sur la sémantique, pas sur une classe de version. */
+/* §25 — l'onglet actif était un aplat de la couleur de marque : juste, mais plat, et il se lisait
+   comme une pastille posée là plutôt que comme une touche. Un dégradé très court (haut plus clair,
+   bas plus sombre) et un liseré intérieur clair lui donnent de la matière — le vieux procédé du
+   bouton « glossy », dosé pour rester sobre : ~10 % d'écart, pas un reflet de vitrine. La
+   lisibilité du texte n'en dépend pas (`--aca-on-primary` est calculé sur la primaire elle-même),
+   donc aucune palette client ne peut la casser par ce biais.
+   Le raccourci `background` est posé D'ABORD, puis `background-image` par-dessus : l'aplat reste
+   la déclaration de base (un navigateur qui ignorerait le dégradé garde la bonne couleur), et
+   l'invariant « la page courante porte la couleur de marque » reste lisible tel quel. */
 [data-testid="stTopNavLink"][aria-current],
 [data-testid="stTopNavLinkContainer"]:has([aria-current]) [data-testid="stTopNavLink"] {
-  background: var(--aca-primary);
-  color: var(--aca-on-primary);
-  box-shadow: 0 1px 3px rgba(var(--aca-primary-rgb), .35);
+  background: var(--aca-nav-active);
+  background-image: linear-gradient(180deg,
+                    rgba(255,255,255,.22) 0%, rgba(255,255,255,0) 48%, rgba(0,0,0,.07) 100%);
+  color: var(--aca-nav-active-text);
+  box-shadow: 0 1px 3px rgba(var(--aca-primary-rgb), .35),
+              inset 0 1px 0 rgba(255,255,255,.28);
+}
+/* Retour au clic. Un lien de navigation déclenche un changement de page : sans réponse immédiate,
+   la personne clique une deuxième fois pendant que Streamlit rejoue le script. L'enfoncement se
+   voit donc AVANT que la page ne réponde — c'est tout le rôle de cet état. */
+[data-testid="stTopNavLink"]:active {
+  transform: scale(.97);
+  filter: brightness(1.06);
+}
+[data-testid="stTopNavLink"][aria-current]:active,
+[data-testid="stTopNavLinkContainer"]:has([aria-current]) [data-testid="stTopNavLink"]:active {
+  box-shadow: inset 0 2px 5px rgba(0,0,0,.22);
 }
 /* Le survol reste volontairement DISCRET : il indique une cible atteignable, pas une position.
    Plus d'élévation ni d'ombre ici — c'était ce qui le faisait passer devant l'état actif. */
@@ -1599,6 +1733,252 @@ _REDUCED_MOTION = """
 """
 
 
+def _scatter_cells(size: int, density: float) -> list:
+    """
+    Cellules allumées d'une tuile `size`×`size`, choisies par un hachage des coordonnées.
+
+    DÉTERMINISTE mais non ordonné, et le choix mérite d'être expliqué parce qu'il diffère de la
+    page de présentation. Là-bas le tramage est une matrice de Bayer, seuillée contre une densité
+    qui VARIE le long de la forme : c'est ce dégradé qui casse la régularité de la matrice. Ici la
+    densité est uniforme, et une matrice de Bayer seuillée à une seule valeur produit des lignes —
+    à 20/64 ses rangées font 4, 2, 4, 0 cellules, ce qui se lit comme un tissage avec des coutures
+    de tuile bien visibles (mesuré : essayé, rendu, rejeté).
+
+    Un hachage des coordonnées donne la même reproductibilité — aucun `random`, aucun état, la
+    même tuile à chaque appel et sur chaque machine — sans axe privilégié. Et comme cette texture
+    est STATIQUE, l'argument qui impose l'ordonné sur la page de présentation (un tirage aléatoire
+    refait à chaque image scintille) ne s'applique pas ici.
+    """
+    def noise(x: int, y: int) -> int:
+        h = ((x + 1) * 73856093) ^ ((y + 1) * 19349663)
+        return ((h ^ (h >> 13)) * 1274126177 >> 7) % 4096
+
+    threshold = int(density * 4096)
+    chosen = {(x, y) for y in range(size) for x in range(size) if noise(x, y) < threshold}
+
+    # Aucune rangée ni colonne entièrement vide. Un tirage à 30 % laisse une rangée de seize
+    # cellules vide environ une fois sur trois cents, ce qui est arrivé au premier essai — et une
+    # rangée vide dans une tuile répétée tous les 96 px, ce n'est plus du bruit, c'est une couture
+    # horizontale que l'œil finit par suivre sur une grande surface. On complète en prenant les
+    # cellules de plus faible bruit de la ligne ou de la colonne concernée : toujours déterministe,
+    # et le motif reste le même sur toutes les machines.
+    for index in range(size):
+        row = [(x, index) for x in range(size)]
+        col = [(index, y) for y in range(size)]
+        for band in (row, col):
+            missing = 2 - sum(1 for cellule in band if cellule in chosen)
+            if missing > 0:
+                spare = sorted(
+                    (cellule for cellule in band if cellule not in chosen),
+                    key=lambda c: noise(*c),
+                )
+                chosen.update(spare[:missing])
+    return sorted(chosen, key=lambda c: (c[1], c[0]))
+
+
+@lru_cache(maxsize=32)
+def _dither_tile(color: str, alpha: float, cell: int = 6, size: int = 16, density: float = 0.3) -> str:
+    """
+    Tuile SVG de blocs tramés, en `data:` URI — la texture du fond d'ambiance (§26).
+
+    Mise en cache parce que `css()` est réinjecté à CHAQUE rerun de Streamlit : la chaîne ne
+    dépend que de la couleur et de l'opacité, donc elle est construite une fois par processus.
+
+    `quote(..., safe="")` encode tout, et le `#` du code hexadécimal en particulier : laissé tel
+    quel dans une `url()`, il serait lu comme un fragment et la tuile entière disparaîtrait sans
+    la moindre erreur — exactement le genre de panne muette que cette base de code a déjà payée
+    plusieurs fois.
+    """
+    path = "".join(
+        f"M{x * cell} {y * cell}h{cell}v{cell}H{x * cell}z"
+        for x, y in _scatter_cells(size, density)
+    )
+    side = size * cell
+    svg = (
+        f"<svg xmlns='http://www.w3.org/2000/svg' width='{side}' height='{side}'>"
+        f"<path fill='{color}' fill-opacity='{alpha:.3f}' d='{path}'/></svg>"
+    )
+    return "data:image/svg+xml," + quote(svg, safe="")
+
+
+_AMBIENT_STYLES = ("particules", "voile", "grille", "cadre", "aucun")
+# Multiplicateurs appliqués À LA FOIS aux voiles et à la trame : un fond se règle d'un seul
+# curseur, sinon on obtient des combinaisons où le dégradé crie pendant que le grain chuchote.
+_AMBIENT_INTENSITY = {"discret": 0.55, "normal": 1.0, "marqué": 1.8}
+
+
+def _ambient(tokens: dict) -> str:
+    """
+    §26 — le fond d'ambiance reprend le motif de la page de présentation : des blocs tramés.
+
+    POURQUOI CETTE COUCHE EXISTE. `static/landing.html` et l'application vendaient le même produit
+    dans deux langages visuels sans rapport : d'un côté des champs de blocs typographiques
+    (░ ▒ ▓, tramage ordonné, halo par flou), de l'autre deux voiles radiaux lisses. Quelqu'un qui
+    passe de la page de vente à l'outil doit reconnaître le même produit ; c'est le seul argument
+    ici, et il suffit.
+
+    CE QUE C'EST TECHNIQUEMENT, et pourquoi ce n'est pas le moteur de la page de présentation. Là-bas
+    les blocs sont du VRAI TEXTE régénéré à chaque image par un canvas. Ici il n'y a pas de
+    JavaScript — `branding.py` n'émet que du CSS, et c'est une contrainte qu'on ne lève pas pour une
+    décoration. La texture est donc une tuile SVG de blocs tramés (matrice de Bayer 8×8, 20/64
+    cellules, aucun aléatoire — le même tramage ordonné que la page), répétée et **découpée par deux
+    dégradés radiaux** placés exactement là où sont les voiles. Le résultat lu de loin est le même :
+    des amas de pixels dans la couleur de marque qui s'éclaircissent vers les bords.
+
+    UNE DIFFÉRENCE, dite plutôt que masquée : le masque fait FONDRE les blocs vers les bords, alors
+    qu'un vrai tramage les RARÉFIE. À 9 % d'opacité sur une tuile couverte à 31 %, l'encre moyenne
+    est de 3 % et l'écart n'est pas perceptible — mais c'est une approximation, pas la même chose.
+
+    Les trois contraintes du §21 sont reprises telles quelles, et aucune n'est négociable :
+      1. **`--aca-primary`, jamais `--aca-accent`** : l'ambre ne veut dire qu'une chose dans toute
+         l'application, « une personne doit trancher ». L'utiliser en décor viderait le signal.
+      2. **Sous le seuil de l'attention** : opacité basse, cellules de 4 px, aucun contour.
+      3. **Le plan de travail seul** : la barre latérale et l'en-tête ont des fonds opaques et
+         passent par-dessus.
+
+    Et comme pour le dégradé : la texture est POSÉE ICI (statique), seul le MOUVEMENT est
+    conditionné au niveau d'animation. « Animations : aucune » garde donc la matière et perd la
+    dérive, et `prefers-reduced-motion` fige la boucle sans effacer le fond.
+
+    Jamais bloquant : une couleur invalide retombe sur un gris neutre plutôt que de faire disparaître
+    la couche — une décoration n'a pas à décider si un fond existe (leçon du §20, où une coquille
+    dans un hexadécimal a silencieusement supprimé le rapport mensuel).
+    """
+    style = tokens.get("BRAND_AMBIENT") or "particules"
+    if style not in _AMBIENT_STYLES:
+        style = "particules"
+    if style == "aucun":
+        return ""
+
+    force = _AMBIENT_INTENSITY.get(tokens.get("BRAND_AMBIENT_INTENSITY"), 1.0)
+    dark = tokens.get("BRAND_MODE") == "sombre"
+
+    # Vide = suit la primaire, pour qu'un client qui change sa marque n'obtienne pas un fond resté
+    # dans l'ancienne couleur. Une valeur invalide retombe sur un gris neutre plutôt que de faire
+    # disparaître la couche : une décoration n'a pas à décider si un fond existe.
+    colour = (tokens.get("BRAND_AMBIENT_COLOR") or "").strip() or tokens.get("BRAND_PRIMARY", "")
+    if not is_valid_hex(colour):
+        colour = "#888888"
+
+    # Les deux voiles. Portés ici et non plus dans `_SURFACES` parce qu'ils dépendent désormais de
+    # trois réglages ; une constante ne peut pas en tenir compte.
+    veil1 = round((9 if dark else 14) * force, 1)
+    veil2 = round((6 if dark else 10) * force, 1)
+    # `MASK` est repris à l'identique par la trame et par la grille : les motifs n'existent que là
+    # où il y a déjà de la couleur. Sans lui, ils couvriraient l'écran entier d'un quadrillage
+    # régulier — ce qui ne se lit plus comme une matière mais comme du papier millimétré.
+    mask = ("radial-gradient(70vmax 70vmax at 22% 18%, #000, transparent 62%),\n"
+            "    radial-gradient(58vmax 58vmax at 84% 88%, #000 20%, transparent 60%)")
+
+    blocks = [f"""
+/* ── Fond d'ambiance (§21, réglable depuis le §26.3) ───────────────────────────────────────────
+   Deux voiles radiaux très faibles sur le plan de travail. Ce qu'ils disent, et la seule raison
+   de les accepter : **la machine tourne même quand personne ne regarde.** Le relevé d'e-mails
+   tourne en tâche de fond, le planificateur aussi ; un écran parfaitement inerte quand la file est
+   vide dit le contraire de ce que fait le produit.
+
+   Contrainte non négociable, héritée du §21 : la couleur par défaut est la PRIMAIRE, jamais
+   l'accent. L'ambre ne veut dire qu'une chose dans toute l'application, « une personne doit
+   trancher » ; l'employer en décor viderait le signal. Un client peut fixer une autre teinte via
+   `BRAND_AMBIENT_COLOR` — c'est sa marque —, et rien n'empêche alors d'y mettre l'accent : le
+   réglage est explicite, le défaut est sûr, et c'est la bonne répartition.
+
+   Rayons en `vmax` et non en `rem` : `42rem` valait 588 px fixes (racine à 14 px imposée par
+   `config.toml`), donc sur un écran large les voiles devenaient deux petits îlots dans une page
+   immense — relevé sur 1892 px, six points de fond sur sept étaient intacts. Une décoration de
+   fond se mesure à la FENÊTRE, jamais à la taille du texte.
+
+   Posé dans le bloc statique et non dans celui des animations : le dégradé apporte de la
+   profondeur même immobile, donc « animations : aucune » garde un fond agréable au lieu d'un
+   aplat — seul le MOUVEMENT est conditionnel. */
+[data-testid="stAppViewContainer"]::before {{
+  content: "";
+  position: fixed;
+  /* Débordement volontaire mais MODESTE : la dérive ne déplace le voile que de ~2,5 %, donc 10 %
+     suffisent pour qu'aucun bord de dégradé n'entre dans le cadre. Un premier essai à 25 % rendait
+     la couche 1,5 fois plus grande que l'écran, et les voiles — positionnés en pourcentage de
+     CETTE couche — se retrouvaient rejetés hors du champ visible. */
+  inset: -10%;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(78vmax 78vmax at 22% 18%,
+      color-mix(in srgb, {colour} {veil1}%, transparent), transparent 58%),
+    radial-gradient(66vmax 66vmax at 84% 88%,
+      color-mix(in srgb, {colour} {veil2}%, transparent), transparent 56%);
+}}
+"""]
+
+    if style == "particules":
+        # 0,075 et non 0,05 : la trame était rapportée comme à peine visible. Deux couches, donc
+        # cette valeur CHACUNE — là où elles se superposent on retrouve le double, ailleurs les
+        # demi-teintes qui font la granularité.
+        alpha = (0.048 if dark else 0.075) * force
+        tile = _dither_tile(colour, round(alpha, 4))
+        blocks.append(f"""
+[data-testid="stAppViewContainer"]::after {{
+  content: "";
+  position: fixed;
+  inset: -10%;
+  z-index: 0;
+  pointer-events: none;
+  /* LA MÊME tuile posée deux fois, à deux échelles et deux décalages premiers entre eux. Une seule
+     couche donnait un tissage parfaitement régulier — de la trame de papier, pas des blocs : la
+     texture de la page de présentation n'est irrégulière que parce que la densité de sa source
+     varie, ce qu'une tuile uniforme ne peut pas faire. Deux échelles se recouvrent selon un motif
+     dont la période est leur PPCM, très au-delà de l'écran : l'œil n'y trouve pas de grille.
+     Coût nul — c'est la même `data:` URI, le navigateur ne la décode qu'une fois. */
+  background-image: url("{tile}"), url("{tile}");
+  background-size: 96px 96px, 138px 138px;
+  background-position: 0 0, 29px 47px;
+  background-repeat: repeat, repeat;
+  -webkit-mask-image: {mask};
+  mask-image: {mask};
+}}
+""")
+
+    elif style == "grille":
+        # Deux dégradés répétés plutôt qu'une image : un quadrillage est une figure régulière, donc
+        # exactement ce que le CSS sait faire sans rien télécharger. Le pas de 34 px n'est pas
+        # arbitraire — plus fin, la grille moirait au défilement ; plus large, elle cessait de se
+        # lire comme un fond et devenait un tableau.
+        line = round((13 if dark else 20) * force, 1)
+        blocks.append(f"""
+[data-testid="stAppViewContainer"]::after {{
+  content: "";
+  position: fixed;
+  inset: -10%;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    repeating-linear-gradient(0deg,
+      color-mix(in srgb, {colour} {line}%, transparent) 0 1px, transparent 1px 34px),
+    repeating-linear-gradient(90deg,
+      color-mix(in srgb, {colour} {line}%, transparent) 0 1px, transparent 1px 34px);
+  -webkit-mask-image: {mask};
+  mask-image: {mask};
+}}
+""")
+
+    elif style == "cadre":
+        # Le filet est tracé par `box-shadow: inset` sur le conteneur, et non par un pseudo-élément
+        # bordé. Un pseudo-élément aurait dû se placer dans le contexte d'empilement de `stMain`,
+        # où il serait passé soit derrière le fond, soit par-dessus le contenu selon l'ordre des
+        # couches — une ombre interne n'a aucune de ces deux questions à trancher et ne peut pas
+        # recouvrir un widget.
+        edge = round(30 * force, 1)
+        halo = round(16 * force, 1)
+        blocks.append(f"""
+[data-testid="stAppViewContainer"] {{
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, {colour} {edge}%, transparent),
+    inset 0 0 90px -40px color-mix(in srgb, {colour} {halo}%, transparent);
+}}
+""")
+
+    return "\n".join(blocks)
+
+
 def css(tokens: dict = None) -> str:
     """
     Feuille de style complète à injecter (`st.html`), pour les jetons donnés.
@@ -1613,7 +1993,18 @@ def css(tokens: dict = None) -> str:
     level = tokens.get("BRAND_ANIMATIONS", "complet")
     hero = tokens.get("BRAND_HERO", "dégradé animé")
 
-    parts = [font_import(tokens), _variables(tokens), _SURFACES, _HERO, _COMPONENTS, _UI_KIT]
+    parts = [
+        font_import(tokens),
+        _variables(tokens),
+        _SURFACES,
+        # Le fond d'ambiance complet — voiles, et selon le style trame, quadrillage ou filet. Calculé
+        # et non statique pour deux raisons : il dépend de trois réglages, et la couleur doit être
+        # CUITE dans la tuile SVG, une `data:` URI ne pouvant pas lire une variable CSS.
+        _ambient(tokens),
+        _HERO,
+        _COMPONENTS,
+        _UI_KIT,
+    ]
     if hero == "dégradé fixe":
         parts.append(_HERO_FLAT)
     elif hero == "sobre":

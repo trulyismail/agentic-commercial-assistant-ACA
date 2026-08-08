@@ -320,6 +320,107 @@ def token_stats(days: int = 30, org_id: str = None, start=None, end=None) -> dic
     return {"analyses": count, "total_entree": total_in, "total_sortie": total_out, "moyenne_par_analyse": avg}
 
 
+# ── Répartitions du tableau de bord (§22) ─────────────────────────────────────────────────────
+# Quatre agrégats qui répondent chacun à une question que le tableau de bord ne savait pas poser.
+# Aucun ne demande de nouvelle donnée : tout était déjà dans `events` depuis l'origine, seule la
+# lecture manquait — même forme de manque que `get_draft_edit` (§18) et `list_events` (§20).
+
+#: Bornes des tranches de délai, en minutes. Ordonnées et **ordinales** : ce n'est pas une liste de
+#: catégories interchangeables mais une échelle de gravité, ce qui impose au graphe un dégradé d'une
+#: seule teinte plutôt qu'une palette catégorielle.
+RESPONSE_BUCKETS = (
+    ("moins d'1 h", 0, 60),
+    ("1 à 4 h", 60, 240),
+    ("4 à 24 h", 240, 1440),
+    ("plus de 24 h", 1440, None),
+)
+
+
+def bucket_response_times(rows: list[dict]) -> list[dict]:
+    """
+    Répartit des durées de validation dans `RESPONSE_BUCKETS`.
+
+    Fonction **pure**, séparée de la lecture SQL : c'est la seule partie qui porte un jugement
+    métier (« au-delà de 24 h, on a perdu la main sur le prospect »), donc celle qui mérite d'être
+    testable sans base. Les tranches vides sont conservées — une tranche « plus de 24 h » absente
+    du graphe se lit comme « pas de données », alors qu'elle veut dire « aucun retard », c'est-à-dire
+    exactement l'inverse et la meilleure nouvelle du tableau.
+    """
+    counts = {label: 0 for label, _, _ in RESPONSE_BUCKETS}
+    for row in rows:
+        minutes = row.get("minutes")
+        if minutes is None:
+            continue
+        for label, low, high in RESPONSE_BUCKETS:
+            if minutes >= low and (high is None or minutes < high):
+                counts[label] += 1
+                break
+    return [{"tranche": label, "count": counts[label]} for label, _, _ in RESPONSE_BUCKETS]
+
+
+@with_sqlite_retry
+def by_source(days: int = 30, org_id: str = None, start=None, end=None) -> list[dict]:
+    """
+    Volume par origine (`manuel`, `gmail_import`, `poller`…) — la mesure d'ADOPTION.
+
+    La colonne `source` est enregistrée depuis toujours et n'a jamais été affichée nulle part. Elle
+    répond pourtant à la question qui décide du renouvellement de l'outil : est-ce que la réception
+    automatique fait le travail, ou est-ce que les gens ressaisissent encore les e-mails à la main ?
+    Un produit « automatique » dont 90 % du volume est manuel n'est pas adopté, et rien dans
+    l'interface ne le disait.
+    """
+    window, params = _window("classified_at", days, start, end)
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT COALESCE(NULLIF(source, ''), 'inconnu'), COUNT(*) FROM events "
+            f"WHERE {window} AND org_id = ? GROUP BY 1 ORDER BY COUNT(*) DESC",
+            (*params, org_id or current_org_id()),
+        ).fetchall()
+    return [{"source": r[0], "count": r[1]} for r in rows]
+
+
+@with_sqlite_retry
+def hourly_volume(days: int = 30, org_id: str = None, start=None, end=None) -> list[dict]:
+    """
+    Volume par heure d'arrivée (0-23), heure locale telle qu'enregistrée.
+
+    Utile parce qu'un réglage l'attend : §19 laisse choisir une fenêtre de réception (jours et
+    heures). Sans cette courbe, ce réglage se choisit au jugé. Les 24 heures sont TOUJOURS
+    renvoyées, y compris à zéro — un histogramme horaire troué se lit comme une courbe, alors que
+    les creux sont précisément l'information recherchée.
+    """
+    window, params = _window("classified_at", days, start, end)
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT CAST(substr(classified_at, 12, 2) AS INTEGER), COUNT(*) FROM events "
+            f"WHERE {window} AND org_id = ? GROUP BY 1",
+            (*params, org_id or current_org_id()),
+        ).fetchall()
+    counts = {int(hour): count for hour, count in rows if hour is not None}
+    return [{"heure": f"{h:02d} h", "count": counts.get(h, 0)} for h in range(24)]
+
+
+@with_sqlite_retry
+def top_senders(days: int = 30, org_id: str = None, start=None, end=None,
+                limit: int = 8) -> list[dict]:
+    """
+    Correspondants les plus fréquents de la période, avec leur nombre de leads validés.
+
+    `limit` est borné et bas volontairement : ce bloc sert à reconnaître d'un coup d'œil les
+    interlocuteurs récurrents, pas à exporter un carnet d'adresses — c'est le rôle du rapport
+    paramétrable (§20), qui lui descend au détail e-mail par e-mail.
+    """
+    window, params = _window("classified_at", days, start, end)
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT sender, COUNT(*), SUM(CASE WHEN validated_at IS NOT NULL THEN 1 ELSE 0 END) "
+            f"FROM events WHERE {window} AND org_id = ? AND sender IS NOT NULL AND sender != '' "
+            "GROUP BY sender ORDER BY COUNT(*) DESC, sender LIMIT ?",
+            (*params, org_id or current_org_id(), max(1, int(limit))),
+        ).fetchall()
+    return [{"expéditeur": r[0], "e-mails": r[1], "validés": r[2] or 0} for r in rows]
+
+
 # ── Détail e-mail par e-mail (§20) ────────────────────────────────────────────────────────────
 # Toutes les fonctions ci-dessus AGRÈGENT ; le rapport paramétrable demande aussi de pouvoir
 # descendre à la ligne (« la classification et le nom des e-mails seulement »). La donnée existait

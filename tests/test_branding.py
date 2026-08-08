@@ -468,8 +468,11 @@ def test_aucune_animation_dinterface_ne_depasse_300ms():
     # `aca-ring` rejoint la liste : c'est la respiration de l'étape EN COURS du rail de décision,
     # un indicateur d'état continu au même titre que le pouls ou la lueur d'alerte — pas
     # l'accompagnement d'un geste, donc la borne des 300 ms ne s'y applique pas.
+    # `aca-grain` rejoint la liste pour la même raison que `aca-ambient` : c'est le fond, pas une
+    # réponse à un geste. §26.2 lui a donné sa propre boucle (26 s au lieu des 48 s partagées) parce
+    # qu'une texture répétée tous les 96 px, translatée de 1,7 px/s, se lit comme immobile.
     lentes = ("aca-halo", "aca-warn-glow", "aca-drift", "aca-float", "aca-sheen", "aca-progress",
-              "aca-ring", "aca-ambient")
+              "aca-ring", "aca-ambient", "aca-grain")
     for ligne in css.splitlines():
         if "animation:" not in ligne or any(nom in ligne for nom in lentes):
             continue
@@ -484,10 +487,23 @@ def test_le_fond_dambiance_nemprunte_jamais_la_couleur_reservee():
     l'emploierait viderait le signal de son sens, c'est-à-dire referait le défaut corrigé sur quatre
     palettes le même jour.
     """
-    couche = _declaration(branding.css(branding.resolve()),
+    # §26.3 : la couleur est désormais CUITE en hexadécimal au lieu d'être `var(--aca-primary)`,
+    # parce qu'elle doit aussi entrer dans une `data:` URI, qui ne peut lire aucune variable CSS.
+    # Ce qui est protégé reste identique — le fond PAR DÉFAUT prend la primaire et jamais l'accent —
+    # mais cela se vérifie sur les valeurs et non plus sur les noms de variables.
+    jetons = branding.resolve()
+    couche = _declaration(branding.css(jetons),
                           '[data-testid="stAppViewContainer"]::before')
-    assert "--aca-primary" in couche
-    assert "--aca-accent" not in couche
+    assert jetons["BRAND_PRIMARY"].lower() in couche.lower()
+    assert jetons["BRAND_ACCENT"].lower() not in couche.lower()
+
+    # Le réglage explicite, lui, appartient au client : s'il désigne une couleur, elle est
+    # respectée. Le garde-fou porte sur le DÉFAUT, pas sur un choix fait en connaissance de cause —
+    # une décoration imposée contre un choix explicite serait un autre défaut.
+    choisi = dict(jetons)
+    choisi["BRAND_AMBIENT_COLOR"] = "#C21807"
+    assert "#c21807" in _declaration(
+        branding.css(choisi), '[data-testid="stAppViewContainer"]::before').lower()
 
 
 def test_le_fond_dambiance_se_dimensionne_sur_la_fenetre():
@@ -572,4 +588,198 @@ def test_la_page_courante_est_plus_marquee_que_le_survol():
     selecteur = '[data-testid="stTopNavLink"][aria-current]'
     assert selecteur in css
     actif = css.split(selecteur)[1][:300]
-    assert "background: var(--aca-primary)" in actif
+    # §25 : l'onglet actif utilise désormais `--aca-nav-active`, une primaire éclaircie de 26 %,
+    # la primaire pure ayant été jugée trop sombre en pleine surface. Ce qui est vérifié reste la
+    # MÊME propriété qu'avant — l'état courant porte un aplat dérivé de la marque là où le survol
+    # se contente d'une teinte pâle — et non la valeur exacte : le test protège la hiérarchie entre
+    # les deux états, pas une couleur qu'on doit pouvoir ajuster sans le réécrire.
+    assert "background: var(--aca-nav-active)" in actif
+    assert "--aca-nav-active:" in css and "--aca-nav-active-text:" in css
+
+
+# ══ §26 — FOND D'AMBIANCE EN BLOCS ══════════════════════════════════════════════════════════════
+# La page de présentation et l'application vendaient le même produit dans deux langages visuels
+# sans rapport. Ces tests protègent la couche qui les réunit — et surtout les deux façons dont elle
+# peut disparaître SANS que rien ne lève : une `url()` mal encodée, et une règle non analysée.
+
+
+def test_les_commentaires_css_sont_tous_refermes():
+    """
+    Le garde-fou le plus rentable de ce fichier, et il vient d'un défaut commis DEUX FOIS dans la
+    même passe : en rallongeant un commentaire existant, un `*/` s'est retrouvé au milieu du bloc,
+    le refermant trop tôt et laissant de la prose dans la feuille de style. Le navigateur l'ignore,
+    la page s'affiche, et le seul symptôme est une règle « qui ne s'applique pas ».
+
+    On compte les délimiteurs sur la feuille ÉMISE, pas sur le source : c'est elle que le
+    navigateur lit, et c'est là que les f-strings ont fini de tout assembler.
+    """
+    css = branding.css(branding.resolve())
+    assert css.count("/*") == css.count("*/"), (
+        f"{css.count('/*')} ouvertures pour {css.count('*/')} fermetures"
+    )
+    # Et aucune fermeture ne doit précéder son ouverture : un compte égal peut cacher un `*/`
+    # orphelin suivi d'un `/*` plus loin, ce qui est exactement la forme du défaut rencontré.
+    profondeur = 0
+    for i in range(len(css) - 1):
+        if css[i:i + 2] == "/*" and profondeur == 0:
+            profondeur = 1
+        elif css[i:i + 2] == "*/" and profondeur == 1:
+            profondeur = 0
+        elif css[i:i + 2] == "*/" and profondeur == 0:
+            raise AssertionError(f"fermeture orpheline vers : {css[max(0, i - 90):i + 2]!r}")
+
+
+def test_la_texture_de_fond_est_posee_et_masquee():
+    """La couche existe, porte ses deux calques et n'est visible que là où sont les voiles."""
+    css = branding.css(branding.resolve())
+    assert '[data-testid="stAppViewContainer"]::after' in css
+    regle = css.split('[data-testid="stAppViewContainer"]::after')[1].split("}")[0]
+    assert regle.count("url(") == 2, "deux échelles, sinon le motif redevient un quadrillage"
+    assert "mask-image:" in regle and "-webkit-mask-image:" in regle
+    assert "position: fixed" in regle and "z-index: 0" in regle
+
+
+def test_le_diese_de_la_couleur_est_encode_dans_la_data_uri():
+    """
+    Laissé tel quel dans une `url()`, le `#` d'un code hexadécimal est lu comme un fragment
+    d'adresse : la tuile entière disparaît, sans erreur, sans test rouge, sans rien à voir en
+    relecture. C'est le mode de panne le plus probable de toute cette couche.
+    """
+    css = branding.css(branding.resolve())
+    uri = re.search(r'url\("(data:image/svg\+xml,[^"]+)"\)', css)
+    assert uri, "aucune data: URI émise"
+    assert "#" not in uri.group(1)
+    assert "%23" in uri.group(1)
+
+
+def test_la_texture_emprunte_la_primaire_et_jamais_l_accent():
+    """
+    Règle du §21, reprise telle quelle : l'ambre ne signifie qu'une chose dans toute
+    l'application, « une personne doit trancher ». Un fond décoratif qui l'utiliserait viderait
+    le signal — le défaut corrigé sur quatre palettes ce jour-là.
+    """
+    from urllib.parse import unquote
+
+    jetons = branding.resolve()
+    css = branding.css(jetons)
+    uri = re.search(r'url\("(data:image/svg\+xml,[^"]+)"\)', css).group(1)
+    svg = unquote(uri.split(",", 1)[1])
+    assert jetons["BRAND_PRIMARY"].lower() in svg.lower()
+    assert jetons["BRAND_ACCENT"].lower() not in svg.lower()
+
+
+def test_la_texture_survit_a_une_couleur_invalide():
+    """
+    Une décoration n'a pas à décider si un fond existe. Leçon du §20 : une coquille dans un
+    hexadécimal a fait lever `_Palette`, `build_report_pdf` a rendu `None` conformément à son
+    contrat, et le rapport mensuel a cessé d'être produit en silence.
+    """
+    # Visé sur `_ambient_texture` et non sur `css()` : `resolve()` valide déjà chaque couleur et
+    # retombe sur le défaut, donc un hexadécimal corrompu ne peut PAS arriver jusqu'ici par le
+    # chemin normal — une première version de ce test forçait un jeton invalide après `resolve()`
+    # et échouait dans `_variables`, c'est-à-dire ailleurs que dans ce qu'elle prétendait vérifier.
+    # Ce qui est protégé ici, c'est le garde-fou de la couche elle-même, pour un appelant qui
+    # construirait ses jetons à la main.
+    couche = branding._ambient({"BRAND_PRIMARY": "pas-une-couleur"})
+    assert '[data-testid="stAppViewContainer"]::after' in couche
+    assert "data:image/svg+xml," in couche
+    # Et une couleur de fond corrompue ne doit pas non plus emporter la couche.
+    abime = branding._ambient({"BRAND_PRIMARY": "#125E6B", "BRAND_AMBIENT_COLOR": "rouge vif"})
+    assert "data:image/svg+xml," in abime
+
+
+def test_chaque_style_de_fond_emet_ses_propres_couches():
+    """
+    Cinq styles, et chacun doit produire EXACTEMENT ses couches — pas une de plus, sinon deux
+    décors se superposent, ni une de moins, sinon le réglage ne fait rien de visible.
+    """
+    attendu = {
+        # style        voile, trame, quadrillage, filet
+        "particules": (True,  True,  False, False),
+        "voile":      (True,  False, False, False),
+        "grille":     (True,  False, True,  False),
+        "cadre":      (True,  False, False, True),
+        "aucun":      (False, False, False, False),
+    }
+    for style, (veil, tile, grid, frame) in attendu.items():
+        jetons = dict(branding.resolve())
+        jetons["BRAND_AMBIENT"] = style
+        css = branding.css(jetons)
+        assert ("radial-gradient(78vmax" in css) is veil, style
+        assert ("data:image/svg+xml" in css) is tile, style
+        assert ("repeating-linear-gradient(0deg" in css) is grid, style
+        assert ("inset 0 0 0 1px color-mix" in css) is frame, style
+
+    # Une valeur inconnue (jeton recopié à la main, base migrée) retombe sur le défaut plutôt que
+    # de supprimer le fond : le contrat « absent = fonctionnalité ignorée » de ce projet ne dit pas
+    # « invalide = écran nu ».
+    jetons = dict(branding.resolve())
+    jetons["BRAND_AMBIENT"] = "papier peint"
+    assert "data:image/svg+xml" in branding.css(jetons)
+
+
+def test_lintensite_du_fond_agit_sur_toutes_les_couches():
+    """
+    Un seul curseur, sinon on obtient des combinaisons où le dégradé crie pendant que le grain
+    chuchote. On vérifie l'ordre, pas les valeurs : ce sont des chiffres à pouvoir ajuster sans
+    réécrire le test.
+    """
+    valeurs = []
+    for niveau in ("discret", "normal", "marqué"):
+        jetons = dict(branding.resolve())
+        jetons["BRAND_AMBIENT_INTENSITY"] = niveau
+        css = branding.css(jetons)
+        from urllib.parse import unquote
+
+        voile = float(re.search(r"color-mix\(in srgb, #\w+ ([\d.]+)%", css).group(1))
+        grain = float(re.search(r"fill-opacity='([\d.]+)'", unquote(
+            re.search(r'url\("(data:image/svg\+xml,[^"]+)"\)', css).group(1))).group(1))
+        valeurs.append((voile, grain))
+    assert valeurs[0][0] < valeurs[1][0] < valeurs[2][0], valeurs
+    assert valeurs[0][1] < valeurs[1][1] < valeurs[2][1], valeurs
+
+
+def test_le_mouvement_du_fond_est_borne_au_niveau_complet():
+    """
+    La matière reste à tous les niveaux, seule la DÉRIVE est conditionnelle : « animations :
+    aucune » demande le calme, pas un aplat. Et les deux couches doivent partager la même boucle,
+    sinon elles glissent l'une sur l'autre et se lisent comme deux calques.
+    """
+    for niveau in ("aucune", "sobre", "complet"):
+        jetons = dict(branding.resolve())
+        jetons["BRAND_ANIMATIONS"] = niveau
+        css = branding.css(jetons)
+        assert '[data-testid="stAppViewContainer"]::after' in css, niveau
+        # `animation: aca-ambient`, pas `aca-ambient` seul : le bloc `@keyframes` est émis dès que
+        # les animations ne sont pas coupées, donc chercher le nom nu voyait la DÉFINITION et
+        # concluait que la boucle tournait au niveau « sobre », où elle ne tourne pas.
+        # Les DEUX couches doivent s'animer, ou aucune : un fond dont seule la moitié bouge se
+        # lit comme un calque qui glisse sur un autre.
+        anime = "animation: aca-ambient" in css
+        assert anime is (niveau == "complet"), niveau
+        assert ("animation: aca-grain" in css) is (niveau == "complet"), niveau
+    complet = branding.css(branding.resolve())
+    # §26.2 : boucles SÉPARÉES, et c'est le correctif. Partagée, la dérive était mesurée comme
+    # imperceptible sur la texture — ce test protège donc que chaque pseudo-élément ait bien la
+    # sienne, et non plus qu'ils partagent la même règle.
+    avant = complet.split("animation: aca-ambient")[0].rstrip()
+    assert avant.endswith('[data-testid="stAppViewContainer"]::before {'), avant[-90:]
+    apres = complet.split("animation: aca-grain")[0].rstrip()
+    assert apres.endswith('[data-testid="stAppViewContainer"]::after {'), apres[-90:]
+
+
+def test_la_tuile_est_deterministe_et_sans_axe():
+    """
+    Reproductible d'un appel et d'une machine à l'autre — aucun `random`, aucun état. Et pas de
+    rangée pleine ni de rangée vide : c'est ce que produisait la matrice de Bayer seuillée à une
+    seule valeur (rangées de 4, 2, 4, 0 cellules), d'où un tissage à coutures visibles.
+    """
+    a = branding._scatter_cells(16, 0.3)
+    b = branding._scatter_cells(16, 0.3)
+    assert a == b and 40 < len(a) < 120
+    par_ligne = [sum(1 for x, y in a if y == ligne) for ligne in range(16)]
+    par_colonne = [sum(1 for x, y in a if x == colonne) for colonne in range(16)]
+    # Ni bande vide ni bande pleine, dans les deux sens. Le premier tirage laissait une rangée
+    # vide, et une rangée vide dans une tuile répétée tous les 96 px se lit comme une couture.
+    assert min(par_ligne) >= 2 and max(par_ligne) < 16, par_ligne
+    assert min(par_colonne) >= 2 and max(par_colonne) < 16, par_colonne

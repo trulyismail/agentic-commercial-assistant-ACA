@@ -18,7 +18,9 @@ import os
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-from aca.storage import activity_log, followup_store, queue_store, review_store, task_store
+from aca.storage import (
+    activity_log, device_trust_store, followup_store, queue_store, review_store, task_store,
+)
 from aca.integrations import sheets
 from .app import checkpointer
 
@@ -212,6 +214,12 @@ def run() -> None:
     # ferait disparaître la trace du travail en souffrance en même temps que la donnée.
     n_reviews = review_store.purge_older_than(RETENTION_DAYS)
     print(f"✅ {n_reviews} demande(s) de relecture close(s) supprimée(s) (reviews.sqlite).")
+    # §24 — autorisations d'appareil périmées. Sans seuil de rétention propre : leur date
+    # d'expiration EST leur durée de vie, et une ligne dépassée ne sert plus à rien (elle est déjà
+    # refusée à la vérification). C'est donc une hygiène de fichier, pas une politique de
+    # conservation — la trace des usages passés, elle, reste dans le journal d'activité.
+    n_devices = device_trust_store.purge_expired()
+    print(f"✅ {n_devices} appareil(s) de confiance périmé(s) supprimé(s) (device_trust.sqlite).")
     # §18 — trace machine de la purge périodique elle-même (distincte de `purge_old_activity`, qui
     # purge le JOURNAL — ici on trace le fait que Leads/checkpoints/file ont été purgés). Un seul
     # événement (pas un par emplacement) : c'est une seule décision de rétention exécutée d'un coup.
@@ -220,7 +228,7 @@ def run() -> None:
         details={
             "type": "ancienneté", "seuil_jours": RETENTION_DAYS, "leads": n_leads,
             "checkpoints": n_checkpoints, "file_attente": n_queue, "journal_activité": n_activity,
-            "tâches": n_tasks, "relectures": n_reviews,
+            "tâches": n_tasks, "relectures": n_reviews, "appareils_de_confiance": n_devices,
         },
     )
 

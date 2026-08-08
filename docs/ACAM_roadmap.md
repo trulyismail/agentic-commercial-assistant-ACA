@@ -1215,12 +1215,36 @@ secret** ; (2) `pip-audit` avait trouvé 17 vulnérabilités dont 11 dans des pa
 
 ### 16.5 Documentation et présentation
 
-- **[docs/landing/index.html](landing/index.html)** — one-pager de pitch, entièrement autonome
-  (aucune police, feuille de style ni script distant : une page de présentation qui dépend d'un CDN
-  ne s'ouvre pas dans un train ni derrière le proxy d'un grand compte, or c'est exactement là qu'on
-  la montre). Palette reprise du thème Fluent de l'interface, thème sombre géré, imprimable en PDF
-  sans retouche. Il reprend la section « ce qui est vérifié / ce qui ne l'est pas » : la mettre en
-  page de vente plutôt que de l'enfouir dans le dépôt est un choix, pas un oubli.
+- **[static/landing.html](../static/landing.html)** — page de pitch. Elle reprend la section « ce
+  qui est vérifié / ce qui ne l'est pas » : la mettre en page de vente plutôt que de l'enfouir dans
+  le dépôt est un choix, pas un oubli. Imprimable en PDF sans retouche.
+  - **Déplacée de `docs/landing/index.html` vers `static/` en §23**, pour une raison de fond : le
+    dossier `static/` est exposé par Streamlit sur `/app/static/`
+    (`server.enableStaticServing`), ce qui permet au bouton « Page de présentation » de la barre
+    latérale d'y mener. Un exemplaire dans `docs/` **et** un dans `static/` auraient divergé dès la
+    première mise à jour de contenu ; il n'y a donc qu'un fichier, à une seule URL.
+  - **La règle « aucune ressource distante » est assouplie, et c'est délibéré.** La version §16.5
+    n'admettait aucune police ni feuille de style externe (une page de pitch qui dépend d'un CDN ne
+    s'ouvre ni dans un train ni derrière le proxy d'un grand compte). La refonte §23 charge trois
+    polices Google, parce que la direction artistique demandée repose sur ces caractères
+    précisément. Le compromis est borné : le `<link>` est une amélioration, pas une dépendance —
+    chaque famille est suivie d'une pile système complète et la page reste entièrement lisible et
+    composée hors ligne. Aucun script ni feuille de style distants : tout le CSS et tout le JS
+    restent en ligne dans le fichier.
+  - **§23.1 — surface commerciale anglaise.** L'anglais devient la version par défaut (dans le
+    balisage) et le français voyage par attribut, basculé par un sélecteur : un seul fichier et non
+    deux, pour la raison ci-dessus. Reprend mot pour mot les formules du gabarit — vérification
+    faite, `acam.framer.website` est le déploiement de ce même gabarit — et le vocabulaire de
+    LangGraph là où il est vrai du projet (contrôle vs autonomie, human-in-the-loop, exécution
+    durable, mémoire, diffusion). Ajoute trois paliers de tarifs (**montants d'exemple**, marqués
+    `data-placeholder-price`), un calendrier de prise de rendez-vous et un formulaire de contact en
+    `mailto:` — aucun serveur derrière, et la page le dit plutôt que de le laisser croire.
+  - **Toutes les illustrations sont dessinées à l'exécution** (canevas → caractères ASCII, ou gros
+    pixels pour les quatre icônes) : c'est ce qui permet de reproduire le style du modèle sans en
+    copier les ressources, tout en gardant la propriété « aucune image distante ». Les défauts
+    trouvés — étoile sans pointes, halo qui l'effaçait, main réduite à une tache, icône « flux »
+    qui se lisait comme un cadre, et le piège de proportion des cellules à chasse fixe — sont
+    détaillés dans l'entrée du 2026-08-06 (fin) de [PROJECT_JOURNAL.md](PROJECT_JOURNAL.md).
 - **Cette section §16**, l'entrée du 2026-07-26 dans [PROJECT_JOURNAL.md](PROJECT_JOURNAL.md), et la
   mise à jour de `CLAUDE.md` (nouveaux modules, variables d'environnement, nombre de tests).
 
@@ -1663,3 +1687,446 @@ opérateur → administrateur (transmission d'un lot de 2, visible côté admin,
 expéditeur), la garde admin-only des archives, et l'en-tête/barre latérale/toast de `ui.py` — un
 seul toast pour un lot de deux e-mails. Détail complet : `docs/PROJECT_JOURNAL.md`
 (entrée du 2026-08-04).
+
+## §23.2 — Réservation réelle, moments de paiement, sécurité repliée (2026-08-06)
+
+Quatre demandes sur `static/landing.html` : un calendrier qui réserve vraiment et grise les journées
+prises ; savoir quand le client paie et ce que change chaque palier, en vue de Stripe ; désencombrer
+la section sécurité ; et compléter la page — dont **comment un client qui paie obtient son
+interface Streamlit**.
+
+### Ce qui a été construit
+
+- **Deux branches de réservation**, décidées par `CONFIG.calendly` (nouvel objet en tête de script,
+  seul endroit où coller une URL commerciale). Renseigné ⇒ `<iframe>` Calendly thémé, injecté à
+  l'approche, disponibilités réelles et journées complètes grisées **par Calendly** : la page n'a pas
+  de backend, c'est la seule façon que la promesse soit vraie. Vide ⇒ le sélecteur dessiné reste,
+  inchangé — ce qui préserve le fichier comme document autonome (hors ligne, impression). Jamais
+  `widget.js` : zéro script distant, propriété conservée.
+- **Trois paliers réellement distincts** : `data-tier`, libellés de bouton différents, et une ligne
+  `.tier__when` qui écrit le moment du paiement. Audit payé d'avance en ligne ; construction devisée
+  après l'appel ; maintenance mensuelle démarrant après la livraison. Le palier choisi survit au saut
+  vers `#book` (pastille visible, `utm_content`, corps du mail).
+- **Stripe : la couture, pas l'implémentation.** `CONFIG.pay.*` accepte un lien de paiement par
+  palier ; la redirection après paiement de Stripe pointée vers `CONFIG.calendly` enchaîne
+  payer → réserver sans serveur. Non construit et documenté comme tel : endpoint de session,
+  `POST /stripe/webhook` (à calquer sur `/slack/interactions`), registre de commandes.
+- **Sécurité : 12 lignes → 5 groupes repliables**, mécanique de la FAQ réutilisée telle quelle.
+  Groupement **contigu** sur l'ordre existant (5 groupes et non 4) : aucune des douze chaînes
+  bilingues n'a eu à être déplacée, donc aucune n'a pu être corrompue. Panneaux indépendants,
+  contrairement à la FAQ. Les douze restent dans le DOM une fois repliés.
+- **Nouvelle section « 05 — Comment vous y accédez »** (FAQ → 06, Contact → 07) : essai en
+  démonstration, paiement ou cadrage, provisionnement **chez le client**, mise aux couleurs. Plus
+  deux entrées de FAQ que la page esquivait (« je paie quoi, et quand ? », « qui détient les clés et
+  paie les jetons ? »), les balises de partage et un JSON-LD volontairement limité.
+- **Modèle de livraison tranché : hybride.** La démonstration est hébergée par nous et sans donnée
+  réelle ; la production vit chez le client. Les deux réponses de FAQ qui affirmaient « rien n'est
+  hébergé de notre côté » ont été réécrites plutôt que laissées en contradiction avec ce qu'on vend.
+
+### Défauts trouvés (aucun n'était visible en relecture)
+
+1. **Le formulaire de contact n'arrivait nulle part** — `mailto:?subject=…` sans destinataire, donc
+   client mail ouvert sur un champ « À : » vide. Le seul chemin de conversion de la page, cassé
+   depuis l'origine et silencieux : le formulaire « marchait ».
+2. **`[hidden]` ne cachait rien** sur `.chip`/`.btn` — règle d'auteur de même spécificité que la
+   règle navigateur, l'auteur gagne. Une pastille vide en permanence et les deux boutons de
+   démonstration affichés sans démonstration configurée, soit exactement ce que l'attribut devait
+   empêcher.
+3. **Un accordéon ouvert affichait « | »** — la rotation de 90° échange les deux barres, c'était donc
+   la mauvaise qui était effacée. Défaut préexistant de la FAQ, corrigé pour les deux.
+4. Créneau horaire survivant au changement de date ; focus clavier détruit à chaque sélection ;
+   navigation de mois sans borne basse.
+
+### Limites, dites franchement
+
+Le **grisage d'une journée complète n'a pas été observé** : c'est Calendly qui le rend et aucun
+compte n'existe pour ce projet. Ce qui est vérifié est notre part — la carte lui est cédée, l'iframe
+s'injecte au bon moment avec les bons paramètres. Aucun lien Stripe créé ni testé. Les trois montants
+restent des valeurs d'exemple (`data-placeholder-price`). Rien vu sur un téléphone réel. Détail
+complet : `docs/PROJECT_JOURNAL.md` (entrée du 2026-08-06, suite 2).
+
+
+## §24 — Se souvenir de cet appareil (2026-08-06)
+
+Demande : ne plus saisir le code TOTP à chaque connexion, via une case « se souvenir de cet
+appareil » ramenant la demande à tous les trois jours.
+
+**Le choix technique déterminant, tranché par un essai et non d'après la documentation.** Une case de
+ce genre ne vaut que par ce qu'elle reconnaît. L'empreinte `(IP, user-agent)` existait déjà dans
+`activity_log` — et l'employer aurait été une faute : elle n'est pas un secret, deux postes derrière
+le même NAT avec le même navigateur la partagent. L'alternative supposait de poser un cookie, ce que
+Streamlit n'expose pas côté Python. Une page jetable a montré qu'un `components.html` **peut** écrire
+dans le `document.cookie` du parent et que `st.context.cookies` le relit ensuite. D'où un vrai jeton
+de 256 bits, stocké **haché**.
+
+**Livré :** [device_trust.py](../aca/core/device_trust.py) (pur, stdlib, `now` injecté — même posture
+que `session.py`/`totp.py`), [device_trust_store.py](../aca/storage/device_trust_store.py) (registre
+distinct : une ligne par *navigateur*, datée, expirante, révocable — ni `user_store` ni `session.py`
+ne répondent à cette question), `user_store.auth_state_fingerprint()`, la case sur l'écran du second
+facteur, le panneau « Appareils de confiance » dans Réglages, trois actions de journal placées dans
+`SENSITIVE_ACTIONS`, le nettoyage dans `retention.py`, et `ACA_TOTP_TRUST_DAYS` (`0` désactive).
+
+**Ce qui est affaibli, sans détour :** le code est sauté, jamais le mot de passe, et aucune session
+n'est allongée. Garde-fous : jeton jamais stocké en clair ; révocation **automatique** dès que le mot
+de passe ou le secret TOTP change (`auth_state_fingerprint`, sans couplage entre magasins) ;
+expiration jugée côté serveur ; liaison au user-agent contre le rejeu ; chaque saut consigné.
+
+**Défaut évité de justesse :** poser le cookie au moment du clic n'aurait rien fait — `_open_session`
+appelle `st.rerun()` juste après, ce qui jette le rendu en cours. L'écriture est différée à la passe
+suivante (`flush_device_cookie`). Même famille de panne muette que les règles CSS écrites et jamais
+rendues, trouvées le matin même (§21, §23.2).
+
+**Vérifié :** 773 → **795 tests**, plus la boucle complète en navigateur réel (le code est demandé,
+la case cochée pose le cookie, une nouvelle session serveur n'exige plus que le mot de passe, la
+révocation le réexige). **Non vérifié :** rien sur plusieurs postes réels ni en HTTPS — l'attribut
+`Secure`, ajouté seulement dans ce cas, n'a jamais été observé en conditions réelles. Détail :
+`docs/PROJECT_JOURNAL.md` (entrée du 2026-08-06, fin).
+
+
+## §25 — Correctif d'appareil de confiance, et passe de design (2026-08-07)
+
+**Le défaut.** « Se souvenir de cet appareil » ne fonctionnait pas après une déconnexion suivie
+d'une reconnexion dans le même onglet. Cause mesurée : `st.context.cookies` est figé au handshake de
+la session Streamlit, donc un cookie posé pendant la session en cours y est invisible, même après
+plusieurs reruns. La vérification de la veille ouvrait une nouvelle page et ne pouvait pas le voir.
+Corrigé par **deux sources** — `st.session_state` (survit à la déconnexion, couvre le même onglet) et
+le cookie (survit à la fermeture, couvre le rechargement et le nouvel onglet) — aucune n'étant
+suffisante seule.
+
+**Design.** Une teinte par bloc au tableau de bord au lieu d'une seule pour tout l'écran (le défaut
+était l'index `[0]`, pas la palette : une rotation de teinte a été écrite, mesurée, jugée criarde et
+supprimée) ; hauteurs de graphe accordées aux hauteurs de carte, ce qui supprime les zones vides ;
+entrée des cartes liée au défilement plutôt qu'au montage ; onglet actif en dégradé court avec
+enfoncement au clic ; et les neuf cartes de « 02 — Depuis la v1 » empilées en paquet, passant de
+trois écrans à un.
+
+**Vérifié :** **795 tests**, dont deux tombés sur mes propres modifications et corrigés sans
+affaiblir la règle qu'ils protègent. Rendu mesuré : six couleurs réellement peintes, paquet piloté
+au clavier avec cartes cachées `inert`, section à 772 px, pas de débordement de 390 à 1440 px.
+Détail : `docs/PROJECT_JOURNAL.md` (entrée du 2026-08-07).
+
+
+## §26 — L'artwork refait en blocs typographiques, et une vraie photographie (2026-08-07)
+
+**La demande.** La section « The Human-AI Intersection » ne ressemblait pas à ce qui était voulu :
+il fallait le rendu des captures fournies — la masse pixellisée qui scintille et vire du gris au
+bleu — et réutiliser les visuels de <https://acam.framer.website/> pour le reste de la page.
+
+**Ce que la rétro-ingénierie a trouvé, et c'est le résultat de la passe.** La page de référence n'a
+été ni devinée ni recopiée d'après une capture : elle a été mesurée dans un navigateur. Toutes ses
+illustrations sont **une seule et même technique**, et il n'y a ni canvas, ni SVG, ni image derrière
+aucune d'elles. Chacune est un `<div>` de texte monospace n'utilisant que **trois glyphes Unicode**
+— ░ ▒ ▓ (U+2591-93) —, en 10 px, `line-height: 1em`, `letter-spacing: 0`, couleur `rgb(176,176,176)`,
+**dessiné deux fois** : une copie nette au-dessus d'une copie floutée à `blur(11px)`. Le flou n'est
+pas une finition, c'est *l'effet* : c'est lui qui transforme une grille de caractères en masse
+diffuse et lumineuse. Six instances, relevées une par une : la masse (47×170, grise), les quatre
+icônes (39×64 `#00a2ff`, 51×83 `#ff4ffc`, 63×104 `#47e6c3`, 60×98 `#ffbd2e`) et la main du pied de
+page (69×170). La seule image téléchargée de tout le site est la **photographie de la main**.
+
+**Ce qui a été fait.** Le moteur d'artwork est passé de la rampe de ponctuation `" .:-=+*#%@"` aux
+trois blocs. La différence n'est pas cosmétique : la ponctuation a une forme interne, donc le champ
+se lit comme *de l'écriture* ; les blocs remplissent leur cadratin, donc à `line-height: 1` ils se
+juxtaposent en aplat continu. La section Intersection oppose désormais une masse **générée à chaque
+image** à une **photographie réelle** — le contraste passe par les médias eux-mêmes, pas seulement
+par la légende. Les quatre icônes et la main du pied de page suivent la même technique.
+
+**Trois défauts que seul le rendu a montrés.**
+1. **Les deux mains ASCII n'ont jamais fonctionné et ne pouvaient pas.** À cette résolution, l'écart
+   entre deux doigts fait moins d'une cellule ; le tramage les fusionne. Trois versions successives
+   ont fini en ovale. Abandonner le dessin de la main pour une photographie n'est pas un renoncement :
+   c'est reconnaître ce que le médium sait faire (une masse diffuse sans silhouette à perdre) et ce
+   qu'il ne sait pas.
+2. **Trois icônes sur quatre sont sorties en pavés uniformes.** Sur l'ancien canvas, un pixel de
+   sprite valait 5,3 pixels écran ; à travers une grille de 27 lignes il en vaut un, et le pré-flou
+   le referme. Règle désormais explicite : aucun détail ni aucun écart sous **2 pixels de sprite**,
+   et un contour plutôt qu'un aplat. La grille est passée à 40 lignes et le pré-flou de 0,9 à 0,55.
+3. **Un `*/` de trop a fermé un commentaire CSS en avance**, laissant six lignes de prose dans la
+   feuille de style. Le navigateur les a ignorées, la page s'est affichée, et le seul symptôme était
+   une règle « qui ne s'applique pas ». Une assertion a été ajoutée à la vérification.
+
+**Un aveu porté dans le fichier lui-même.** L'en-tête affirmait « aucune image distante, tout est
+dessiné à l'exécution ». C'est encore vrai pour les distantes, mais `aca-hand.png` est un fichier
+**local** de 163 Ko, et un fichier qui documente ses propres compromis n'a pas le droit d'en
+acquérir un en silence. Stockée en **niveaux de gris + alpha** et non en couleur : la page la rend
+désaturée de toute façon, la couleur était 250 Ko que personne ne voit. **Provenance dite** : c'est
+un détourage issu du modèle Framer dont cette page suit la direction artistique, pas un visuel
+original — acceptable pour un prototype, à remplacer ou à licencier avant toute publication
+commerciale.
+
+**Ce qui n'a délibérément pas été fait.** Les trois portraits du site de référence n'ont pas été
+repris. La section « témoignages » de cette page dit explicitement qu'il n'y a pas encore de client
+et cite trois découvertes (§16, §17, §21) à la place ; y coller des photos de mannequins
+transformerait une section honnête en section fabriquée.
+
+**Vérifié :** **795 tests** inchangés. Rendu mesuré à 1440 et 390 px : chaque champ a une largeur de
+ligne unique (une ligne irrégulière signifierait que l'espace et le bloc viennent de deux polices
+différentes — d'où une pile `--font-block` distincte de `--font-mono`, Fragment Mono n'ayant pas les
+blocs) ; les deux copies se superposent au pixel près (`dx: 0, dy: 0`) ; la photographie se charge ;
+aucun débordement horizontal ; aucune erreur console. Branches rejouées : `prefers-reduced-motion`
+(les 7 champs sont **dessinés**, 0 animation en cours, la masse reste grise — « pas d'animation » ne
+doit jamais vouloir dire « pas d'image »), bascule FR (les 7 champs survivent), et impression (tout
+l'artwork masqué, 12 titres conservés). Détail : `docs/PROJECT_JOURNAL.md` (entrée du 2026-08-07).
+
+**Non vérifié, et dit comme tel :** rien n'a été ouvert sur un vrai téléphone (uniquement un
+navigateur redimensionné à 390 px) ; la page n'est toujours hébergée nulle part ; et le rendu des
+blocs dépend de la police système retenue par la pile `--font-block`, contrôlée sur Chromium/Windows
+seulement.
+
+### §26.1 — Icônes réduites, et le même fond dans Streamlit
+
+Deux demandes de suite : les icônes de capacités étaient trop grandes, et l'application devait
+reprendre le même fond que la page de présentation.
+
+**Redimensionner ces icônes n'est pas un réglage de largeur.** Le nombre de colonnes vaut
+largeur ÷ (corps × chasse), et le nombre de lignes en découle — réduire la largeur seule divise donc
+les lignes et détruit à nouveau les icônes, exactement le défaut corrigé plus haut. En tenant le
+rapport à 40 px de largeur pour 1 px de corps, la grille reste à ~73×40 à n'importe quelle taille :
+280 px/7 px sont devenus **200 px/5 px** sans perdre un seul détail.
+
+**Le fond de l'application reprend le motif** ([branding.py](../aca/core/branding.py),
+`_ambient_texture`). Une seconde couche `::after` répète une tuile SVG de blocs éparpillés en
+`--aca-primary`, **découpée par les mêmes rayons radiaux** que les voiles du §21 — les pixels
+n'existent donc que là où il y a déjà de la couleur — et animée par **la même** image-clé
+`aca-ambient`, pour que les deux couches dérivent ensemble ; deux fonds qui glissent l'un sur
+l'autre cessent de se lire comme une matière. Ce n'est délibérément **pas** le moteur de la page de
+présentation : là-bas les blocs sont du vrai texte régénéré par un canvas à chaque image, et
+`branding.py` n'émet que du CSS — une contrainte qu'on ne lève pas pour une décoration. Coût dit :
+le masque fait **fondre** les blocs vers les bords là où un vrai tramage les **raréfie** ; à 5 %
+d'opacité sur une tuile couverte à 27 % l'écart est imperceptible, mais c'est une approximation.
+
+Trois détails sont des décisions, pas des réglages : la tuile est tirée par un **hachage de
+coordonnées et non par une matrice de Bayer** (seuillée à une seule valeur, Bayer donne des rangées
+de 4, 2, 4, 0 cellules, soit un tissage à coutures visibles — essayé, rendu, rejeté ; et une texture
+statique n'a aucune raison d'être ordonnée, puisqu'il n'y a pas de scintillement d'image à image à
+éviter) ; **chaque rangée et chaque colonne compte au moins 2 cellules**, parce qu'un tirage à 30 %
+laisse une rangée de seize vide environ une fois sur trois cents et qu'une rangée vide dans une
+tuile répétée tous les 96 px devient une couture ; et la **même** URI est posée deux fois à 96 et
+138 px avec des décalages premiers entre eux, de sorte que la période combinée dépasse tout écran.
+
+**Le défaut le plus instructif de la passe, commis DEUX FOIS.** En rallongeant un commentaire CSS
+existant, un `*/` s'est retrouvé au milieu du bloc : la première fois il a annulé en silence les
+règles du pied de page, la seconde il a supprimé la dérive du fond sur **les deux** couches — et
+dans les deux cas la page s'affichait sans erreur. D'où un test qui ne concerne pas cette
+fonctionnalité mais tout le fichier : `test_les_commentaires_css_sont_tous_refermes` équilibre les
+délimiteurs sur la feuille **émise**, et refuse aussi une fermeture orpheline suivie d'une
+ouverture plus loin (un simple comptage égal ne l'aurait pas vue).
+
+**Vérifié :** **802 tests** (7 ajoutés). Dans l'application réellement lancée : la couche existe,
+porte ses deux calques aux bonnes échelles, est masquée, et `::before` comme `::after` portent
+`aca-ambient 48s`. Peinture mesurée par **différence d'images** — capture, couche désactivée,
+seconde capture — et non par échantillonnage, qui ne mesurait que l'interface : 18,7 % des pixels
+échantillonnés changent, dans deux amas correspondant aux deux voiles. Un premier essai annonçait
+un écart maximal de 86/255 pour une couche à 5 % d'opacité, ce qui est arithmétiquement impossible :
+les animations n'étaient pas figées entre les deux captures et la mesure suivait le voile en train
+de dériver.
+
+**Non vérifié :** rien sur un vrai téléphone ; le mode sombre et les 18 préréglages ne sont vérifiés
+que par calcul ; et `mask-image` reste un détail d'implémentation navigateur — contrôlé sur
+Chromium/Windows uniquement.
+
+### §26.2 — Un fond qui bouge vraiment, un pied de page, et une palette réunifiée
+
+**« Le fond ne bouge pas vraiment. »** Exact, et mesurable. La texture partageait la boucle du
+voile : 2,5 % d'un calque d'environ 1650 px, soit 41 px en 24 s — 1,7 px/s. Sur un dégradé énorme
+sans contour, c'est le réglage voulu. Sur un motif **répété tous les 96 px**, c'est invisible : une
+translation périodique inférieure à une période, à cette vitesse, se lit comme immobile. La texture
+a donc désormais sa propre image-clé (`aca-grain`, 26 s, trois amplitudes et un changement de
+direction — ce qui rend un mouvement perceptible n'est pas sa vitesse mais son changement de cap),
+et elle dérive **contre** le voile au lieu d'avec lui : le grain se lit comme des particules qui
+traversent le fond, ce que fait la masse de la page de présentation. Toujours `transform` seul,
+donc toujours composé par le GPU. Mesuré : **36 à 39 % des pixels échantillonnés changent en 4 s**,
+contre un fond auparavant jugé fixe à l'œil.
+
+**Icônes, troisième passe** : 200 px/5 px lisaient encore « massif » contre un texte de carte à
+15 px. 152 px/3,8 px les met au poids optique du titre de la carte. Toujours le même rapport
+40 px de largeur pour 1 px de corps, donc la grille reste à ~73×40 et aucun détail ne se perd.
+
+**Pied de page** refait sur la forme de la page de référence : deux colonnes *Pages* et *Support*.
+Les entrées `[Terms & Conditions]` et `[Acceptable Use]` du modèle ne sont **pas** reprises — ces
+documents n'existent pas dans ce projet, et un lien de pied de page vers une page jamais écrite est
+la façon la moins chère de perdre la crédibilité que tout le reste de la page dépense à gagner.
+Les huit liens conservés ont été vérifiés un par un ; l'un d'eux, `#faq`, pointait dans le vide :
+la section Questions fréquentes était la seule sans `id`, personne ne l'ayant jamais liée.
+
+**« Prototype de stage · 8 semaines » retiré**, et deux autres tournures du même registre revues
+(« le prototype savait lire un e-mail » → « la première version ») — sans toucher à une seule
+affirmation de fait. La phrase des témoignages devient « ce produit n'a pas encore de client » :
+plus sobre, exactement aussi honnête, et la section continue de dire pourquoi elle ne contient pas
+de témoignages.
+
+**Palette réunifiée, sur décision explicite.** Mesuré : l'instance tournait sur le préréglage
+`Émeraude` (primaire `#0F4C81`, accent `#3E8FD0`) dont la **séparation de signal vaut 0,08 sur 1** —
+le défaut même que `signal_separation()` avait été écrite pour attraper au §21, ici en production :
+l'ambre réservé à « une personne doit trancher » était remplacé par un bleu de la même famille que
+la primaire, donc le repère n'existait plus. Pire, la divergence était **interne** : `config.toml`
+portait déjà le pétrole tandis que le CSS injecté portait le bleu, si bien que les composants
+propres à Streamlit (listes déroulantes, en-têtes de `st.dataframe`, palette Vega) et l'habillage
+ne s'accordaient pas. Réglages passés à la palette conçue (`#125E6B` / `#B4622A`, surface `#FFFFFF`
+au lieu d'un `#F2F6FB` presque confondu avec le fond) : séparation **0,744**, et
+`accessibility_report()` ne renvoie plus **aucun** avertissement. Le logo du client est conservé
+intact, et le panneau « Apparence » revient en arrière en un clic.
+
+**Vérifié :** **802 tests**. Bouton « Send request » exercé de bout en bout sur une copie sonde de
+la page : jour et créneau choisis dans le calendrier, destinataire réellement présent
+(`hajriismail7@gmail.com`), et le corps du message porte « Preferred slot: Friday, 7 August 2026 —
+09:00 ». Aucun débordement à 390 et 1440 px, aucune erreur console, `prefers-reduced-motion`,
+bascule FR et impression rejouées.
+
+### §26.3 — Fond d'ambiance réglable, et réservation réellement automatique
+
+**Le fond devient un réglage.** Il était figé depuis le §21 (deux voiles radiaux), puis §26 y avait
+ajouté une trame de blocs — sans jamais aucun moyen d'y toucher sans modifier le code. Sur un
+produit livré en marque blanche c'est l'incohérence la plus voyante : tout le reste de l'apparence
+se règle depuis « Apparence », et c'est justement l'élément qui couvre le plus de surface. Trois
+jetons : `BRAND_AMBIENT` (**particules**, voile, grille, cadre, aucun), `BRAND_AMBIENT_INTENSITY`
+(discret / normal / marqué, agissant sur **toutes** les couches d'un seul curseur — sinon on obtient
+des combinaisons où le dégradé crie pendant que le grain chuchote) et `BRAND_AMBIENT_COLOR`.
+
+Opacité de la trame portée de 0,05 à **0,075** par couche : elle était rapportée comme à peine
+visible. « Marqué » la porte à 0,135, « discret » la ramène à 0,041.
+
+**« Cadre » est l'autre façon demandée.** Le filet est tracé par `box-shadow: inset` sur le
+conteneur et non par un pseudo-élément bordé : un pseudo-élément aurait dû se placer dans le
+contexte d'empilement de `stMain`, où il serait passé soit derrière le fond, soit par-dessus le
+contenu selon l'ordre des couches. Une ombre interne n'a aucune de ces deux questions à trancher et
+ne peut pas recouvrir un widget.
+
+**La couleur, et le défaut qui compte.** Vide = suit `BRAND_PRIMARY`. C'est le seul défaut sûr :
+sans lui, un client qui change sa marque garderait un fond dans l'ancienne teinte, et le réglage
+censé unifier l'identité produirait exactement l'incohérence qu'il doit empêcher. Un
+`st.color_picker` ne sait pas exprimer « vide » — il renvoie toujours une couleur —, d'où la case
+« suivre la couleur principale » dans le panneau. La règle du §21 est **reformulée, pas
+abandonnée** : le garde-fou porte sur le DÉFAUT (jamais l'ambre), pas sur un choix explicite ;
+imposer une décoration contre un choix fait en connaissance de cause serait un autre défaut.
+
+Les voiles quittent la constante `_SURFACES` pour `_ambient()` : ils dépendent désormais de trois
+réglages, ce qu'une chaîne statique ne peut pas porter.
+
+**Réservation : Cal.com.** Le paramétrage était écrit pour Calendly seul. Cal.com fait le même
+travail avec **d'autres paramètres d'URL** (`layout`, `theme`, `metadata[…]` contre
+`hide_event_type_details`, `background_color`, `utm_content`). Le fournisseur est déduit de l'hôte
+plutôt que configuré à part : un champ à remplir au lieu de deux, et aucun moyen de régler l'URL sur
+l'un et le drapeau sur l'autre. `CONFIG.booking` remplace `CONFIG.calendly`, qui reste lu pour
+qu'un déploiement existant ne perde pas son calendrier. La couleur de marque n'est **pas** envoyée à
+Cal.com : elle se règle dans son propre type d'événement, et un paramètre inconnu qu'il ignore en
+silence se lirait comme un défaut de style de notre côté.
+
+Les trois branches ont été rejouées dans un navigateur, la requête vers le tiers étant bloquée pour
+que rien ne parte réellement : **cal.com** → `?layout=month_view&theme=dark&name=…&email=…`,
+picker hors ligne retiré, note « disponibilités réelles » affichée ; **calendly** → ses propres
+paramètres ; **vide** → picker hors ligne conservé, note « cette page ne réserve rien » affichée.
+
+**Ce que cette page ne fait toujours pas, et ne doit pas prétendre faire.** Elle n'envoie aucun
+e-mail et n'écrit dans aucun agenda : c'est Cal.com qui réserve, bloque le créneau et envoie la
+confirmation. Le lien Google Meet n'apparaît que si l'agenda Google est connecté **et** que le lieu
+de l'événement est réglé sur Google Meet côté Cal.com — cette page ne peut pas le faire à sa place.
+Et l'expéditeur de la confirmation est Cal.com, pas l'adresse personnelle du vendeur, tant qu'aucun
+expéditeur propre n'est configuré chez eux.
+
+**Vérifié :** **804 tests** (+2). Cinq styles rendus côte à côte dans un navigateur — chacun émet
+exactement ses couches, ni une de plus (deux décors superposés) ni une de moins (un réglage sans
+effet visible) —, une valeur de style inconnue retombe sur le défaut plutôt que de supprimer le
+fond, et une couleur corrompue n'emporte pas la couche.
+
+### §26.4 — Le bouton envoie vraiment, et les invités
+
+**Le vrai défaut de `mailto:`, et ce n'était pas le clic en trop.** Le bouton « Envoyer la demande »
+ouvrait le client e-mail du visiteur, qui devait encore appuyer sur Envoyer. Le problème n'est pas
+l'étape supplémentaire : **sur un téléphone d'entreprise, dans un navigateur sans compte mail ou
+depuis un webmail, `mailto:` n'ouvre rien du tout**. La demande était alors perdue en silence — et
+côté vendeur, indiscernable d'une personne qui n'aurait jamais rempli le formulaire.
+
+`CONFIG.form` (+ `CONFIG.formKey`) branche un point de collecte (Web3Forms, Formspree) : le
+formulaire part en `fetch` POST, le visiteur voit « Demande envoyée » sans quitter la page, et
+l'e-mail arrive sans aucune action de sa part. `fetch` et non un POST natif : un POST natif quitte
+la page pour celle du prestataire, c'est-à-dire égare le visiteur à l'instant précis où il vient de
+se déclarer intéressé.
+
+**L'échec retombe sur `mailto:` au lieu d'afficher une erreur.** Réseau coupé, service en panne, clé
+expirée : la demande de quelqu'un qui a pris la peine d'écrire ne doit pas disparaître parce qu'un
+tiers est indisponible.
+
+**La note sous le bouton a deux versions, et le script SUPPRIME celle qui ne s'applique pas** plutôt
+que de la masquer — deux promesses contradictoires sur le même bouton finiraient toutes les deux à
+l'impression, où `display:none` ne protège plus. C'est la règle déjà appliquée aux deux notes du
+calendrier au §23.2.
+
+**Les invités** (la capture envoyée : l'écran « Ajouter des invités » de Cal.com). Un champ
+facultatif a été ajouté au formulaire, et il **pré-remplit** cet écran au lieu de le remplacer :
+quelqu'un qui veut son directeur technique dans la réunion le sait en écrivant, pas trois écrans
+plus loin. Envoyé en `guests` **répété**, un paramètre par adresse — c'est la forme attendue, une
+chaîne séparée par des virgules arriverait comme une adresse unique et invalide. Sans calendrier
+configuré, la liste part simplement dans le corps du message : le champ n'est jamais un contrôle
+sans effet. Séparateurs virgule, point-virgule ou espace acceptés, filtrage sur la seule présence
+d'une arobase — le but est d'écarter les fragments vides, pas de valider une adresse, ce que le
+prestataire fera de toute façon.
+
+L'en-tête du fichier est **amendé** : il annonçait « aucun script distant, aucune image distante ».
+C'est toujours vrai, mais il existe désormais **deux requêtes sortantes**, toutes deux facultatives
+et déclenchées par une action — l'iframe du calendrier à l'approche de la section, et le POST du
+formulaire à l'envoi. Un fichier qui documente ses propres compromis n'a pas le droit d'en acquérir
+un en silence.
+
+**Mise en route pas à pas** : `docs/STRIPE_CALENDLY_SETUP.md`, section « Cal.com + envoi direct ».
+Elle insiste sur les deux réglages qu'on oublie et qui ne se voient qu'à l'usage — *Location →
+Google Meet* (sans quoi la confirmation part sans lien) et *Booking questions → Add guests* (sans
+quoi le champ de la page pré-remplit un écran qui n'existe pas).
+
+**Vérifié :** **804 tests**, et les quatre branches du bouton rejouées dans un navigateur avec le
+point de collecte simulé par interception, donc sans qu'aucune requête ne sorte de la machine :
+(1) envoi direct — le corps POSTé contient bien nom, société, invités, palier, créneau et la clé
+d'accès, le formulaire se vide, seule la note « envoi direct » subsiste ; (2) réponse 500 — message
+de repli affiché et bascule vers `mailto:` ; (3) sans point de collecte — `mailto:` vers
+`hajriismail7@gmail.com` avec la ligne « Guests: » ; (4) Cal.com — les invités arrivent en
+`&guests=…&guests=…`.
+
+
+### §26.5 — Pages support, Cal.com réellement branché, formulaire déplacé
+
+**Cal.com est en service.** `CONFIG.booking` pointe sur l'événement réel, et trois défauts trouvés
+au rendu ont été corrigés. (1) La capture rapportée comme « calendrier cassé » montrait en fait un
+**état de chargement** : Cal.com met une dizaine de secondes à peindre son premier pixel, et un
+rectangle vide à l'endroit exact où la page vient de promettre « disponibilités réelles » se lit
+comme une panne. Un repère d'attente est posé avant le cadre et retiré à son `load`. (2) Le cadre
+faisait 640 px pour une page qui en dispose 1 500 : les créneaux tombaient sous la ligne de
+flottaison. Porté à 1 150 px — valeur mesurée, la carte de Cal.com s'ÉTIRANT pour remplir le cadre
+qu'on lui donne, il n'y a pas de hauteur naturelle à découvrir mais un seuil sous lequel grille du
+mois et créneaux ne tiennent plus ensemble. (3) `?theme=dark` **ne fait rien** : mesuré, la page rend
+`<html class="notranslate light">` que l'on demande `dark` ou `light`, le thème étant réglé dans le
+type d'événement. Paramètre mort retiré — un paramètre sans effet est pire qu'aucun, la prochaine
+personne qui cherchera pourquoi la carte est blanche le lira comme une piste.
+
+**Formulaire : envoi réel, puis déplacement.** `CONFIG.form`/`formKey` branchent Web3Forms (clé
+**publique** par déclaration de son émetteur, contrairement à une clé d'API Cal.com qui ne doit
+jamais figurer dans un fichier servi). Le vrai défaut corrigé n'est pas le clic en trop : sur un
+téléphone d'entreprise ou depuis un webmail, `mailto:` n'ouvre **rien**, et la demande était perdue
+en silence. Le formulaire a ensuite quitté la page d'accueil pour la page de contact — le dupliquer
+aurait garanti qu'un jour l'un des deux reçoive un champ que l'autre n'a pas. Ce qui reste sur la
+page d'accueil est le CHEMIN et non le formulaire : réserver est l'action principale, mais quelqu'un
+qui n'est pas prêt à céder trente minutes d'agenda doit pouvoir écrire, et c'est souvent le lecteur
+le plus haut placé.
+
+**`static/legal.html`** — Contact, Confidentialité, Conditions générales, Usage acceptable.
+**Un fichier, quatre sections ancrées**, et c'est une décision : quatre fichiers auraient porté
+quatre copies de la même feuille de style, lesquelles divergent à la première modification — le
+raisonnement qui garde déjà le français en attribut `data-fr` plutôt qu'en second fichier traduit.
+Une navigation latérale collante marque la position, ce qui est la seule chose que des pages
+séparées offrent gratuitement. La confidentialité est **dérivée de `docs/PRIVACY_POLICY.md`**, écrit
+contre le code (liste des sous-traitants, 365 jours, absence de décision entièrement automatisée),
+augmentée de Cal.com et Web3Forms qui reçoivent désormais des données de visiteurs. Les conditions
+générales et l'usage acceptable sont des **projets non relus par un juriste**, et le disent sur la
+page. Les sept valeurs qu'aucune décision technique ne peut fournir — raison sociale, contact RGPD,
+autorité de contrôle, juridiction — restent des marqueurs `[TO COMPLETE]` visibles plutôt que des
+inventions plausibles : un blanc se fait remplir, une invention se fait croire. Même raisonnement
+que le retrait des prix fictifs.
+
+**Vérifié :** 804 tests inchangés. Quatre branches du bouton rejouées avec le point de collecte
+intercepté (rien n'est sorti de la machine) ; les quatre liens du pied de page atteignent leurs
+ancres ; aucune ancre morte sur la page support ; aller-retour FR/EN sur les trois titres
+juridiques ; aucun débordement à 390 et 1440 px ; aucune erreur console. Page de réservation réelle
+inspectée jusqu'à l'étape de confirmation **sans jamais confirmer** : lieu Google Meet, 16 journées
+sélectionnables (agenda connecté), « Ajouter des invités » présent.
+
+**Non vérifié, et dit comme tel :** aucun envoi Web3Forms réel n'a pu être effectué depuis cette
+machine — toutes les vérifications utilisent une réponse simulée. La livraison effective reste à
+tester par l'exploitant.

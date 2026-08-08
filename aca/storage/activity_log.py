@@ -84,6 +84,12 @@ ACTION_LOGOUT = "auth.logout"
 ACTION_LOCKED_OUT = "auth.locked_out"
 ACTION_SESSION_EXPIRED = "auth.session_expired"
 ACTION_PERMISSION_DENIED = "auth.permission_denied"
+# §24 — appareils de confiance. Ces trois lignes sont la contrepartie du confort accordé : un
+# second facteur qu'on peut sauter DOIT laisser une trace de chaque saut, faute de quoi la seule
+# chose que l'administrateur perd en accordant ce confort est précisément sa visibilité dessus.
+ACTION_DEVICE_TRUSTED = "auth.device_trusted"
+ACTION_TOTP_SKIPPED = "auth.totp_skipped"
+ACTION_DEVICE_REVOKED = "auth.device_revoked"
 
 ACTION_ANALYSIS_STARTED = "analysis.started"
 ACTION_CLARIFICATION_ANSWERED = "analysis.clarification_answered"
@@ -145,6 +151,9 @@ ACTION_LABELS = {
     ACTION_LOGOUT: "Déconnexion",
     ACTION_LOCKED_OUT: "Compte verrouillé (trop d'échecs)",
     ACTION_SESSION_EXPIRED: "Session expirée",
+    ACTION_DEVICE_TRUSTED: "Appareil mémorisé (second facteur)",
+    ACTION_TOTP_SKIPPED: "Second facteur sauté (appareil de confiance)",
+    ACTION_DEVICE_REVOKED: "Appareils de confiance révoqués",
     ACTION_PERMISSION_DENIED: "Accès refusé (permission manquante)",
     ACTION_ANALYSIS_STARTED: "Analyse lancée",
     ACTION_CLARIFICATION_ANSWERED: "Réponse à une clarification",
@@ -186,6 +195,10 @@ SENSITIVE_ACTIONS = frozenset({
     ACTION_USER_ROLE_CHANGED, ACTION_USER_DISABLED, ACTION_USER_ENABLED,
     ACTION_USER_PASSWORD_RESET, ACTION_KNOWLEDGE_INGESTED, ACTION_KNOWLEDGE_APPROVED,
     ACTION_DATA_EXPORTED, ACTION_DATA_PURGED,
+    # §24 : mémoriser un appareil et sauter le second facteur sont exactement les événements qu'on
+    # veut pouvoir consulter APRÈS coup, le jour où un poste est perdu — donc précisément ceux qui
+    # ne doivent pas disparaître avec la purge courante.
+    ACTION_DEVICE_TRUSTED, ACTION_TOTP_SKIPPED, ACTION_DEVICE_REVOKED,
     # §19 : programmer un envoi, c'est décider qu'un message partira vers un prospect en l'absence
     # de son auteur. Cette trace-là doit survivre à la purge courante, au même titre qu'un
     # changement de rôle — d'où sa présence ici plutôt que dans le bruit d'usage quotidien.

@@ -18,15 +18,17 @@ import traceback
 import uuid
 
 import streamlit as st
+import streamlit.components.v1 as components
 from langchain_core.callbacks import UsageMetadataCallbackHandler
 
 from aca.core import app as aca_graph
 from aca.core import branding
+from aca.core import device_trust
 from aca.core import graph_topology
 from aca.core import i18n
 from aca.core import session as aca_session
 from aca.core.auth_lockout import lockout_remaining_seconds, next_lockout_seconds
-from aca.storage import activity_log, analytics_store, user_store
+from aca.storage import activity_log, analytics_store, device_trust_store, user_store
 
 DEV_USERNAME = "(dev)"  # identité de repli quand aucun compte n'existe (mode développement)
 
@@ -183,6 +185,127 @@ def _clear_totp_pending() -> None:
         st.session_state.pop(key, None)
 
 
+# ── §24 : appareils de confiance ────────────────────────────────────────────────────────────────
+# Le raisonnement de sécurité complet est dans `aca/core/device_trust.py`. Ici, uniquement la
+# plomberie Streamlit : lire le cookie, le poser, et décider s'il faut afficher l'écran du code.
+
+def _device_token() -> str:
+    """
+    Jeton d'appareil, `""` s'il n'y en a pas. DEUX sources, et il en faut bien deux.
+
+    `st.context.cookies` est figé au HANDSHAKE de la session : un cookie déposé pendant la session
+    en cours y reste invisible, même après plusieurs reruns — mesuré, pas supposé (une page sonde
+    montre le cookie présent côté navigateur, absent côté serveur, et visible seulement après un
+    rechargement complet de la page). C'est très exactement le cas « je me déconnecte puis je me
+    reconnecte » sans recharger l'onglet : même session Streamlit, donc cookie illisible, donc code
+    redemandé alors que la case avait bien été cochée. C'était le défaut signalé.
+
+    D'où le repli sur `st.session_state`, qui survit à la déconnexion (celle-ci ne vide que la clé
+    `session`) : il couvre le retour dans le MÊME onglet, là où le cookie ne peut rien ; le cookie,
+    lui, couvre le rechargement, le nouvel onglet et le redémarrage du navigateur, là où
+    `session_state` a disparu. Les deux ensemble couvrent tous les cas ; aucun des deux seul n'y
+    suffit.
+
+    Le jeton conservé en `session_state` ne quitte jamais le serveur : il n'ajoute aucune exposition
+    et reste, comme le cookie, sans valeur sans le mot de passe.
+    """
+    from_state = st.session_state.get("_device_token") or ""
+    if from_state:
+        return str(from_state)
+    try:
+        return str(st.context.cookies.get(device_trust.COOKIE_NAME, "") or "")
+    except Exception:  # noqa: BLE001
+        # `st.context` peut être vide selon le mode de lancement (headless, hors navigateur) : ne
+        # pas réussir à lire un cookie doit mener à redemander le code, jamais à faire échouer la
+        # connexion.
+        return ""
+
+
+def flush_device_cookie() -> None:
+    """
+    Exécute l'écriture (ou l'effacement) de cookie mise en attente par la passe précédente.
+
+    Streamlit n'offre aucune écriture de cookie côté Python ; une iframe `components.html` hérite
+    en revanche de l'origine de la page et peut écrire dans le `document.cookie` du parent —
+    vérifié en conditions réelles avant d'écrire ce code (cf. `docs/PROJECT_JOURNAL.md`), et non
+    déduit de la documentation.
+
+    POURQUOI UNE MISE EN ATTENTE plutôt qu'une écriture au moment du clic : `_open_session()` et le
+    bouton de déconnexion appellent tous deux `st.rerun()` immédiatement après, ce qui interrompt
+    le script et jette le rendu en cours. Un composant émis juste avant ne serait donc jamais
+    exécuté par le navigateur — la case aurait été cochée, l'enregistrement écrit côté serveur, et
+    le cookie n'aurait jamais existé : une panne parfaitement muette, du genre que seul un essai
+    réel révèle. On repousse donc l'émission à la passe suivante, qui elle va jusqu'au bout.
+
+    `height=0` : ces composants n'ont rien à montrer, ils agissent.
+    """
+    token = st.session_state.pop("_device_cookie_pending", None)
+    if token:
+        components.html(device_trust.cookie_script(token, device_trust.trust_seconds()), height=0)
+    if st.session_state.pop("_device_cookie_clear", False):
+        components.html(device_trust.forget_script(), height=0)
+
+
+def forget_device_on_this_browser() -> None:
+    """Révoque l'autorisation de CE navigateur (déconnexion « oublier cet appareil »)."""
+    token = _device_token()
+    if token:
+        device_trust_store.revoke_token(token)
+    # Les deux sources, sinon « oublier cet appareil » n'oublierait que la moitié : le cookie part,
+    # et la copie en session continuerait de faire sauter le code jusqu'à la fermeture de l'onglet.
+    st.session_state.pop("_device_token", None)
+    st.session_state["_device_cookie_clear"] = True
+
+
+def _remember_this_device(username: str, user_agent: str, ip: str) -> None:
+    """Émet un jeton, l'enregistre côté serveur, met le cookie en attente et consigne le tout."""
+    token = device_trust.new_token()
+    # Étiquette purement descriptive, pour qu'une ligne de « Appareils de confiance » soit
+    # reconnaissable par son propriétaire. Volontairement grossière : le navigateur et l'adresse
+    # suffisent à répondre « est-ce mon poste du bureau ? », et rien de plus fin n'aiderait.
+    label = f"{(user_agent or '?').split(')')[0][:60]} · {ip or 'IP inconnue'}"
+    expiry = device_trust_store.remember(
+        username,
+        token,
+        auth_fingerprint=user_store.auth_state_fingerprint(username),
+        user_agent=user_agent,
+        label=label,
+    )
+    st.session_state["_device_cookie_pending"] = token
+    # Gardé aussi côté session : le cookie qu'on vient de poser sera illisible jusqu'au prochain
+    # chargement de page (cf. `_device_token`), donc sans cette ligne une déconnexion suivie d'une
+    # reconnexion dans le même onglet redemanderait le code.
+    st.session_state["_device_token"] = token
+    audit(
+        activity_log.ACTION_DEVICE_TRUSTED,
+        actor=username,
+        details={"jours": device_trust.trust_days(), "appareil": label},
+    )
+    st.session_state["_device_trusted_until"] = expiry
+
+
+def _trusted_device_accepted(username: str) -> bool:
+    """
+    Ce navigateur est-il déjà autorisé à sauter le code pour ce compte ?
+
+    Un refus est silencieux et sans conséquence : on affiche simplement l'écran du code. Aucun
+    compteur d'échec n'est touché — un cookie périmé n'est pas une tentative d'intrusion, et les
+    confondre verrouillerait des utilisateurs parfaitement légitimes (cf.
+    `device_trust_store.verify`).
+    """
+    if not device_trust.is_enabled():
+        return False
+    token = _device_token()
+    if not token:
+        return False
+    return device_trust_store.verify(
+        username,
+        token,
+        auth_fingerprint=user_store.auth_state_fingerprint(username),
+        user_agent=client_context().get("user_agent", ""),
+    )
+
+
 def _totp_qr_png(uri: str) -> bytes:
     """
     QR code (PNG bytes) for a TOTP provisioning URI.
@@ -219,9 +342,28 @@ def _handle_totp_step(username: str, role: str, brand: dict, now: float) -> bool
     if user_store.has_totp(username):
         st.info(t("totp.verify_prompt", username=username), icon=":material/verified_user:")
         code = st.text_input(t("totp.code_label"), key="totp_code_input")
+        # §24 — la case n'apparaît que si le déploiement l'autorise (`ACA_TOTP_TRUST_DAYS=0` la
+        # retire entièrement plutôt que de l'afficher désactivée : une case cochable sans effet est
+        # pire qu'une case absente). Non cochée par défaut — un compromis de sécurité se choisit,
+        # il ne se subit pas par distraction.
+        remember = False
+        if device_trust.is_enabled():
+            remember = st.checkbox(
+                t("totp.remember_device", days=device_trust.trust_days()),
+                key="totp_remember_device",
+                help=t("totp.remember_help"),
+            )
         col_verify, col_cancel = st.columns(2)
         if col_verify.button(t("totp.verify_button"), type="primary"):
             if user_store.verify_totp(username, code, now=now):
+                # Mémorisé APRÈS un code valide, jamais avant : sans quoi un mot de passe seul
+                # suffirait à se faire mémoriser, et la case supprimerait le second facteur au
+                # lieu de l'espacer.
+                if remember and device_trust.is_enabled():
+                    context = client_context()
+                    _remember_this_device(
+                        username, context.get("user_agent", ""), context.get("ip_address", ""),
+                    )
                 _clear_totp_pending()
                 _open_session(username, role)
             else:
@@ -283,6 +425,10 @@ def check_auth(brand: dict) -> bool:
     résolu ici une seconde fois : une seule source de vérité pour la palette affichée sur cet écran.
     """
     now = time.time()
+    # §24 — une écriture de cookie mise en attente par la passe précédente s'exécute ici, en tête :
+    # c'est le seul point traversé aussi bien par un utilisateur authentifié que par l'écran de
+    # connexion, donc le seul qui couvre à la fois « mémoriser » et « oublier ».
+    flush_device_cookie()
     current = st.session_state.get("session")
     if current:
         reason = aca_session.expiry_reason(current, now)
@@ -344,9 +490,22 @@ def check_auth(brand: dict) -> bool:
             account = user_store.verify_credentials(username, pwd)
             if account:
                 if user_store.totp_required(account["role"]):
-                    st.session_state["_totp_pending_username"] = account["username"]
-                    st.session_state["_totp_pending_role"] = account["role"]
-                    st.rerun()
+                    # §24 — le mot de passe vient d'être vérifié ; si ce navigateur porte une
+                    # autorisation valide, on saute le CODE, jamais le mot de passe. Le saut est
+                    # consigné : c'est la contrepartie du confort, et la seule façon qu'un
+                    # administrateur puisse constater après coup depuis où le second facteur n'a
+                    # pas été demandé.
+                    if _trusted_device_accepted(account["username"]):
+                        audit(
+                            activity_log.ACTION_TOTP_SKIPPED,
+                            actor=account["username"], role=account["role"],
+                            details={"motif": "appareil de confiance"},
+                        )
+                        _open_session(account["username"], account["role"])
+                    else:
+                        st.session_state["_totp_pending_username"] = account["username"]
+                        st.session_state["_totp_pending_role"] = account["role"]
+                        st.rerun()
                 else:
                     _open_session(account["username"], account["role"])
             else:

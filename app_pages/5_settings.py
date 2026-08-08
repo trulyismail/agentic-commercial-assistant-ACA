@@ -6,9 +6,9 @@ from datetime import datetime
 
 import streamlit as st
 
-from aca.core import branding, intake_window, prod_check, ui_kit
-from aca.storage import activity_log, config_store, task_store, user_store
-from aca.ui.shared import audit as _audit, audit_denied as _audit_denied, can as _can, safe_error as _safe_error, t
+from aca.core import branding, device_trust, intake_window, prod_check, ui_kit
+from aca.storage import activity_log, config_store, device_trust_store, task_store, user_store
+from aca.ui.shared import audit as _audit, audit_denied as _audit_denied, can as _can, current_user as _current_user, safe_error as _safe_error, t
 
 BRAND = branding.resolve()
 
@@ -294,6 +294,23 @@ if _can(user_store.PERM_EDIT_SETTINGS):
                             )
                 continue
             for key, spec in entries:
+                # La couleur du fond d'ambiance est la seule à avoir un état « non renseignée », et
+                # cet état EST le défaut : vide = suit la couleur principale, pour qu'un client qui
+                # change sa marque n'obtienne pas un fond resté dans l'ancienne teinte. Un
+                # `st.color_picker` seul ne sait pas exprimer « vide » — il renvoie toujours une
+                # couleur —, d'où la case à cocher qui permet d'y revenir.
+                if key == "BRAND_AMBIENT_COLOR":
+                    suivre = st.checkbox(
+                        "Couleur du fond : suivre la couleur principale",
+                        value=not BRAND[key], key=f"brand_follow_{key}",
+                        help=spec.get("help"),
+                    )
+                    choisie = st.color_picker(
+                        spec["label"], value=BRAND[key] or BRAND["BRAND_PRIMARY"],
+                        key=f"brand_{key}", disabled=suivre,
+                    )
+                    _inputs[key] = "" if suivre else choisie
+                    continue
                 if spec["kind"] == branding.KIND_CHOICE:
                     _inputs[key] = st.selectbox(
                         spec["label"], options=spec["choices"],
@@ -525,3 +542,47 @@ if _can(user_store.PERM_MANAGE_USERS):
                         target_id=target,
                     )
                     st.success("Mot de passe mis à jour.", icon=":material/check_circle:")
+
+# ── Appareils de confiance (§24) ────────────────────────────────────────────────────────────
+# Volontairement HORS de la garde `PERM_MANAGE_USERS` : chacun ne voit et ne révoque que SES
+# propres appareils. Un administrateur n'a pas à révoquer ceux d'un collègue depuis cet écran —
+# et surtout, l'opérateur qui vient de perdre son portable doit pouvoir agir seul, tout de
+# suite, sans attendre que quelqu'un d'autre soit disponible.
+_me = _current_user().get("username")
+if _me and _me != "(dev)":
+    st.divider()
+    st.subheader(t("devices.section"), anchor=False)
+    if not device_trust.is_enabled():
+        st.caption(t("devices.disabled"))
+    else:
+        st.caption(
+            "Ces navigateurs sautent le **code** à la connexion pendant "
+            f"{device_trust.trust_days()} jours. Votre mot de passe, lui, reste demandé à chaque "
+            "fois. Changer de mot de passe révoque cette liste automatiquement — ce bouton sert "
+            "à le faire sans changer de mot de passe, par exemple après la perte d'un poste."
+        )
+        _devices = device_trust_store.list_devices(_me)
+        if not _devices:
+            st.caption(t("devices.none"))
+        else:
+            st.dataframe(
+                [
+                    {
+                        "Appareil": d["label"],
+                        "Mémorisé le": d["created_at"],
+                        "Dernier usage": d["last_used_at"] or "—",
+                        "Expire le": datetime.fromtimestamp(d["expires_at"]).strftime("%d/%m/%Y %H:%M"),
+                        "Réf.": d["ref"],
+                    }
+                    for d in _devices
+                ],
+                width="stretch", hide_index=True,
+            )
+            if st.button(t("devices.revoke_all"), icon=":material/no_accounts:"):
+                _revoked = device_trust_store.revoke_all(_me)
+                _audit(
+                    activity_log.ACTION_DEVICE_REVOKED, target_type="compte", target_id=_me,
+                    details={"appareils": _revoked},
+                )
+                st.success(t("devices.revoked", count=_revoked), icon=":material/check_circle:")
+                st.rerun()

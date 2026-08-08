@@ -500,3 +500,73 @@ def test_queue_store_functions_are_retry_wrapped():
 def test_audit_log_functions_are_retry_wrapped():
     for name in ("log_validation", "list_recent"):
         assert getattr(audit_log, name).__wrapped__ is not None
+
+
+# ── §22 — Répartitions du tableau de bord ─────────────────────────────────────────────────────
+# Ces quatre lectures n'ajoutent aucune donnée : elles exposent des colonnes déjà écrites depuis
+# l'origine. Les tests portent donc sur ce qui pourrait silencieusement mentir — une tranche
+# absente, une heure creuse escamotée, un classement instable.
+
+def test_repartition_par_origine(monkeypatch, tmp_path):
+    """`source` était enregistrée depuis toujours et affichée nulle part : c'est la mesure
+    d'adoption (réception automatique contre ressaisie à la main)."""
+    _fresh_analytics(monkeypatch, tmp_path)
+    analytics_store.record_classification("t-1", "DEVIS", "a@b.fr", "poller")
+    analytics_store.record_classification("t-2", "DEVIS", "c@d.fr", "poller")
+    analytics_store.record_classification("t-3", "SPAM", "e@f.fr", "manuel")
+    assert analytics_store.by_source(days=1) == [
+        {"source": "poller", "count": 2},
+        {"source": "manuel", "count": 1},
+    ]
+
+
+def test_les_tranches_de_delai_vides_sont_conservees():
+    """
+    La propriété qui compte le plus ici. Une tranche « plus de 24 h » absente du graphe se lit
+    comme « pas de données » ; elle veut dire « aucun retard », c'est-à-dire exactement l'inverse
+    — et la meilleure nouvelle du tableau de bord.
+    """
+    buckets = analytics_store.bucket_response_times([{"minutes": 5}, {"minutes": 30}])
+    assert [b["tranche"] for b in buckets] == [label for label, _, _ in
+                                               analytics_store.RESPONSE_BUCKETS]
+    assert buckets[0]["count"] == 2
+    assert all(b["count"] == 0 for b in buckets[1:])
+
+
+def test_les_bornes_de_tranches_ne_se_chevauchent_pas():
+    """Une durée pile sur une borne ne doit être comptée qu'une fois, et du bon côté."""
+    rows = [{"minutes": 59.9}, {"minutes": 60}, {"minutes": 240}, {"minutes": 1440},
+            {"minutes": 99999}]
+    counts = {b["tranche"]: b["count"] for b in analytics_store.bucket_response_times(rows)}
+    assert counts == {"moins d'1 h": 1, "1 à 4 h": 1, "4 à 24 h": 1, "plus de 24 h": 2}
+    assert sum(counts.values()) == len(rows)
+
+
+def test_bucket_ignore_les_durees_absentes():
+    """Ne lève pas sur une ligne sans durée : la fonction est appelée sur des lectures réelles."""
+    assert sum(b["count"] for b in
+               analytics_store.bucket_response_times([{"minutes": None}, {}])) == 0
+
+
+def test_histogramme_horaire_couvre_les_24_heures(monkeypatch, tmp_path):
+    """Les heures creuses sont l'information recherchée (à comparer avec la fenêtre de réception
+    réglée au §19) : un histogramme troué se lirait comme une courbe continue."""
+    _fresh_analytics(monkeypatch, tmp_path)
+    analytics_store.record_classification("t-1", "DEVIS", "a@b.fr", "manuel")
+    hours = analytics_store.hourly_volume(days=1)
+    assert len(hours) == 24
+    assert [h["heure"] for h in hours][:3] == ["00 h", "01 h", "02 h"]
+    assert sum(h["count"] for h in hours) == 1
+
+
+def test_correspondants_classes_et_bornes(monkeypatch, tmp_path):
+    _fresh_analytics(monkeypatch, tmp_path)
+    for i in range(3):
+        analytics_store.record_classification(f"a-{i}", "DEVIS", "gros@client.fr", "manuel")
+    analytics_store.record_classification("b-1", "DEVIS", "petit@client.fr", "manuel")
+    analytics_store.record_validation("a-0")
+
+    top = analytics_store.top_senders(days=1)
+    assert top[0] == {"expéditeur": "gros@client.fr", "e-mails": 3, "validés": 1}
+    assert top[1]["validés"] == 0          # jamais None : la colonne alimente une barre
+    assert len(analytics_store.top_senders(days=1, limit=1)) == 1

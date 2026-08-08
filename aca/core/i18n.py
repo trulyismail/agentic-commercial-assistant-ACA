@@ -73,6 +73,22 @@ TRANSLATIONS = {
         "en": "Models: Llama 3.1 8B (routing) · Llama 3.3 70B (extraction/drafting) · "
               "Gemini embeddings (semantic RAG)",
     },
+    # §23 — accès à la page de présentation depuis l'application. Elle existait depuis §16.5 mais
+    # n'était atteignable qu'en connaissant son chemin sur le disque : en pratique, personne ne
+    # l'ouvrait au moment où elle sert, c'est-à-dire en montrant le produit à quelqu'un, depuis
+    # l'écran du produit.
+    "sidebar.landing_header": {"fr": "Présentation", "en": "Overview"},
+    "sidebar.landing_button": {"fr": "Page de présentation", "en": "Product overview"},
+    "sidebar.landing_caption": {
+        "fr": "Le pitch d'ACA en une page — ce qu'il fait, ce qui est sécurisé, ce qui est vérifié.",
+        "en": "The ACA pitch on one page — what it does, what is secured, what is verified.",
+    },
+    "sidebar.landing_disabled": {
+        "fr": "Page indisponible : activez `server.enableStaticServing` dans "
+              "`.streamlit/config.toml`, puis redémarrez.",
+        "en": "Page unavailable: enable `server.enableStaticServing` in "
+              "`.streamlit/config.toml`, then restart.",
+    },
     "footer.deployed_for": {"fr": "déployé pour {company}", "en": "deployed for {company}"},
     "footer.human_validation": {"fr": "validation humaine obligatoire avant toute écriture CRM",
                                 "en": "human validation required before any CRM write"},
@@ -128,6 +144,39 @@ TRANSLATIONS = {
     "totp.invalid_code": {
         "fr": "Code invalide — vérifiez l'heure de votre téléphone et réessayez.",
         "en": "Invalid code — check your phone's clock and try again.",
+    },
+    # §24 — appareils de confiance. Le libellé dit ce qui est réellement échangé : le code est
+    # sauté, le mot de passe ne l'est jamais. Une case « rester connecté » laisserait croire le
+    # contraire, et c'est exactement le malentendu à éviter sur un écran de second facteur.
+    "totp.remember_device": {
+        "fr": "Se souvenir de cet appareil pendant {days} jours",
+        "en": "Remember this device for {days} days",
+    },
+    "totp.remember_help": {
+        "fr": "Sur ce navigateur uniquement, et seul le code sera sauté : votre mot de passe reste "
+              "demandé à chaque connexion. Changer de mot de passe annule immédiatement tous les "
+              "appareils mémorisés. À éviter sur un poste partagé.",
+        "en": "On this browser only, and only the code is skipped: your password is still required "
+              "every time. Changing your password immediately cancels every remembered device. "
+              "Avoid this on a shared computer.",
+    },
+    "totp.remembered_until": {
+        "fr": "Appareil mémorisé — aucun code ne sera demandé ici avant le {date}.",
+        "en": "Device remembered — no code will be asked here before {date}.",
+    },
+    "devices.section": {"fr": "Appareils de confiance", "en": "Trusted devices"},
+    "devices.none": {
+        "fr": "Aucun appareil mémorisé : le second facteur est demandé à chaque connexion.",
+        "en": "No remembered device: the second factor is asked at every login.",
+    },
+    "devices.revoke_all": {"fr": "Révoquer tous les appareils", "en": "Revoke all devices"},
+    "devices.revoked": {
+        "fr": "{count} appareil(s) révoqué(s). Le code sera redemandé partout.",
+        "en": "{count} device(s) revoked. The code will be asked everywhere again.",
+    },
+    "devices.disabled": {
+        "fr": "Mémorisation d'appareil désactivée sur ce déploiement (ACA_TOTP_TRUST_DAYS=0).",
+        "en": "Device remembering is disabled on this deployment (ACA_TOTP_TRUST_DAYS=0).",
     },
 
     # ── Onglet « Nouvel e-mail » (app_pages/1_inbox.py) ─────────────────────────────────────
@@ -339,6 +388,56 @@ TRANSLATIONS = {
     "dashboard.chart_funnel": {"fr": "Entonnoir de conversion", "en": "Conversion funnel"},
     "dashboard.response_times_expander": {"fr": "Détail des temps de réponse (leads validés)",
                                           "en": "Response time detail (validated leads)"},
+    # §22 — comparaison, nouvelles répartitions et bascules graphique/tableau.
+    "dashboard.compare_label": {"fr": "Comparer à la période précédente",
+                                "en": "Compare with the previous period"},
+    "dashboard.compare_help": {
+        "fr": "Affiche l'écart avec la période de MÊME DURÉE qui précède immédiatement. "
+              "Une flèche verte signale toujours une amélioration : pour le délai de réponse, "
+              "c'est donc une baisse.",
+        "en": "Shows the change against the immediately preceding window of the SAME LENGTH. "
+              "A green arrow always means an improvement — so for response time, a decrease.",
+    },
+    "dashboard.compare_caption": {"fr": "Écarts calculés sur les {d} jours précédents.",
+                                  "en": "Changes measured against the previous {d} days."},
+    "dashboard.view_chart": {"fr": "Graphique", "en": "Chart"},
+    "dashboard.view_table": {"fr": "Tableau", "en": "Table"},
+    "dashboard.view_label": {"fr": "Affichage", "en": "View"},
+    "dashboard.chart_buckets": {"fr": "Rapidité de réponse", "en": "Response speed"},
+    "dashboard.chart_buckets_help": {
+        "fr": "Répartition des leads validés par délai entre l'analyse et la décision humaine. "
+              "Au-delà de 24 h, un prospect a généralement déjà sollicité un concurrent.",
+        "en": "Validated leads by delay between analysis and the human decision. Past 24 h, a "
+              "prospect has usually already contacted a competitor.",
+    },
+    "dashboard.chart_source": {"fr": "Origine des e-mails", "en": "Where emails come from"},
+    "dashboard.chart_source_help": {
+        "fr": "Réception automatique contre saisie manuelle. C'est la mesure d'adoption : un outil "
+              "présenté comme automatique dont l'essentiel du volume est saisi à la main ne l'est pas.",
+        "en": "Automatic intake versus manual entry. This is the adoption measure: a tool sold as "
+              "automatic whose volume is mostly typed in by hand is not being adopted.",
+    },
+    "dashboard.chart_hours": {"fr": "Heures d'arrivée", "en": "Arrival hours"},
+    "dashboard.chart_hours_help": {
+        "fr": "Quand les e-mails arrivent réellement, heure par heure. À comparer avec la fenêtre "
+              "de réception configurée dans Réglages.",
+        "en": "When emails actually arrive, hour by hour. Compare with the intake window "
+              "configured in Settings.",
+    },
+    "dashboard.chart_senders": {"fr": "Correspondants les plus actifs", "en": "Most active senders"},
+    "dashboard.col_sender": {"fr": "Expéditeur", "en": "Sender"},
+    "dashboard.col_emails": {"fr": "E-mails", "en": "Emails"},
+    "dashboard.col_validated": {"fr": "Validés", "en": "Validated"},
+    "dashboard.no_data": {"fr": "Aucune donnée sur cette période.",
+                          "en": "No data for this period."},
+    # Les valeurs stockées (`poller`, `gmail_import`, `manuel`) sont des identifiants techniques.
+    # Les afficher telles quelles obligerait la personne à connaître le nom des composants pour lire
+    # son propre tableau de bord — on nomme donc le geste, pas le module qui l'exécute.
+    "dashboard.source_poller": {"fr": "Réception automatique", "en": "Automatic intake"},
+    "dashboard.source_gmail_import": {"fr": "Import Gmail (à la demande)",
+                                      "en": "Gmail import (on demand)"},
+    "dashboard.source_manuel": {"fr": "Saisie manuelle", "en": "Typed in by hand"},
+    "dashboard.source_inconnu": {"fr": "Origine inconnue", "en": "Unknown origin"},
 
     # ── Onglet « Historique » (app_pages/3_history.py) ──────────────────────────────────────
     "history.caption": {

@@ -1,5 +1,6 @@
 import time
 from datetime import datetime
+from pathlib import Path
 
 import streamlit as st
 from aca.storage import activity_log, queue_store, review_store, task_store, user_store
@@ -26,6 +27,12 @@ from aca.ingestion import ingest
 # Streamlit du script : le titre d'onglet et l'icône font partie de la marque au même titre que les
 # couleurs. `branding.resolve()` n'importe pas Streamlit, l'appeler ici est donc sans effet de bord.
 BRAND = branding.resolve()
+
+# §23 — la page de présentation, servie par Streamlit lui-même depuis `static/`
+# (`server.enableStaticServing`, cf. .streamlit/config.toml). Chemin résolu depuis CE fichier et
+# non depuis le répertoire courant : `streamlit run` peut être lancé depuis n'importe où, et un
+# chemin relatif ferait disparaître le bouton selon le dossier d'où la commande a été tapée.
+_LANDING_PAGE = Path(__file__).resolve().parent / "static" / "landing.html"
 
 st.set_page_config(
     page_title=BRAND["BRAND_NAME"],
@@ -309,6 +316,33 @@ with st.sidebar:
                     # apparaître dans le formulaire de la page « Nouvel e-mail », qui ne s'exécute
                     # plus automatiquement à chaque rerun sous `st.navigation`.
                     st.switch_page("app_pages/1_inbox.py")
+
+    # §23 — la page de présentation du produit. Placée AVANT le bloc de curation ci-dessous, et la
+    # raison est une question de position stable : ce bouton n'est réservé à aucun rôle, alors que
+    # « Base de connaissances » ne s'affiche que pour un administrateur. Le mettre après ferait
+    # apparaître le même élément à deux endroits très différents de la barre latérale selon qui est
+    # connecté — un opérateur le trouverait juste sous l'import Gmail, un administrateur bien plus
+    # bas, après un formulaire de téléversement et la file des FAQ à valider.
+    st.divider()
+    st.subheader(t("sidebar.landing_header"), anchor=False)
+    st.caption(t("sidebar.landing_caption"))
+    # Deux conditions, vérifiées séparément parce qu'elles se réparent différemment : le fichier
+    # peut manquer (dépôt incomplet, image construite sans `static/`), ou le service de fichiers
+    # statiques peut être désactivé — configuration lue au DÉMARRAGE du serveur, cf.
+    # .streamlit/config.toml. Afficher un lien qui renvoie 404 serait pire que ne rien afficher :
+    # la personne conclurait que la page est cassée alors qu'il ne manque qu'une ligne de
+    # configuration, d'où le message explicite plutôt qu'un bouton mort.
+    if not _LANDING_PAGE.exists():
+        pass
+    elif st.get_option("server.enableStaticServing"):
+        st.link_button(
+            t("sidebar.landing_button"),
+            "/app/static/landing.html",
+            icon=":material/captive_portal:",
+            width="stretch",
+        )
+    else:
+        st.caption(t("sidebar.landing_disabled"))
 
     # Curation de la base de connaissances (ingestion + validation des réponses trouvées par
     # `veille`) : réservée au rôle `admin` (§15.1.6). Ce qui entre ici devient un contexte RAG que

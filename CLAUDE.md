@@ -195,6 +195,39 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
 - [risk_scan.py](aca/core/risk_scan.py) — §13: `scan_risks(text) -> list[str]`, pure/deterministic
   (bilingual FR/EN regexes, accent/case-insensitive via `unicodedata` normalization) for
   `risk_scan_node`. No LLM, no external call, no `RETRY_POLICY` needed.
+- [device_trust.py](aca/core/device_trust.py) — §24: **"remember this device"**, the bounded TOTP
+  bypass. TOTP was required of every `admin` at *every* login, forever; on a personal machine used
+  several times a day that friction's usual outcome is not more security but a homemade workaround
+  (a shared secret, one authenticator app for the whole team, or switching it off) — a protection
+  people abandon protects nothing. **What is actually traded, stated plainly**: a remembered device
+  skips **the code, and only the code**. The password is still required every time and no session is
+  extended (`session.py` answers a different question), so for that browser and that window the
+  account moves from "password + TOTP" to "password + possession of a token held by this browser".
+  That is one factor fewer than ideal, and it is what the checkbox *means* — the trade is chosen,
+  not imposed. **Deliberately not the `(IP, user-agent)` fingerprint** already computed by
+  `activity_log.device_fingerprint()`: it is not a secret — two people behind one office NAT on the
+  same browser produce the same value, so anyone with the password on that network would skip the
+  second factor. A real 256-bit random token was reachable instead, established **by experiment
+  rather than from the docs**: a scratch page proved a `components.html` iframe (`srcdoc`, so it
+  inherits the page origin) *can* write the parent's `document.cookie`, and `st.context.cookies`
+  reads it back next pass. Only the token's SHA-256 is stored — no salt and no stretching, on
+  purpose: 256 bits of entropy have no weakness to compensate, so a database leak replays nothing.
+  **Revocation without coupling**: each record carries `auth_fingerprint(password_hash, totp_secret)`
+  as of issue time, so changing the password *or* resetting TOTP invalidates every remembered device
+  automatically, with `user_store` never needing to know this module exists (Django's
+  `session_auth_hash` technique) — a revocation wired by an explicit call is one you forget to wire
+  the day a third password-change path appears. Expiry is judged **server-side**; the cookie's
+  `max-age` is a courtesy to the browser, editable by whoever holds the machine. `user_agent_hash()`
+  is a free extra notch against replay (a cookie presented by another browser simply re-asks for the
+  code; the known, accepted false positive is a browser update costing one extra code).
+  `cookie_script()` adds `Secure` **only over HTTPS** — setting it on local HTTP would make the
+  browser silently drop the cookie and the checkbox would have no visible effect, the worst kind of
+  failure for a convenience feature; `HttpOnly` is unreachable by construction (a cookie written in
+  JS is readable in JS), a stated limit rather than a silent one. Pure/stdlib with `now` injected,
+  no Streamlit (same posture as `session.py`/`auth_lockout.py`/`totp.py`). `ACA_TOTP_TRUST_DAYS`
+  (default 3, `0` disables and removes the checkbox — the only way a strict deployment refuses this
+  trade without code changes; a malformed value falls back to 3 rather than disabling silently or
+  breaking login).
 - [auth_lockout.py](aca/core/auth_lockout.py) — §14 item US-41 (security audit, 2026-07-21):
   `lockout_remaining_seconds()`/`next_lockout_seconds()`, pure functions backing a progressive
   lockout on `ui.py`'s optional password gate (`_check_auth()`) — exponential backoff (30s, 60s,
@@ -507,6 +540,34 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   light page the veil darkens and thus *raises* text contrast, while on a dark page it lightens and
   lowers it. After the fix, same viewport: 6 of 7 points carry the wash, 22 luminance levels corner
   to corner. A test locks the lesson (radii must stay in viewport units, never `rem`).
+  **§26 — the ambient background now carries the landing page's motif** (`_ambient_texture()`,
+  `_dither_tile()`, `_scatter_cells()`). The app and `static/landing.html` were selling the same
+  product in two unrelated visual languages — typographic block fields there, smooth radial veils
+  here — and someone moving from the sales page to the tool should recognise the same product. A
+  second `::after` layer on `stAppViewContainer` tiles a **generated SVG data-URI of scattered
+  blocks** in `--aca-primary`, masked by the *same* radial positions/radii as the §21 veils so the
+  pixels exist only where colour already is, and driven by the *same* `aca-ambient` keyframe so the
+  two layers drift together (two background layers sliding relative to each other stop reading as
+  one material). Deliberately **not** the landing page's engine: there the blocks are real text
+  regenerated per frame by a canvas, and `branding.py` emits CSS only — a constraint not worth
+  lifting for decoration. The stated cost of that: the mask makes blocks **fade** toward the edges
+  where a true dither would **thin** them; at 5% alpha on a 27%-covered tile the difference is
+  imperceptible, but it is an approximation, not the same thing. Three details that are decisions:
+  the tile is chosen by a **coordinate hash, not a Bayer matrix** — Bayer thresholded at one level
+  has no varying density to break it up, so its rows come out 4/2/4/0 and the result is a weave
+  with visible tile seams (tried, rendered, rejected), while a static texture has no reason to be
+  ordered since there is no frame-to-frame sparkle to avoid; **every row and column is guaranteed
+  ≥2 cells**, because a 30% draw leaves a row of 16 empty about once in 300 and an empty row in a
+  tile repeating every 96px is a horizontal seam the eye follows; and the **same** URI is tiled
+  twice at 96px/138px with coprime offsets, so the combined period is far past any screen. `#` is
+  URL-encoded — left raw in a `url()` it reads as a fragment and the whole tile vanishes with no
+  error, no failing test and nothing to see on re-reading. §21's three constraints are inherited
+  unchanged (primary never accent; below the attention threshold; work surface only), and as with
+  the gradient the **texture is static and only the drift is level-gated**, so "animations: aucune"
+  keeps the material. Covered by 7 tests, one of which is general rather than about this feature:
+  `test_les_commentaires_css_sont_tous_refermes` counts and balances comment delimiters across the
+  whole emitted sheet, after a stray `*/` closed a comment early **twice in one session** — once
+  silently reverting the footer rules, once silently killing the ambient drift on *both* layers.
   Motion note worth keeping: entrance animations were *suspected* of replaying on every Streamlit
   rerun (which would have meant deleting them outright); measuring `getAnimations()` before and
   after a widget-triggered rerun showed them unchanged at `finished` — React reconciles the nodes,
@@ -684,7 +745,30 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   `verify_totp()`, `totp` field on `list_users()` — never the secret itself; see `totp.py` above and
   `aca/ui/shared.py::_handle_totp_step` for the login-time wiring). CLI gains `totp-off <username>`
   (deliberately CLI-only, no UI button — "a `disable 2FA` button in the UI would be exactly the
-  backdoor 2FA exists to close").
+  backdoor 2FA exists to close"). §24 adds `auth_state_fingerprint(username)` — a truncated hash of
+  (`password_hash`, `totp_secret`) consumed by `device_trust_store` so that changing either one
+  revokes every remembered browser automatically; it returns neither value, only their digest, since
+  it travels to another store, and `""` for an unknown account (matching no record, hence "no
+  trust" — the right default).
+- [device_trust_store.py](aca/storage/device_trust_store.py) — §24: browsers allowed to skip the
+  second factor (`data/device_trust.sqlite`, `ACA_DEVICE_TRUST_DB`). A separate registry from its
+  neighbours, and the distinction is the reason it exists (the same reasoning that separated
+  `task_store` from `followup_store`/`schedule_store` at §19): `user_store` holds **one row per
+  person** and nothing that expires; `session.py` governs how long an **already-open** session
+  lives; this holds **one row per browser** — dated, expiring, individually revocable — answering
+  neither "who are you" nor "is your session still alive" but "must this machine be asked for the
+  code". Three lifecycles, three purges. `verify()` requires **four** conditions, all necessary: the
+  token hash exists **for that account** (a token issued to A is worthless for B), the auth
+  fingerprint still matches, the browser is the same, and the deadline has not passed — judged here,
+  never from the cookie. None of the four fails loudly: a refusal merely re-asks for the code, and
+  **no failure counter is touched**, because an expired cookie is not an intrusion attempt and
+  conflating the two would lock out legitimate people. Expired rows are dropped opportunistically on
+  read (the table is tiny and a stale row has no value — the *usage* trace lives in `activity_log`),
+  and `purge_expired()` is wired into `retention.py`. `list_devices()` returns only an 8-character
+  extract of the hash: the list must help someone recognise their own machine, not hand over
+  anything replayable. Timestamps stored twice for the same reason as `schedule_store` — epoch REAL
+  for the expiry arithmetic, ISO text so a human opening the file can see why a device stopped being
+  trusted.
 - [audit_log.py](aca/storage/audit_log.py) — traceability (`data/audit.sqlite`, local, not the Google Sheet):
   `log_validation(thread_id, validated_by, classification, sender)` called from `ui.py`'s "Valider"
   handler and `aca/api.py`'s `_do_validate`. Since §15.1.6, `validated_by` comes from the
@@ -776,6 +860,20 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   table, fed by `sum_usage()` in `app.py`/`aca/api.py`) / `token_stats(days)` — the free "first
   step" of usage tracking anticipated in §12 item 4, now consumed by `aca/integrations/billing.py`
   (below) for the paid step that follows it. §18 adds `get_draft_edit(thread_id)` — the read side
+  §22 adds four read-side aggregations, none of which needs new data — every column had been
+  written since the beginning and simply never displayed: `bucket_response_times(rows)` (pure, so
+  the one business judgement here — "past 24 h you have lost the prospect" — is testable without a
+  DB; **empty buckets are kept**, since a missing "over 24 h" bar reads as *no data* when it
+  actually means *no delay*, the opposite and the best news on the page — `RESPONSE_BUCKETS` is
+  ordinal, hence `sort=False` and a single hue rather than a categorical palette);
+  `by_source()` — the **adoption** measure, and the starkest built-but-never-shown gap: `source` is
+  recorded on every analysis and appeared nowhere, so nothing in the product could tell you whether
+  the automatic intake was working or whether people were still retyping emails by hand;
+  `hourly_volume()` — always returns all 24 hours *including zeros*, because the troughs are the
+  information, and it exists to make §19's intake-window setting a measured choice instead of a
+  guess; `top_senders()` — deliberately small `limit`, since exporting an address book is the
+  parametrable report's job (§20), not this block's.
+  `get_draft_edit()` is the read side
   `record_edit()` never had: the most recent (original, edited) pair for a thread (no uniqueness
   constraint on `thread_id`, so "most recent" is deliberately what validation actually sent), feeding
   `ui_kit.diff()` in the lead timeline — §17 only ever logged character-count deltas ("340 → 412"),
@@ -859,8 +957,11 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   security-posture expander and the brand hero banner (status pills: signed-in user/role,
   pending-queue count, **new-since-login count** — see below, demo-mode warning), the session
   defaults for the manual-entry form, the **sidebar** (signed-in user/logout, "File d'attente" with
-  its "Ouvrir" button, Gmail import, the admin-only knowledge-base uploader + "FAQ en attente"
-  review panel, the "Confidentialité des données" expander), builds the page list — `1_inbox.py`
+  its "Ouvrir" button, Gmail import, §23's "Présentation" block linking to
+  [static/landing.html](static/landing.html) — placed *before* the admin-only curation block on
+  purpose, since an ungated item rendered after a gated one lands in a visibly different place for
+  an operator than for an admin — the admin-only knowledge-base uploader + "FAQ en attente" review
+  panel, the "Confidentialité des données" expander), builds the page list — `1_inbox.py`
   (default), `2_dashboard.py`, `3_history.py`, `4_activity.py` (only appended if
   `_can(PERM_MANAGE_USERS)` — an operator's `st.navigation()` call never even declares this route, so
   it isn't just hidden from the menu, it isn't reachable at all, same effective gate as the old
@@ -948,7 +1049,27 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   verbatim from the old "Tableau de bord" tab. Adds an empty-state demo link (recap #5.6): when
   `total == 0` and `demo.is_enabled()`, a "Charger un exemple de démonstration" button
   `st.switch_page`s to the inbox — an empty dashboard used to just explain *why* it was empty; in
-  demo mode it now also says what to do about it.
+  demo mode it now also says what to do about it. **§22 — it showed a *state* and never a *change*.**
+  Five counters and three charts over "the last N days" answered none of the three questions the
+  page is actually opened for (*is it better than before?*, *are we replying fast enough?*, *is the
+  automatic intake doing anything?*) — while the data for all three was already being recorded, the
+  same built-but-never-read gap as `get_draft_edit` (§18) and `list_events` (§20). Now: **deltas on
+  every KPI**, reusing `reporting.previous_period()` rather than reimplementing it (the screen and
+  the monthly PDF must never disagree on the same period) and `reporting._kpi`'s `better` direction
+  via a declared `_DELTA_COLOR` map — a rising median response time reads as a *degradation*, and
+  the draft-edit rate stays **grey**, because a high rate means improvable drafts while a zero rate
+  may mean validating without reading, so the data cannot justify a colour. A missing previous value
+  renders **nothing**, never "+0", which would claim stability where there is no basis for comparison.
+  Four new distributions (see `analytics_store` §22 below), an `st.fragment` so changing the period
+  reruns only the dashboard rather than the router's whole sidebar, and horizontal bars wherever
+  labels are long (`DEMANDE_DEMO`, `proposition rédigée`) since Vega rotates them 90° otherwise.
+  Three alignment fixes: the token counter **leaves the hero row** (an ops metric, and at five items
+  the row fell to "4 + 1"); the KPI sparkline is **removed** (it existed for one metric of five, made
+  that card taller than its neighbours, and plotted the same series as the chart directly below);
+  and the row itself is de-raggedised in CSS — see `branding.py`. **Deliberately no global category
+  filter**: it could not apply to the funnel, the delays or the tokens without rewriting five
+  queries, so half the screen would not move and the reader would no longer know what they are
+  looking at. A filter that lies about its scope is worse than none.
 - [app_pages/3_history.py](app_pages/3_history.py) — §18: the searchable `audit_log.list_recent()`
   table (§12 item 2), moved verbatim from the old "Historique" tab.
 - [app_pages/4_activity.py](app_pages/4_activity.py) — §18: the admin-only activity journal (§17),
@@ -1188,12 +1309,200 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   drifted. Possible at all only because the suite is **fully offline** — `conftest.py` blanks every
   key before any `aca.*` import and redirects all 8 SQLite paths to a temp dir — so it runs on a
   public runner with **no secrets**. Won't execute until the first push to a remote.
-- [docs/landing/index.html](docs/landing/index.html) — §16.5: self-contained pitch one-pager (no
-  remote font, stylesheet or script — a pitch page that depends on a CDN doesn't open on a train or
-  behind a corporate proxy, which is exactly where it gets shown). Fluent palette matching `ui.py`,
-  dark-mode aware, printable to PDF via a `@media print` block. Carries the same "verified live vs.
-  not" section as the README — putting that on the sales page rather than burying it is a choice.
-  Not hosted anywhere (same reason as §15.1.9's TLS).
+- [static/landing.html](static/landing.html) — §16.5, rebuilt §23, turned into an **English
+  marketing surface at §23.1**, made commercially operable at **§23.2**. Carries the same "verified
+  live vs. not" section as the README — putting that on the sales page rather than burying it is a
+  choice. Printable to PDF via a `@media print` block. Not hosted anywhere (same reason as
+  §15.1.9's TLS).
+  - **§23.2 — `CONFIG`, the one seam.** A single object at the top of the `<script>` holds every
+    commercial URL (`calendly`, `contact`, `demo`, `pay.discovery|build|care`). Nothing here is read
+    from the environment and nothing can be: this is a static file served as-is, so `.env.example`'s
+    §7 block is an operator's *aide-mémoire*, explicitly not configuration. Each field empty
+    degrades to something honest rather than to a dead control — the project's "absent = feature
+    skipped" contract, restated as "never absent = a link to nowhere".
+  - **§23.2 — the calendar was fiction, and could not have been anything else.** It had no
+    availability data, no `fetch`, no backend, and offered every future weekday including full ones;
+    its own footnote admitted it booked nothing. "A booked day turns grey" is therefore not a
+    rendering problem but a *source of truth* problem, and the fix is to cede the card to **Calendly**,
+    which already knows the diary. Two branches: `CONFIG.calendly` set ⇒ a themed `<iframe>`
+    (`hide_event_type_details`/`background_color`/`primary_color`, plus `utm_content=<tier>` and
+    name/email prefill) injected by `IntersectionObserver` at `rootMargin:400px`, so a visitor who
+    never reaches the section never contacts Calendly; empty ⇒ the designed picker stays, untouched.
+    Deliberately a **plain iframe, never `assets.calendly.com/…/widget.js`** — the page loads zero
+    remote scripts and that property outweighs auto-resizing (the price is a fixed frame height, set
+    in CSS at two breakpoints). The offline picker is **kept, not deleted**: it is what lets the file
+    still work as a self-contained document, which was the entire reason it has no dependencies. The
+    head comment declaring "no remote script, no remote image" was **amended rather than left
+    standing** — a file that documents its own trade-offs must not silently acquire a new one.
+  - **§23.2 — three tiers that finally do three things.** All three CTAs were `<a href="#book">`, so
+    a $1,000 click and an $18,500 click were indistinguishable at runtime and the chosen tier reached
+    nothing. Now `data-tier`/`data-cta`, three distinct labels, and a `.tier__when` line stating when
+    money actually moves: discovery **paid online up front** (Stripe's own post-payment redirect
+    pointed at `CONFIG.calendly` makes pay → book one chain with no server on our side), build
+    **quoted after the scoping call** (`pay.build` left empty on purpose), care **monthly, starting
+    after handover**. The choice survives the jump to `#book` in three places — a visible chip, the
+    Calendly `utm_content`, and the mail body — because a distinction the reader cannot see the page
+    register is decorative. `.tier__when` is deliberately **not** in `--signal`: amber means "a human
+    must decide" and appears three times on this page; spending it on a caption would empty it.
+    Stripe itself is a **seam, not an implementation** — no Checkout Session endpoint, no
+    `POST /stripe/webhook`, no order store; when built, mirror `/slack/interactions` (outside
+    `require_api_key`, signature-verified over the raw body, failing closed without the secret).
+    Not to be confused with [billing.py](aca/integrations/billing.py), which meters tokens and
+    collects nothing.
+  - **§23.2 — security: 12 flat rows → 5 collapsible groups**, reusing the FAQ's mechanics wholesale
+    (`data-open`, `grid-template-rows:0fr→1fr`, the `.faq__sign` glyph), so its reduced-motion
+    escape hatch and print override are inherited rather than reimplemented. Five groups and not the
+    planned four because the grouping is **contiguous** on the existing 01→12 order: no item had to
+    move, hence none of the twelve long bilingual strings had to be retyped and silently corrupted.
+    Panels are **independent**, unlike the FAQ's one-at-a-time — someone comparing two controls has a
+    real reason to hold both open. All twelve stay in the DOM when collapsed, so `Ctrl+F`, indexing
+    and print still find them, and the print block forces the groups open.
+  - **§23.2 — the section the page was missing, and the FAQ it contradicted.** Three tiers were sold
+    and nothing said what arrives after paying, so a new "05 — How you get access" (FAQ → 06,
+    Contact → 07) walks demo → pay-or-scope → provisioning **on the client's infrastructure** →
+    branding. Delivery model settled explicitly as **hybrid**: the demo is hosted by us and holds no
+    real data, production lives with the client. That made the FAQ's "nothing is hosted on our side,
+    because there is no 'our side'" half-false, so both affected answers were rewritten instead of
+    left contradicting what the page now sells. Two ducked questions added (what am I paying for and
+    when; who owns the keys and pays for the tokens), plus `og:`/`twitter:` share meta and an
+    `Organization` JSON-LD — deliberately **no** `FAQPage` block (its answers must match the rendered
+    text word for word, i.e. a second copy of eight bilingual answers in the same file, the exact
+    divergence risk that made French an inline attribute here) and **no** `Offer`/price block (the
+    three figures are still placeholders, and a placeholder in a search index outlives the page).
+  - **§23.2 — four defects found by rendering, none visible on re-reading.** (1) **The contact form
+    went nowhere**: `mailto:?subject=…` carried *no recipient*, so every submission opened a mail
+    client with an empty `To:` — the page's only conversion path, broken from the start and silent,
+    because nothing raises when you do that and the form appeared to work. (2) **`[hidden]` hid
+    nothing**: `.chip{display:inline-block}` and `.btn{display:inline-flex}` are author rules of the
+    same specificity as the UA's `[hidden]{display:none}`, and author wins — so an empty pill sat on
+    the page permanently and *both demo buttons showed with no demo configured*, precisely what the
+    attribute was there to prevent; fixed globally with `[hidden]{display:none !important}`. (3) **An
+    open accordion read "|"**: rotating the glyph 90° swaps which bar is horizontal, so the *wrong*
+    one was being faded — a pre-existing FAQ defect, inherited by the new groups and fixed for both.
+    (4) A chosen time survived a date change, focus was destroyed on every calendar selection, and
+    month nav had no lower bound. Verified on **both** branches in a real browser (the `mailto:`
+    string captured via a probe copy, since Chromium refuses to let a test redefine
+    `window.location.href`). **Not** verified, and stated as such: no full day has been *seen* to
+    grey out — that is Calendly's rendering and no account exists for this project; our half (ceding
+    the card, injecting at the right moment with the right parameters) is what was checked. No Stripe
+    link has been created or tested, the three prices remain placeholders, and nothing was opened on
+    a real phone.
+  - **§26 — every illustration rebuilt in typographic blocks, and one real photograph.** The
+    reference page's art direction was **measured in a browser, not inferred from a screenshot**,
+    and the finding is that all of its illustrations are a single technique with no canvas, no SVG
+    and no image behind any of them: a `<div>` of monospace text using **only three Unicode shade
+    glyphs** (`░ ▒ ▓`, U+2591-93) at 10px / `line-height:1em` / `letter-spacing:0` /
+    `rgb(176,176,176)`, **drawn twice** — a sharp copy over a `blur(11px)` copy. The blur is not a
+    finish, it *is* the effect. Six instances confirmed one by one (mass 47×170; icons
+    39×64/51×83/63×104/60×98 in `#00a2ff`/`#ff4ffc`/`#47e6c3`/`#ffbd2e`; footer hand 69×170); the
+    only image the whole site downloads is the hand photo. This page's renderer therefore moved off
+    the punctuation ramp `" .:-=+*#%@"` — honest ASCII art and the wrong medium, since punctuation
+    has internal shape so the field reads as *writing*, whereas shade blocks fill their em box and
+    tile into continuous tone. `--font-block` is a **separate stack from `--font-mono`**: Fragment
+    Mono has no shade glyphs, so they would resolve through per-glyph fallback at a different advance
+    width and every row would shear (a check asserts one distinct row width per field).
+    **The two ASCII hands are gone, and could not have been fixed.** Three successive redraws all
+    resolved to ovals for a structural reason, not a drawing one: at this resolution the gap between
+    two fingers is under one cell and the dither merges it. The section now opposes a mass
+    **synthesised every frame** to an **actual photograph** — the contrast runs through the media
+    rather than only through the caption. Three defects only rendering showed: (1) three of the four
+    icons came out as featureless slabs, because a sprite pixel was 5.3 screen px on the old
+    upscaled canvas and is ~1 cell through a 27-row grid, which the 0.9px pre-blur then closed —
+    hence the stated rule *no feature or gap under 2 sprite pixels, outline rather than fill*, a
+    40-row grid, and a staggered pipeline (three equal nodes joined at one height make a bar however
+    wide the notches). **Resizing these safely means scaling width and type size together** — the
+    column count is width ÷ (font-size × advance) and the row count follows from it, so shrinking
+    the width alone halves the rows and destroys the icons all over again; holding the ratio at
+    40px of width per 1px of type keeps the ~73×40 grid at any size, which is how they went from
+    280px/7px to **200px/5px** on the follow-up "make them smaller" without losing a feature;
+    (2) the mass rendered as a solid silhouette until the dither amplitude became
+    a per-field `grain` (0.22 for icons, **0.55** for the mass) — same code, same shape, and that one
+    number is the difference between a slab and a cloud; (3) a stray `*/` closed a CSS comment six
+    lines early and left prose in the stylesheet, which the browser silently dropped — the same class
+    of failure as §17's swallowed audit line and §20's vanished monthly report, now covered by a
+    computed-style assertion. **`static/aca-hand.png`** (1040×585, 163 KB) is **local, not remote**,
+    and the header comment's older "no image at all" claim was amended rather than left standing;
+    stored **greyscale + alpha** because the page renders it desaturated anyway (colour was 487 KB,
+    and palette-quantising to 69 KB banded the forearm visibly, while an 8-bit luminance ramp cannot
+    band), and desaturated *in the file* so it survives where CSS filters do not. Its **provenance is
+    stated**: a stock cut-out from the Framer template this page's art direction follows — fine for a
+    prototype, to be replaced or licensed before any commercial publication. The footer hand is
+    **precomputed and shipped as literal text**, because reading an image back off a canvas is
+    blocked under `file://` and would have silently deleted that artwork in exactly the offline
+    self-contained case this page exists to survive. Deliberately **not** reused: the reference's
+    three stock portraits — this page's "testimonials" section says outright there are no customers
+    yet and cites §16/§17/§21 findings instead, and stock model photos there would turn an honest
+    section into a fabricated one. Also fixed in passing, found by looking at an anchor-jumped
+    section on mobile: no `scroll-margin-top` existed, so every in-page link (including "Why us?",
+    which targets this very section) put its heading under the 70px sticky nav.
+  - **§23.1 — one file, two languages.** English is the default and lives in the markup; French
+    rides along per element in `data-fr`, and the toggle stashes the English original in `data-en`
+    on first switch so it stays reversible indefinitely (verification drove two full round trips,
+    since a toggle that destroys the original on the first switch looks fine exactly once).
+    Deliberately **not** a second translated file — that copy would have diverged at the first
+    content edit, the same reasoning that moved this page out of `docs/`. With JS off the page is
+    complete English, never blank.
+  - **§23.1 — every illustration is drawn at runtime, so the page still fetches no image.** Two
+    ASCII fields (a four-pointed AI sparkle in the hero; a diffuse machine mass, the glyph, and a
+    human hand reaching toward it in "The Human-AI Intersection") are rasterised on an offscreen
+    canvas and mapped to characters through a *fixed* 4×4 ordered-dither matrix — fixed, not
+    random, so texture drifts with the shape instead of sparkling frame to frame. The four
+    capability icons are 28×28 canvases upscaled with `image-rendering: pixelated`, which is what
+    yields the chunky sprite look; a vector would render smooth and a bitmap would be an asset to
+    download. One shared 16 fps loop drives both fields and **stops** off-screen and on tab-hide.
+  - **§23.1 — the aspect trap, and three defects only rendering revealed.** A monospace cell is
+    ~1.5× taller than wide and the field is far wider than tall, so mapping a unit square onto the
+    grid stretches a circle ~3×; the character box is therefore *measured on the live page* (the
+    fallback mono font has a different advance width from Fragment Mono) and shapes are drawn
+    through a helper that pre-divides x by that ratio. Then, all found by looking rather than
+    re-reading: the star's Bézier control points at 0.17 made the sides nearly straight, so it
+    rendered as a **lozenge with no points**; the glow behind it was *larger* than the star and its
+    falloff filled the concave notches, so the shape was drawn correctly and could not be seen; and
+    a four-fingered open hand collapsed into an amorphous blob because the gaps between fingers
+    fall below one character cell — replaced by a pointing hand (fist, one thick index, thumb) on a
+    taller field, which survives the downsampling and says "reaching toward" more plainly anyway.
+    A fourth, in the pixel set: the pipeline icon joined four corner nodes all the way round and
+    read as a *frame*, not a flow; it is now a left-to-right chain with one branch.
+  - **§23.1 — pricing, calendar and contact, each honest about what it does.** Three service tiers
+    carry the reference template's structure; **the figures are placeholders**, flagged in the file
+    header and marked `data-placeholder-price`, because they come from no costing exercise for this
+    project. The dark month calendar is real (Monday-first, locale-aware, past days and weekends
+    unselectable — offering a slot that cannot exist is the kind of small lie that costs trust on a
+    page whose whole argument is that it does not overclaim), and the contact form builds a
+    `mailto:` carrying the chosen slot rather than POSTing to a backend that does not exist.
+  - Four things about the §23 base are decisions rather than details:
+  - **It lives in `static/`, not `docs/`** — Streamlit exposes that folder on `/app/static/`
+    (`server.enableStaticServing`, added to `.streamlit/config.toml` and preserved by
+    `branding.merge_config_toml()`), which is what lets `ui.py`'s sidebar "Page de présentation"
+    button reach it. One file, one URL: a copy in `docs/` **and** one in `static/` would have
+    diverged at the first content edit. `ui.py` checks the file exists **and** that static serving
+    is on, saying which is missing rather than rendering a link that 404s.
+  - **§16.5's "no remote resource" rule is deliberately relaxed.** That rule was right (a pitch page
+    depending on a CDN doesn't open on a train or behind a corporate proxy — exactly where it gets
+    shown), but the requested art direction rests on three specific typefaces (Instrument Serif /
+    Figtree / Fragment Mono). The trade is bounded and stated in the file header: the `<link>` is an
+    enhancement, never a dependency — every family is backed by a full system stack and the page
+    stays fully readable and correctly set offline; no remote script or stylesheet at all, all
+    CSS/JS inline.
+  - **Structure and motion copy the requested template; the accent colour does not.** Near-white
+    `#fdfdfd` canvas, two vertical rules framing a 1176px column, bracketed `[nav links]`,
+    dashed-border cards, black schematic tags on leader lines, printer crop marks, and a blur+rise
+    reveal on scroll — all measured off the live reference page (computed styles, not eyeballed
+    from a screenshot); the rebuilt frame lands at 1176px/x=132 against the original's 1177px/x=131.
+    The accent is ACA's own petrol/amber, and amber keeps its §19 meaning ("a human must decide
+    here"), so it appears exactly three times on the whole page. Hero motion is a deterministic
+    ASCII field (no `Math.random`, which would make characters flicker between frames instead of
+    drift) whose disordered inflow converges to a single mark; it is the page's only continuous
+    animation and it **stops** off-screen and on tab-hide.
+  - **Four defects found by rendering it rather than re-reading it**, none of which raises an error:
+    the convergence mark fell *between* rows (even row count) **and** inside the right edge-fade, so
+    the one meaningful part of the animation was never drawn; an SVG `fill=` presentation attribute
+    lost to a CSS rule, painting the "ACA" label black-on-black; the mobile grid override dropped
+    `minmax(0,1fr)` to a bare `1fr`, letting the terminal block force 472px of content into a 390px
+    viewport; and the footer's relative `../README.md` links would have 404'd once served (now
+    rendered as paths, not links). A fifth was a placement bug in `ui.py` rather than the page: the
+    button sat after the admin-only knowledge-base block, so it appeared in a different place
+    depending on the signed-in role.
 - [DEPLOYMENT_HARDENING.md](docs/DEPLOYMENT_HARDENING.md) — §15.1.8/§15.1.9: the operator runbook
   for a first public deployment — Caddy/Nginx TLS configs (incl. the Streamlit WebSocket headers
   whose absence leaves the UI stuck on "Connecting…"), security headers, loopback-only binding,
@@ -1294,7 +1603,7 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   96% (48/50) pre-migration — both prior errors were on deliberately ambiguous cases. Run via
   `python -m aca.eval.eval_classifier`; re-run once real emails are available to track accuracy
   under real conditions instead of the synthetic set.
-- [tests/](tests/) — automated pytest suite (**767 tests**, offline, ~40s — see Known gaps for full
+- [tests/](tests/) — automated pytest suite (**773 tests**, offline, ~40s — see Known gaps for full
   coverage list): [conftest.py](tests/conftest.py) (env isolation + `FakeLLM`/`ExplodingLLM`, now
   also blanking `ACA_ORG_ID`/`STRIPE_API_KEY`, redirecting `ACA_CONFIG_DB`/`ACA_USERS_DB`, and
   neutralising every §15 security switch — `ACA_ENV=development`, empty `ACA_API_KEY`/
@@ -1404,7 +1713,7 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   exception, breaks no test and is invisible on re-reading: the display serif never reaching a real
   heading, the header silently reverted to transparent, `--aca-header-h` stated in `rem` under a
   14 px root, the accent collapsing into the primary on 4 palettes, and duplicate colours in the
-  categorical chart palette. **767 tests total**, offline, ~40s. Run via
+  categorical chart palette. **773 tests total**, offline, ~40s. Run via
   `python -m pytest tests/` (pytest pinned in requirements.txt).
 
 ## Stack
@@ -1941,6 +2250,31 @@ afterward.
   *explicit* overrides, which by the project's long-standing rule are never overridden by a preset
   — so the corrected palettes do **not** change this instance, though the Apparence panel now warns
   that its accent scores 0.08.
+- ✅ **Fixed (2026-08-06)** — §22 "dashboard: prettier, more interactive, more statistics". The
+  pass's finding is that the page showed a **state** and never a **change**, and that every datum
+  needed to fix that was already being recorded — the fourth instance of this project's recurring
+  built-but-never-read gap (`get_draft_edit` §18, `list_events` §20, and the response-time
+  distribution whose own comment described the intended "< 1h vs > 24h" reading while only a raw
+  minutes table was ever rendered). Delivered: four read-side aggregations in `analytics_store`
+  (`bucket_response_times`/`by_source`/`hourly_volume`/`top_senders`), period-over-period deltas on
+  every KPI reusing `reporting.previous_period()` and its `better` direction metadata, an
+  `st.fragment` scoping period changes to the dashboard, horizontal bars where labels are long,
+  humanised source labels (`gmail_import` → "Import Gmail (à la demande)"), and ~20 i18n keys.
+  Suite: 767 → **773 tests**. Three things found rather than built: (1) the KPI row silently went
+  **ragged on some data** — Streamlit sets `align-items: start`, so a metric with no delta to show
+  is 22px shorter than its neighbours, and the fix needed two attempts because a flex item with a
+  *definite* height ignores `stretch` (measured: the row did switch to `stretch` while the cards
+  stayed 144/144/122/144); (2) §21's press-feedback and focus rules covered only
+  `.stButton`/`.stFormSubmitButton`/`.stDownloadButton`, so `st.segmented_control`/`st.pills`
+  (`stButtonGroup`) — i.e. the dashboard's two main controls — were the app's only clickable
+  elements with no press signal, and Streamlit animates `all` on them; (3) the `source` column had
+  been written on every analysis since the beginning and displayed nowhere, leaving the adoption
+  question (automation vs. retyping by hand) unanswerable inside the product. **The font was
+  offered and deliberately not changed**: the three-role system was decided at §19 and *repaired*
+  at §21, where the display serif turned out never to have reached a single page heading — churning
+  it now would undo the work that made it visible. Still open: the new distributions have never run
+  at volume (the demo DB holds ~20 analyses over 11 days — enough to validate chart shape, not
+  legibility with hundreds of correspondents), and nothing was checked on a phone.
 
 
 ## Status vs. the 8-week roadmap

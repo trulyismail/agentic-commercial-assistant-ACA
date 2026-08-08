@@ -224,6 +224,33 @@ def verify_credentials(username: str, password: str, org_id: str = None) -> dict
 
 
 @with_sqlite_retry
+def auth_state_fingerprint(username: str, org_id: str = None) -> str:
+    """
+    Empreinte de l'état d'authentification du compte (§24) : mot de passe haché + secret TOTP.
+
+    Sert à `device_trust_store` pour révoquer **automatiquement** tous les appareils mémorisés dès
+    que l'un des deux change — sans que ce magasin ait à appeler quoi que ce soit, ni même à
+    connaître l'existence des appareils de confiance. Une révocation qui repose sur un appel
+    explicite est une révocation qu'on oublie de brancher le jour où un troisième chemin de
+    changement de mot de passe apparaît (technique du `session_auth_hash` de Django).
+
+    Ne renvoie ni le hash ni le secret, seulement leur empreinte tronquée : la valeur circule
+    jusqu'à un autre magasin, elle ne doit donc rien porter d'exploitable. Compte inconnu ⇒ `""`,
+    qui ne correspondra à aucun enregistrement — donc « pas de confiance », le bon défaut.
+    """
+    from aca.core import device_trust
+
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT password_hash, totp_secret FROM users WHERE org_id = ? AND username = ?",
+            (org_id or current_org_id(), (username or "").strip()),
+        ).fetchone()
+    if row is None:
+        return ""
+    return device_trust.auth_fingerprint(row[0], row[1])
+
+
+@with_sqlite_retry
 def get_user(username: str, org_id: str = None) -> dict:
     """Compte du tenant courant (sans le hash), ou `None`."""
     with _connect() as conn:

@@ -1,3 +1,13 @@
+[server]
+# §23 — expose le dossier `static/` de la racine de l'application sur `/app/static/`. C'est ce qui
+# permet au bouton « Page de présentation » de la barre latérale (ui.py) d'ouvrir
+# `static/landing.html` sans copier le fichier ni le dupliquer : un seul fichier, une seule URL,
+# aucune dérive possible entre deux exemplaires. Lu au DÉMARRAGE du serveur — l'activer sur une
+# instance déjà lancée demande un redémarrage.
+# Conservé par `branding.merge_config_toml()` : seules les sections `[theme…]` sont réécrites lors
+# d'un enregistrement depuis « Réglages → Apparence ».
+enableStaticServing = true
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Section [theme] GÉNÉRÉE par aca/core/branding.py (onglet « Réglages » → Apparence).
 # Toute modification manuelle ici sera écrasée au prochain enregistrement de la marque.

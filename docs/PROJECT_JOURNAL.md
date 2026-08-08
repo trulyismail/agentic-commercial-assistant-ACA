@@ -2338,3 +2338,817 @@ Après correction, au même format d'écran : **six points sur sept portent le v
 pour un écart de 22 niveaux de luminance d'un bord à l'autre — visible comme une matière, sans
 jamais concurrencer le contenu. Suite : 762 → **767 tests**, dont un qui verrouille précisément la
 leçon (les rayons doivent rester en unités de fenêtre, jamais en `rem`).
+
+
+## 2026-08-06 — Un tableau de bord qui montrait un état, et ne racontait aucun changement
+
+**La demande.** Rendre le tableau de bord « plus joli, plus interactif, avec plus de statistiques »,
+avec la proposition explicite de changer la police si je le souhaitais.
+
+**Le diagnostic.** L'écran affichait cinq compteurs et trois graphes sur « les N derniers jours ».
+C'est un ÉTAT. Or les trois questions qu'on se pose vraiment en ouvrant cet onglet sont : *est-ce
+que ça va mieux qu'avant ?*, *est-ce qu'on répond assez vite ?*, *est-ce que la réception automatique
+sert à quelque chose ?* Aucune n'avait de réponse — et pourtant **les données étaient déjà toutes
+enregistrées**. Il ne manquait que des lectures et une comparaison. C'est la même forme de manque
+que le projet a déjà rencontrée trois fois (`get_draft_edit` au §18, `list_events` au §20, et la
+répartition des délais dont le commentaire décrivait l'usage sans que personne ne l'affiche).
+
+### Quatre statistiques, chacune répondant à une question précise
+
+- **Rapidité de réponse** (moins d'1 h / 1-4 h / 4-24 h / plus de 24 h). La fonction qui calcule les
+  délais portait depuis toujours, dans son propre commentaire, l'intention « répondre en moins d'1 h
+  contre plus de 24 h » — et n'affichait qu'un tableau brut de minutes. C'est pourtant la statistique
+  commercialement décisive : au-delà de 24 h, un prospect a généralement déjà sollicité un concurrent.
+- **Origine des e-mails** (réception automatique / import Gmail / saisie manuelle). La colonne
+  existait, enregistrée à chaque analyse, et n'était affichée **nulle part**. C'est la mesure
+  d'adoption : un outil présenté comme automatique dont l'essentiel du volume est ressaisi à la main
+  ne l'est pas, et rien dans l'interface ne permettait de s'en apercevoir.
+- **Heures d'arrivée** (histogramme sur 24 h). Utile parce qu'un réglage l'attend : le §19 laisse
+  choisir une fenêtre de réception (jours et heures), qui se décidait jusqu'ici au jugé.
+- **Correspondants les plus actifs**, avec une barre de proportion plutôt qu'un nombre — le rang
+  relatif est toute la question qu'on pose à ce bloc.
+
+Deux détails de justesse plutôt que d'affichage. Les tranches de délai **vides sont conservées** :
+une tranche « plus de 24 h » absente se lirait « pas de données », alors qu'elle veut dire « aucun
+retard », c'est-à-dire l'inverse exact et la meilleure nouvelle du tableau. Et les **24 heures sont
+toujours renvoyées**, y compris à zéro, parce que les creux sont précisément l'information cherchée.
+
+### La comparaison, et pourquoi elle ne pouvait pas être réécrite ici
+
+Chaque indicateur affiche désormais son écart avec la période précédente. Deux choix de fond :
+
+La fenêtre de comparaison **réutilise la fonction du rapport mensuel** (`previous_period`) au lieu
+d'en refaire une. Si les deux divergeaient un jour d'une journée, l'écran et le PDF donneraient deux
+chiffres différents pour la même période et personne ne saurait lequel croire. Cette fonction rend
+la fenêtre de *même durée* qui précède — pas « le mois d'avant » — ce qui évite de faire apparaître
+février en recul de 10 % chaque année sans qu'il s'y soit rien passé.
+
+Et surtout : **chaque indicateur déclare quel sens lui est favorable.** Un délai de réponse qui
+augmente est une dégradation ; le colorier en vert parce que la valeur monte produirait un tableau
+flatteur et faux. Le taux d'édition des brouillons, lui, reste **gris** : un taux élevé signale des
+propositions perfectibles, un taux nul peut signaler qu'on valide sans relire — la donnée ne permet
+pas de trancher, donc l'interface ne tranche pas. Enfin, quand la période précédente n'a aucune
+valeur, **rien** ne s'affiche plutôt que « +0 » : zéro laisserait croire à une stabilité alors qu'il
+n'y a simplement aucun point de comparaison.
+
+Un filtre global par catégorie a été **écarté volontairement**. Il aurait été facile à poser en haut
+de page, mais il n'aurait pu s'appliquer ni à l'entonnoir, ni aux délais, ni aux tokens sans
+réécrire cinq requêtes : la personne aurait filtré, la moitié de l'écran n'aurait pas bougé, et elle
+n'aurait plus su ce qu'elle regardait. Un filtre qui ment sur sa portée est pire que pas de filtre.
+
+### Trois défauts d'alignement, dont un que seules certaines données révèlent
+
+**La rangée d'indicateurs partait en dents de scie.** Streamlit pose `align-items: start` sur ses
+rangées : chaque carte se dimensionne donc sur son propre contenu, et il suffit qu'un indicateur
+n'ait pas d'écart à afficher — faute de période de comparaison — pour qu'il soit 22 px plus court
+que ses voisins. Le défaut n'apparaît donc **que sur certains jeux de données**, ce qui est la
+meilleure façon de ne jamais le corriger. La correction a demandé deux essais : passer la rangée en
+`stretch` n'a eu aucun effet (mesuré : la rangée passait bien à `stretch`, les cartes gardaient
+144 / 144 / 122 / 144), parce qu'un élément flex dont la hauteur est **définie** ignore l'étirement.
+Il fallait d'abord remettre cette hauteur à `auto`.
+
+**Deux autres réglages du même ordre** : le compteur de tokens quitte la rangée principale — c'est
+une mesure d'exploitation, pas commerciale, et à cinq éléments la rangée retombait à « 4 + 1 », une
+carte seule sur une deuxième ligne ; et la courbe miniature d'un indicateur a été retirée, parce
+qu'elle n'existait que pour un indicateur sur cinq (le seul disposant d'une vraie série quotidienne),
+rendait sa carte plus haute que les autres, et traçait de toute façon la même série que le graphe
+situé juste en dessous.
+
+**Les barres passent à l'horizontale** là où les étiquettes sont longues (« DEMANDE_DEMO »,
+« proposition rédigée ») : en vertical, le moteur de rendu les fait pivoter à 90°, ce qui oblige à
+pencher la tête pour lire son propre tableau de bord.
+
+### Ce que les skills de design ont apporté concrètement
+
+La grille de relecture d'Emil Kowalski a fait apparaître un manque du passage précédent : le §21
+avait donné un retour d'appui et un anneau de focus aux boutons, mais en ne visant que
+`.stButton` / `.stFormSubmitButton` / `.stDownloadButton`. Or un `st.segmented_control` rend un
+composant qui ne correspond à aucun des trois — si bien que **les deux commandes principales de ce
+tableau de bord** (la période et la bascule de comparaison) étaient les seuls éléments cliquables de
+l'application à n'accuser aucun enfoncement, précisément ceux qu'on actionne le plus souvent ici.
+Au passage, Streamlit anime `all` sur ces boutons, ce qui inclut la géométrie : restreint aux
+propriétés réellement concernées.
+
+Le principe « les mots sont une matière de design » a produit une correction simple : les origines
+s'affichaient `gmail_import` et `manuel`, des identifiants techniques. On nomme désormais le geste
+(« Réception automatique », « Saisie manuelle »), pas le module qui l'exécute.
+
+### La police : proposée, et non changée
+
+L'utilisateur laissait le choix. Le système typographique actuel — une serif de titrage, une sans
+pour l'outil, un monospace pour les valeurs machine — a été décidé au §19 puis **réparé au §21**,
+où l'on a découvert que la serif n'avait en réalité jamais atteint le moindre titre de page. En
+changer maintenant reviendrait à défaire un travail dont tout l'objet était de le rendre enfin
+visible. C'est un changement d'une ligne si l'envie revient.
+
+### Vérifié
+
+Suite complète : 767 → **773 tests**. Rangée d'indicateurs mesurée à **0 px d'écart** après
+correction (contre 22). Six graphes et deux tableaux rendus sans exception, relevés sur la page
+réellement affichée. Les quatre nouvelles lectures ont été essayées sur les données réelles avant
+d'être branchées.
+
+Non vérifié : ces répartitions n'ont jamais tourné sur un volume important — la base de
+démonstration compte une vingtaine d'analyses sur onze jours, ce qui suffit à valider la forme des
+graphes mais pas leur lisibilité avec des centaines de correspondants. Et comme pour tout le reste
+de l'interface, rien n'a été regardé sur un téléphone.
+
+---
+
+## 2026-08-06 (suite) — Une page de vente qu'on pouvait enfin atteindre, et refaite d'après le modèle demandé
+
+### Le problème de départ
+
+Deux demandes en une. **La première** : un bouton, dans l'interface, qui mène à la page de
+présentation. Cette page existait depuis le §16.5, dans `docs/landing/index.html` — mais elle
+n'était atteignable qu'en connaissant son chemin sur le disque et en l'ouvrant à la main. Autrement
+dit : elle n'était jamais ouverte au moment où elle sert, c'est-à-dire quand on montre le produit à
+quelqu'un, depuis l'écran du produit. Un support de vente qu'on ne peut pas sortir pendant la
+démonstration ne sert à rien.
+
+**La seconde** : la refaire en reprenant la direction artistique d'un gabarit précis (Stackgrid, un
+modèle d'agence IA), et y mettre **tout ce qui a été construit depuis** — les six passes §17 à §22
+n'apparaissaient nulle part sur la page, qui décrivait encore un produit s'arrêtant au §16.
+
+### Ce qui a été fait
+
+**1. Le modèle a été mesuré, pas deviné.** Plutôt que de travailler de mémoire à partir d'une
+capture, la page de référence a été chargée dans un vrai navigateur et interrogée : couleurs
+calculées, polices réellement utilisées, largeurs, rayons, structure des sections. Ce relevé a donné
+un vocabulaire précis à reproduire — un canevas quasi blanc `#fdfdfd`, deux filets verticaux qui
+enferment tout le document sur 1176 px, une serif de titrage (Instrument Serif) contre une
+grotesque géométrique, des liens de navigation entre crochets `[comme ceci]`, des cartes bordées en
+**pointillés**, des étiquettes noires reliées par des traits comme sur un schéma d'installation, des
+coins de cadrage d'imprimeur, et une révélation au **flou** quand un bloc entre à l'écran. Le cadre
+reconstruit mesure 1176 px à x=132 ; l'original, 1177 px à x=131.
+
+**2. Les couleurs sont celles d'ACA, pas celles du modèle.** Structure, typographie et mouvement
+sont repris ; l'accent est le pétrole et l'ambre du produit. L'ambre garde la règle posée au §19 :
+il ne veut dire qu'une seule chose, « un humain doit décider ici ». Sur cette page il n'apparaît
+donc que trois fois — le carré de la décision dans le logo, le nœud `⏸ PAUSE` du schéma, et
+l'étiquette « votre validation » à l'arrivée de l'animation.
+
+**3. Le contenu a été remis à jour, et les chiffres revérifiés un par un** plutôt que recopiés :
+773 tests (la page annonçait 352), 15 nœuds et 21 arêtes lus dans le graphe compilé, 90 variables
+d'environnement comptées dans `.env.example` (la page disait 54, et `CLAUDE.md` 83 — les deux
+étaient périmés). S'y ajoutent une section entière sur les six passes §17-§22 et une section
+sécurité de douze points, là où l'ancienne version en alignait six en une phrase chacun.
+
+**4. L'animation d'en-tête raconte le produit.** Un champ de caractères ASCII où un flux
+désordonné entre à gauche, se resserre, et se termine sur une marque nette : la validation humaine.
+Elle s'arrête quand elle sort de l'écran ou que l'onglet passe en arrière-plan — c'est la seule
+animation continue de la page, et la laisser tourner sous un onglet caché serait une consommation
+de batterie que personne ne voit.
+
+**5. Le fichier a déménagé, et c'est le cœur de la première demande.** Streamlit sait servir un
+dossier `static/` (`server.enableStaticServing`). La page vit donc désormais dans
+`static/landing.html` et le bouton de la barre latérale y mène par une simple adresse. Garder un
+exemplaire dans `docs/` **et** un dans `static/` aurait garanti qu'un jour l'un des deux serait à
+jour et l'autre non : il n'y a qu'un fichier.
+
+### Ce qui a été trouvé en regardant la page rendue
+
+Comme au §21, l'essentiel des défauts n'était pas visible en relisant le code.
+
+- **Le point de convergence de l'animation était invisible**, pour deux raisons cumulées. D'abord un
+  nombre de lignes **pair** : la bande se resserre vers le milieu, or avec 22 lignes aucune ne tombe
+  exactement au centre, si bien que l'endroit le plus étroit passait entre deux lignes. Ensuite le
+  fondu décoratif du bord droit, réglé à 91 %, effaçait purement et simplement la marque finale
+  placée à 96 %. Le seul élément porteur de sens de toute l'animation était donc effacé par une
+  décoration.
+- **L'étiquette « ACA » du schéma s'affichait en noir sur son propre cartouche noir.** Un attribut
+  `fill="…"` posé sur une balise SVG a une priorité inférieure à n'importe quelle règle CSS ; la
+  règle générale l'écrasait. Le texte était bien là, simplement invisible.
+- **La page défilait latéralement sur téléphone** (491 px de contenu pour 390 px d'écran). La grille
+  de bureau utilisait `minmax(0, 1fr)` ; c'est en la « simplifiant » en `1fr` pour le mobile que le
+  garde-fou avait sauté — un `1fr` nu prend pour minimum la largeur du contenu, et le bloc terminal
+  imposait donc sa largeur à toute la page. Corrigé, puis remesuré à trois largeurs : la page ne
+  déborde plus d'un seul pixel.
+- **Les liens du pied de page auraient renvoyé une erreur 404 une fois la page servie.** Ils
+  pointaient en relatif vers des fichiers du dépôt, ce qui fonctionne depuis le disque mais pas via
+  le serveur. Ce sont désormais des **chemins affichés**, pas des liens : un lien mort vaut moins
+  qu'un chemin qu'on peut retrouver.
+- **Le bouton changeait de place selon le rôle connecté.** Placé après le bloc « Base de
+  connaissances », réservé aux administrateurs, il apparaissait juste sous l'import Gmail pour un
+  opérateur et bien plus bas pour un administrateur. Remonté avant, il occupe la même position pour
+  tout le monde.
+
+### Un compromis assumé
+
+La version §16.5 s'interdisait **toute** ressource distante, et la raison était bonne : une page de
+pitch qui dépend d'un CDN ne s'ouvre ni dans un train ni derrière le proxy d'un grand compte, or
+c'est exactement là qu'on la montre. La refonte charge trois polices Google, parce que la direction
+artistique demandée repose sur ces caractères précisément. Le compromis est borné et écrit dans le
+fichier : chaque police est suivie d'une pile système complète, la page reste entièrement lisible et
+composée hors ligne, et aucun script ni aucune feuille de style distants ne sont chargés.
+
+### Vérifié
+
+Suite complète : **773 tests**, inchangée. Page rendue et mesurée dans un vrai navigateur à 390,
+768 et 1440 px — aucun débordement latéral, aucune erreur JavaScript, les 27 blocs à révélation
+s'affichent tous, l'accordéon de la FAQ s'ouvre réellement. Chaîne complète éprouvée sur un serveur
+Streamlit lancé pour l'occasion (registres SQLite redirigés vers un dossier temporaire, pour ne rien
+écrire dans les vraies données) : l'adresse `/app/static/landing.html` répond 200 avec le bon
+contenu, un fichier inexistant répond bien 404, le bouton est présent et visible dans la barre
+latérale, le suivre mène à la page, et le sélecteur de langue le fait bien passer de « Page de
+présentation » à « Product overview ».
+
+Non vérifié, et dit franchement : rien n'a été regardé sur un vrai téléphone, seulement sur un
+navigateur redimensionné — la même limite que tout le reste de l'interface. La page n'est hébergée
+nulle part (même raison que TLS depuis le §15.1.9). Et le rendu **hors ligne**, sans les polices
+Google, n'a pas été inspecté à l'œil : la pile de repli est déclarée et correcte, mais personne n'a
+regardé à quoi la page ressemble exactement dans cet état.
+
+---
+
+## 2026-08-06 (fin) — La page de vente en anglais, et trois images qui existaient sans se voir
+
+### Le problème de départ
+
+Trois demandes. **(1)** Une version anglaise de la page, orientée SaaS / agence IA, plus
+commerciale, avec les tarifs en fin de page et le bloc de contact du gabarit de référence. **(2)**
+« Corrige cette image et ajoute celle qui manque, on dirait que tu n'as pas implémenté toutes les
+images » — la refonte précédente utilisait une animation abstraite en guise d'illustration et
+laissait de côté deux visuels du modèle : la composition « machine / main humaine » et les icônes en
+pixel art des cartes de capacités. **(3)** Des paliers de tarifs et un calendrier de prise de
+rendez-vous.
+
+### Ce qui a été fait
+
+**1. Une seule page, deux langues.** L'anglais est la version par défaut et vit directement dans le
+balisage ; le français voyage à côté, attribut par attribut. Ce choix — plutôt que deux fichiers —
+est le même raisonnement que celui qui avait sorti la page de `docs/` : un second exemplaire
+traduit aurait divergé du premier dès la première correction de contenu. Sans JavaScript, on obtient
+une page anglaise complète, jamais une page blanche.
+
+**2. Les mots-clés viennent de la bonne source.** En allant chercher `acam.framer.website`, il est
+apparu que c'est **votre propre déploiement du gabarit** : la page renvoie mot pour mot le texte du
+modèle. Les formules commerciales sont donc reprises telles quelles (« The all new… era »,
+« Engineered Core Capabilities », « The Human-AI Intersection », « Service Tiers », « Scale Your
+Infrastructure »). Le vocabulaire de LangGraph a été ajouté là où il est **vrai** pour ce projet,
+puisque ACA est réellement construit dessus : « Balance agent control with agency »,
+human-in-the-loop, exécution durable, mémoire persistante, diffusion en direct.
+
+**3. Toutes les illustrations sont dessinées à l'exécution.** Aucun fichier image n'est téléchargé :
+les formes sont tracées sur un canevas invisible puis converties en caractères (les deux champs
+ASCII) ou agrandies en gros pixels (les quatre icônes). C'est ce qui permet de reproduire le style
+du modèle sans copier ses ressources, et de garder une page qui ne dépend d'aucun serveur d'images.
+
+**4. Tarifs, calendrier, contact.** Trois paliers reprennent la structure du modèle — **les montants
+sont des valeurs d'exemple**, signalées comme telles dans l'en-tête du fichier et repérables par un
+attribut dédié, parce qu'ils ne sortent d'aucun chiffrage. Le calendrier est un vrai mois navigable
+(semaine commençant le lundi, libellés dans la langue choisie, jours passés et week-ends non
+sélectionnables) et le formulaire prépare un e-mail contenant le créneau retenu, au lieu d'envoyer
+vers un serveur qui n'existe pas.
+
+### Ce qui a été trouvé en regardant, et pas en relisant
+
+Cette passe a répété la leçon des précédentes de façon presque caricaturale : **les défauts étaient
+des formes correctement dessinées, mais invisibles.**
+
+- **Le piège de la proportion.** Une cellule de police à chasse fixe est environ une fois et demie
+  plus haute que large, et le champ est bien plus large que haut : en projetant naïvement un carré
+  sur la grille, un cercle se retrouve étiré d'un facteur trois. La taille réelle d'un caractère est
+  donc **mesurée sur la page affichée** — pas supposée, car la police de repli n'a pas la même
+  chasse que celle qui est chargée — et les formes sont tracées à travers une correction.
+- **L'étoile n'était pas une étoile.** Ses points de contrôle, placés trop loin du centre, rendaient
+  les côtés presque droits : la forme s'affichait comme une pastille allongée, sans aucune pointe.
+- **Le halo effaçait l'étoile.** Il était plus *grand* qu'elle, et son dégradé remplissait les creux
+  entre les branches. La forme était juste, et personne ne pouvait la voir.
+- **La main était une tache.** Dessinée ouverte avec quatre doigts, les écarts entre eux tombaient
+  sous la taille d'un caractère et le tramage les fusionnait. Remplacée par une main qui pointe
+  (poing fermé, un index épais, un pouce) sur un champ plus haut : ça survit à la réduction, et ça
+  dit « qui se tend vers » plus clairement de toute façon.
+- **L'icône « pipeline » était un cadre.** Quatre nœuds aux coins reliés tout autour : ça se lit
+  comme une bordure, pas comme un flux. Devenue une chaîne de gauche à droite avec une dérivation.
+
+### Sur les GIF de LangChain
+
+La demande mentionnait de reprendre des vidéos ou GIF de la page LangGraph. Deux raisons de ne pas
+le faire, dites franchement plutôt que contournées en silence : ce sont les ressources d'un tiers, et
+les pointer depuis notre page casserait la propriété que tout le reste du fichier respecte (aucune
+image distante). À la place, l'animation qui explique le produit est **la nôtre** et montre le vrai
+graphe : chaque nœud s'allume à son tour, et la course **s'arrête** sur la pause humaine avant de
+terminer — la pause étant l'argument central du produit, l'animation s'y arrête aussi au lieu de
+glisser dessus.
+
+### Vérifié
+
+Suite complète : **773 tests**, inchangée. Page rendue et mesurée dans un navigateur réel à 390, 768
+et 1440 px — aucun débordement latéral (`scrollWidth` exactement égal à la fenêtre aux trois
+largeurs), aucune erreur JavaScript, les 31 blocs à révélation s'affichent tous. Interactions
+réellement exercées : trois paliers avec leurs montants, calendrier d'août 2026 avec 18 jours ouvrés
+sélectionnables, apparition des créneaux au clic sur une date, sélection d'un créneau, et **deux
+allers-retours complets** anglais → français → anglais (titre, navigation et mois du calendrier
+changent bien, l'attribut `lang` du document suit). En mouvement réduit : les deux champs ASCII
+affichent une image fixe composée et **zéro** animation tourne. Chaîne complète re-testée sur un
+serveur Streamlit lancé pour l'occasion (registres SQLite redirigés vers un dossier temporaire) :
+`/app/static/landing.html` répond 200 avec le nouveau titre anglais, et le bouton de la barre
+latérale y mène toujours.
+
+Non vérifié : toujours rien sur un vrai téléphone. Les montants des paliers sont des valeurs
+d'exemple à remplacer. Et le rendu hors ligne, sans les trois polices Google, n'a toujours pas été
+regardé à l'œil.
+
+## 2026-08-06 (suite 2) — Un calendrier qui ne réservait rien, et trois boutons qui faisaient la même chose
+
+Quatre demandes en une : rendre le calendrier réel, avec les journées déjà réservées en gris ;
+expliquer quand le client paie et ce que change le clic sur chaque palier, en vue de brancher
+Stripe ; désencombrer la section « 03 — Sécurité & conformité » ; et compléter la page pour qu'il
+n'y manque rien de logique, notamment **comment un client qui a payé obtient son interface
+Streamlit**.
+
+### Ce que l'audit a trouvé avant d'écrire quoi que ce soit
+
+Le calendrier ne pouvait pas griser une journée réservée, et pas par oubli : la page n'a **aucun
+backend**. Zéro `fetch`, zéro donnée de disponibilité, aucun appel réseau en dehors des polices. Il
+proposait tous les jours ouvrés à venir, complets ou non. Sa propre note de bas de carte l'avouait
+(« cette page ne réserve rien toute seule »), ce qui la rendait honnête et inutile à la fois.
+
+Deuxième trouvaille, plus gênante commercialement : les trois boutons « Réserver » étaient trois
+`<a href="#book">` identiques. Quelqu'un qui clique l'audit à 1 000 $ et quelqu'un qui clique la
+construction à 18 500 $ atterrissaient au même endroit, et le palier choisi n'était transporté nulle
+part. Un tableau de tarifs dont les trois boutons font la même chose invisible est exactement la
+petite tromperie contre laquelle le reste de la page argumente.
+
+Troisième : **le formulaire de contact n'arrivait nulle part.** `mailto:?subject=…` — sans
+destinataire. Le client mail s'ouvrait avec un champ « À : » vide. Le seul chemin de conversion de
+la page était cassé depuis le début, et rien ne lève d'exception quand on fait ça : le formulaire
+« marchait », il ne livrait à personne.
+
+### Décisions
+
+**Calendly plutôt qu'un backend de réservation.** L'alternative était un `booking_store.py` avec deux
+routes publiques sur `api.py` — cohérent avec le reste du projet, mais c'est un registre de plus à
+purger, à isoler par tenant et à sauvegarder, pour un problème que Calendly résout en connaissant
+déjà l'agenda. La carte garde sa coque, son titre et sa note ; seul son contenu devient le widget.
+
+**Deux branches, pas un remplacement.** `CONFIG.calendly` renseigné ⇒ disponibilités réelles.
+Vide ⇒ le sélecteur dessiné reste, inchangé. Le supprimer était tentant : le garder est ce qui
+permet à ce fichier de continuer à fonctionner comme document autonome, hors ligne et à l'impression
+— la raison même pour laquelle il n'a aucune dépendance. Et `<iframe>` nu, jamais `widget.js` : la
+page ne charge aucun script distant, propriété qui vaut plus que le redimensionnement automatique.
+Injection à l'approche, donc un visiteur qui ne descend jamais jusqu'à la section ne contacte jamais
+Calendly.
+
+**Trois paliers, trois gestes différents, et le moment du paiement écrit sur la carte.** L'audit se
+paie en ligne d'avance (lien Stripe, dont la redirection après paiement pointe vers Calendly :
+payer → réserver s'enchaîne sans serveur de notre côté). La construction ne se paie pas depuis un
+bouton — elle se cadre, puis se devise. La maintenance démarre après la livraison et ne se vend pas
+seule. Stripe n'est pas construit : un objet `CONFIG` en haut du script est le seul endroit où
+coller les liens, et `POST /stripe/webhook` le jour venu se calquera sur `/slack/interactions`.
+
+**Cinq groupes repliables plutôt que quatre.** Le plan en prévoyait quatre, ce qui obligeait à
+réordonner les douze lignes. Cinq groupes **contigus** sur l'ordre existant donnent le même résultat
+sans qu'aucune des douze chaînes bilingues n'ait à être retapée — donc sans risque d'en corrompre
+une en silence. Panneaux **indépendants**, contrairement à la FAQ : quelqu'un qui compare deux
+contrôles a une raison réelle d'en garder deux ouverts.
+
+**Le modèle de livraison, tranché explicitement.** La FAQ affirmait « rien n'est hébergé de notre
+côté, parce qu'il n'y a pas de notre côté ». Vendre une interface Streamlit rendait cette phrase à
+moitié fausse. Retenu : hybride — la **démonstration** est hébergée par nous et ne contient aucune
+donnée réelle, la **production** vit chez le client. Les deux réponses de FAQ concernées ont été
+réécrites plutôt que laissées en contradiction, et une nouvelle section « 05 — Comment vous y
+accédez » raconte les quatre étapes, essai → paiement → provisionnement → mise aux couleurs.
+
+### Ce que le rendu a trouvé, et pas la relecture
+
+Deux défauts de plus, tous deux invisibles en lisant le code :
+
+- **`[hidden]` ne cachait rien.** `.chip{display:inline-block}` et `.btn{display:inline-flex}` sont
+  des règles d'auteur de même spécificité que la règle navigateur `[hidden]{display:none}`, et
+  l'auteur gagne. Résultat : une pastille vide affichée en permanence, et **les deux boutons de
+  démonstration visibles alors qu'aucune démo n'est configurée** — précisément ce que l'attribut
+  était là pour empêcher. Corrigé par une règle globale.
+- **Un panneau ouvert affichait « | ».** La rotation de 90° du glyphe rend l'barre horizontale
+  verticale et inversement ; c'est donc la **mauvaise** barre qui était effacée. Défaut préexistant
+  de la FAQ, hérité par les nouveaux groupes, et corrigé pour les deux : ouvert affiche « − ».
+
+### Vérifié
+
+Rendu et piloté dans un navigateur réel, sur les **deux** branches (une copie sonde ayant permis de
+capturer le `mailto:`, Chromium refusant qu'un test redéfinisse `window.location.href`).
+
+Branche hors ligne : pastille et boutons démo réellement masqués, sélecteur présent, 18 jours
+ouvrés sélectionnables, mois précédent désactivé sur le mois courant, créneau remis à zéro au
+changement de date, focus clavier restitué après reconstruction de la grille, et `mailto:` portant
+enfin un destinataire — avec le palier et le créneau dans le corps.
+
+Branche Calendly : sélecteur et note hors ligne retirés du DOM, note « disponibilités réelles »
+affichée, **aucune requête vers calendly.com au chargement**, iframe injecté à l'approche avec les
+paramètres de thème et `utm_content=discovery`, cadre mesuré à 490×640.
+
+Le reste : cinq groupes, un seul ouvert au chargement, les **douze** lignes toujours dans le DOM une
+fois repliées (donc trouvables par Ctrl+F, par un moteur et à l'impression), deux groupes ouverts
+simultanément, bascule FR/EN après ouverture d'un panneau puis vérification que l'accordéon répond
+toujours (c'est là que les écouteurs meurent, `setLang` réécrivant `innerHTML`), sept bandeaux
+numérotés dans le bon ordre 01→07, et aucun débordement latéral à 390, 768, 1440 et 1920 px. À
+l'impression, les groupes repliés s'ouvrent réellement (hauteurs mesurées, pas supposées) et le
+calendrier disparaît. Zéro erreur JavaScript sur toutes les passes.
+
+Non vérifié, et dit franchement : **le grisage d'une journée complète n'a pas été vu**, faute de
+compte Calendly — c'est Calendly qui le rend, notre part est de lui laisser la carte, et elle est
+vérifiée. Aucun lien Stripe n'a été créé ni testé. Les trois montants restent des valeurs d'exemple.
+Rien n'a été regardé sur un vrai téléphone.
+
+
+## 2026-08-06 (fin) — Un second facteur qu'on peut espacer sans le vider
+
+Demande : pouvoir cocher « se souvenir de cet appareil » sur l'écran TOTP et ne ressaisir le code
+que tous les trois jours.
+
+### La question à trancher avant d'écrire une ligne
+
+Une case « se souvenir » n'a de sens que s'il existe quelque chose à reconnaître. Deux mécanismes
+possibles, et l'écart de sécurité entre les deux est énorme :
+
+1. **L'empreinte (IP, user-agent)** déjà calculée par `activity_log.device_fingerprint()`. Zéro
+   travail — et une faute : cette empreinte **n'est pas un secret**. Deux personnes derrière le même
+   NAT de bureau, avec le même navigateur, produisent la même valeur. Quiconque connaît le mot de
+   passe depuis le même réseau sauterait le second facteur.
+2. **Un vrai jeton aléatoire déposé dans le navigateur** — ce que font les vraies implémentations.
+   Encore faut-il que Streamlit sache poser un cookie, or `st.context.cookies` est en lecture seule.
+
+Plutôt que de trancher d'après la documentation, **essai** : une page jetable avec un
+`components.html` écrivant `document.cookie` sur le parent, puis rechargement. Résultat sans
+ambiguïté — le cookie apparaît côté navigateur *et* dans `st.context.cookies` à la passe suivante.
+L'iframe `srcdoc` d'un composant hérite de l'origine de la page. Le mécanisme fort était donc
+possible, et c'est celui qui est en place : 32 octets d'aléa, stockés **hachés** côté serveur.
+
+### Ce qui est réellement affaibli, écrit noir sur blanc
+
+Un appareil mémorisé saute **le code, et lui seul**. Le mot de passe reste exigé à chaque connexion,
+et rien ici n'allonge une session (`session.py` répond à une tout autre question). On passe donc, sur
+ce navigateur et pour trois jours, de « mot de passe + code » à « mot de passe + possession d'un
+jeton ». C'est un facteur de moins que l'idéal, et c'est le sens même de la case : le compromis est
+choisi, il n'est pas subi.
+
+Quatre garde-fous, tous couverts par des tests :
+
+- **Le jeton n'est jamais stocké**, seulement son SHA-256. Pas de sel, et c'est délibéré : 256 bits
+  d'aléa n'ont aucune faiblesse d'entropie à compenser. Une fuite de la base ne rejoue rien.
+- **Révocation automatique sans couplage.** Chaque ligne porte l'empreinte du mot de passe haché et
+  du secret TOTP au moment de l'émission (`auth_state_fingerprint`, technique du `session_auth_hash`
+  de Django). Changer le mot de passe invalide tout, **sans que `user_store` connaisse ce module**.
+  Une révocation branchée par un appel explicite est une révocation qu'on oublie le jour où un
+  troisième chemin de changement de mot de passe apparaît.
+- **Expiration jugée côté serveur.** Le `max-age` du cookie est une politesse envers le navigateur,
+  modifiable par qui détient le poste : il ne fait pas autorité.
+- **Chaque saut est consigné** (`auth.device_trusted`, `auth.totp_skipped`, `auth.device_revoked`,
+  tous dans `SENSITIVE_ACTIONS`). Sans cela, la seule chose que l'administrateur perdrait en
+  accordant ce confort serait précisément sa visibilité dessus.
+
+Un cran gratuit en plus : le cookie est lié à l'empreinte du user-agent. Rejoué depuis un autre
+navigateur, il ne correspond plus et l'écran redemande simplement le code. Le faux positif est connu
+et accepté — une mise à jour de navigateur coûte un code de plus, rien d'autre. `Secure` n'est ajouté
+qu'en HTTPS : le poser en HTTP local ferait refuser le cookie et la case n'aurait aucun effet
+visible. `HttpOnly` est hors de portée par construction (un cookie posé en JavaScript est lisible en
+JavaScript) : limite assumée, écrite dans le module plutôt que passée sous silence.
+
+### Un défaut évité parce qu'il avait déjà été rencontré le matin même
+
+Première version : cocher la case, vérifier le code, poser le cookie, ouvrir la session. Or
+`_open_session()` appelle `st.rerun()` immédiatement, ce qui interrompt le script et jette le rendu
+en cours — le composant n'aurait **jamais** été exécuté par le navigateur. La case aurait été cochée,
+la ligne écrite côté serveur, et le cookie n'aurait jamais existé : une panne parfaitement muette,
+exactement la famille de défauts trouvée quelques heures plus tôt sur la page de vente (des règles
+CSS écrites et jamais rendues). L'écriture est donc **différée** à la passe suivante, via
+`flush_device_cookie()` appelée en tête de `check_auth` — le seul point traversé aussi bien par un
+utilisateur authentifié que par l'écran de connexion, donc le seul qui couvre « mémoriser » et
+« oublier » à la fois.
+
+### Vérifié
+
+22 nouveaux tests (`tests/test_device_trust.py`), ordonnés par gravité : jeton d'un compte inutile
+pour un autre, expiration refusée et purgée, mot de passe changé qui révoque tout, secret TOTP
+réinitialisé idem, cookie rejoué depuis un autre navigateur refusé, jeton absent de la base en clair,
+cloisonnement multi-tenant. Suite complète : 773 → **795 tests**.
+
+Surtout, la boucle complète dans un vrai navigateur, contre l'application réelle lancée sur un bac à
+sable de bases neuves : **(1)** connexion, le code est demandé, la case est présente et cochable, le
+cookie apparaît (43 caractères) ; **(2)** nouvelle page, nouvelle session serveur, mot de passe
+seul — **le code n'est pas redemandé** et la session s'ouvre ; **(3)** après révocation côté serveur,
+le code est redemandé. Le journal contient bien `auth.device_trusted` puis `auth.totp_skipped`.
+L'écran « Réglages » affiche la ligne de l'appareil avec sa date d'expiration (09/08/2026, soit trois
+jours) et son bouton de révocation.
+
+Deux limites du harnais, sans conséquence produit : le contenu d'un `st.dataframe` est dessiné sur un
+canvas et n'apparaît donc pas dans le texte du DOM (la présence du bouton, qui ne s'affiche que si la
+liste n'est pas vide, sert de preuve) ; et la navigation entre pages a dû être déclenchée par un
+événement DOM, les entrées du menu se recouvrant mutuellement. Non vérifié : rien n'a été essayé avec
+plusieurs postes réels, ni en HTTPS — donc l'attribut `Secure`, qui ne s'ajoute qu'à ce moment-là,
+n'a jamais été observé en conditions réelles.
+
+
+## 2026-08-07 — Un cookie que le serveur ne pouvait pas lire, et un tableau de bord tout bleu
+
+Quatre retours d'usage. Le premier est un vrai défaut de la veille ; les trois autres sont des
+demandes de design.
+
+### « Se souvenir de cet appareil » ne marchait pas à la reconnexion
+
+Signalé après coup, et la vérification de la veille était passée à côté pour une raison précise :
+elle ouvrait une **nouvelle page**, alors que « je me déconnecte puis je me reconnecte » reste dans
+le **même onglet**.
+
+Mesuré avec une page sonde plutôt que supposé : `st.context.cookies` est figé au **handshake** de la
+session Streamlit. Un cookie déposé pendant la session en cours n'y apparaît jamais — ni tout de
+suite, ni après plusieurs reruns (constaté : présent côté navigateur, absent côté serveur, visible
+seulement après un rechargement complet). Le scénario du bug était donc structurellement
+impossible : la déconnexion ne vide que la clé `session`, la session Streamlit survit, et le jeton
+restait illisible.
+
+Corrigé avec **deux sources**, chacune couvrant ce que l'autre ne peut pas : `st.session_state`
+survit à la déconnexion et couvre le retour dans le même onglet ; le cookie survit à la fermeture du
+navigateur et couvre le rechargement, le nouvel onglet et le redémarrage. Aucune des deux seule ne
+suffit. Le jeton gardé en session ne quitte jamais le serveur.
+
+Re-vérifié sur le chemin qui échouait : déconnexion, reconnexion dans le même onglet, **le code
+n'est plus redemandé** — et le reste tient toujours (nouvel onglet, révocation qui réexige le code,
+journal portant `auth.device_trusted` puis `auth.totp_skipped`).
+
+### Le tableau de bord ne montrait qu'une couleur
+
+Le §22 n'utilisait que `chart_colors(BRAND)[0]`, avec un motif défendable : les catégories sont
+nommées sur l'axe, les colorer serait un encodage redondant. Le raisonnement vaut **à l'intérieur**
+d'un graphe et a fait manquer l'échelle du dessus : six blocs mesurant six choses différentes se
+dessinaient tous dans le même bleu. La couleur encode donc désormais le **bloc**, pas la catégorie.
+
+Une tentative intermédiaire a été **écartée après mesure** : une rotation de teinte en HLS produisait
+bien six couleurs distinctes, mais criardes, alors que `chart_colors()` renvoyait déjà six teintes
+curatées et distinctes sur cette marque (bleu, vert, ambre, bleu clair, pétrole, rouge). Le défaut
+n'était pas la palette, c'était l'index `[0]`. La fonction devenue inutile a été supprimée plutôt
+que laissée « au cas où ».
+
+Second défaut du même écran : les grandes zones vides sous plusieurs cartes. La hauteur de carte est
+fixée par rangée (§22) tandis que Vega gardait sa hauteur par défaut ; les deux ne se parlaient pas.
+Les graphes reçoivent maintenant une hauteur déduite de celle de leur carte.
+
+Enfin, l'entrée des cartes est liée au **défilement** (`animation-timeline: view()`) et non plus à
+une horloge au montage : sur un tableau de bord dont sept cartes sur dix sont sous la ligne de
+flottaison, la moitié de la cascade était jouée pour personne. Sous `@supports` — un navigateur qui
+l'ignore garde la cascade au montage, et la carte s'affiche dans tous les cas.
+
+### L'onglet actif et le paquet de cartes
+
+L'onglet courant portait déjà la couleur de marque (§21) mais en aplat. Un dégradé très court et un
+liseré intérieur lui donnent de la matière, et un enfoncement au clic répond **avant** que Streamlit
+n'ait rejoué le script — sans quoi la personne clique une seconde fois.
+
+Sur la page de vente, les neuf cartes de « 02 — Depuis la v1 » occupaient trois écrans. Empilées,
+elles en occupent une : les deux cartes du dessous restent visibles, parce que c'est cette
+profondeur qui dit « il y en a d'autres ». Deux points ne se voient qu'à l'écran et ont été corrigés
+après rendu : une hauteur d'estrade fixe laissait un trou sous les cartes courtes (elle est
+désormais mesurée sur la plus haute, via `offsetHeight` — `getBoundingClientRect` renvoie la boîte
+**mise à l'échelle** et sous-estimait de 7 %), et les cartes du dessous, blanches sur fond blanc, ne
+se voyaient pas : il a fallu les teinter, pas seulement les estomper.
+
+### Vérifié
+
+Suite complète : **795 tests**, dont deux ont échoué sur mes propres modifications avant d'être
+corrigées — l'un exige qu'aucune animation d'interface ne dépasse 300 ms (la durée est ignorée sous
+une timeline de défilement, mais la laisser à 500 ms aurait été un piège pour la relecture
+suivante), l'autre que la page courante porte littéralement `background: var(--aca-primary)` (le
+raccourci est maintenant posé d'abord, le dégradé par-dessus). Aucun des deux n'a été affaibli.
+
+Rendu : six couleurs de remplissage réellement peintes et relevées sur la page (`#0f4c81`,
+`#107c10`, `#b4622a`, `#3e8fd0`, `#125e6b`, `#a32c1e`), graphes remplissant enfin leurs cartes,
+paquet de cartes piloté au clavier et à la souris avec les cartes cachées `inert`, section passée de
+trois écrans à 772 px, aller-retour FR/EN, et aucun débordement à 390, 768 et 1440 px. Le tableau de
+bord a été rendu sur des **copies** des vraies bases, avec un compte `operator` créé dans la copie —
+le second facteur étant réservé aux administrateurs, aucun secret réel n'a été lu.
+
+Non vérifié : `animation-timeline: view()` n'a été observé que sur Chromium ; rien sur un téléphone.
+
+
+### Les paliers, repris sur le déploiement réel (même jour)
+
+Retour d'usage : les paliers « Démonstration / Solo / Enterprise » de l'ancienne page française
+étaient préférés aux trois forfaits d'agence chiffrés. Ils l'ont remplacé, et c'est un meilleur
+résultat que ce que la demande impliquait — parce qu'ils décrivent les trois formes de déploiement
+que **le code prend réellement en charge** (mode démonstration, profil Solo, profil Enterprise avec
+n8n), là où les précédents décrivaient des prestations inventées.
+
+Effet de bord bienvenu : les trois montants d'exemple (1 000 / 18 500 / 3 500 $), hérités d'un
+modèle de page et signalés comme provisoires depuis leur écriture, ont **disparu** au lieu d'être
+devinés. Le 0 € affiché est littéral et vérifiable : la pile tient sur des paliers gratuits et les
+clés d'API appartiennent au client. Ce qui se facture — installation, intégration — se devise après
+un appel, ce qui est aussi la raison pour laquelle chaque bouton mène désormais à la réservation
+plutôt qu'à un paiement. Le bouton du palier Démonstration est la seule exception : il mène à la
+démonstration, parce qu'envoyer vers un formulaire quelqu'un qui a demandé à *essayer* est
+exactement le petit détournement que cette page prétend éviter.
+
+Un défaut visible seulement au rendu, et présent depuis longtemps : `.row` était `display:flex`, ce
+qui transforme chaque enfant en ligne en **élément flex**. Une phrase contenant un `<em>` ou un
+`<code>` se retrouvait donc coupée en trois morceaux séparés par 11 px — « la garde *lève* au lieu
+de passer en silence » se lisait littéralement en morceaux, sur la page de vente comme dans la
+capture envoyée. Seules les lignes numérotées ont besoin de l'axe flex : elles portent `.row__k`,
+et c'est désormais la condition (`:has()`).
+
+Vérifié : 795 tests inchangés, deux branches de réservation rejouées (le `mailto:` porte bien
+« Palier 2 · Solo » et le créneau choisi ; l'iframe Calendly s'injecte avec `utm_content=solo`),
+aller-retour FR/EN sur les trois cartes, et aucun débordement à 390 et 1440 px.
+
+---
+
+## 2026-08-07 — §26 : l'artwork refait en blocs, et la main devient une photographie
+
+**Point de départ.** La section « The Human-AI Intersection » ne correspondait pas à ce qui était
+attendu. Deux captures montraient le rendu voulu : une masse pixellisée, granuleuse, qui scintille
+et passe du gris au bleu. Deux autres montraient les icônes de capacités et le pied de page.
+
+### Mesurer plutôt que deviner
+
+La page de référence a été ouverte dans un navigateur piloté et ses éléments interrogés un par un,
+plutôt que jugée d'après une capture. Quatre sondes successives, chacune corrigeant l'hypothèse de
+la précédente :
+
+1. La section ne contient **qu'une seule `<img>`** (la main) et un `<svg>` de 1×50 px (le trait de
+   la légende). La masse n'est donc ni l'une ni l'autre.
+2. Le test de collision aux coordonnées de la masse trouve **deux `<div>` feuilles de 626×274**,
+   l'une portant `filter: blur(11px)`, aucune avec `background-image`, aucune avec d'enfant. Rien
+   là-dedans ne peint quoi que ce soit.
+3. L'`outerHTML` du conteneur tranche : c'est du **texte**. Monospace, 10 px, `line-height: 1em`,
+   `letter-spacing: 0em`, couleur `rgb(176,176,176)`, 47 lignes de 170 colonnes — et un décompte des
+   glyphes qui ne renvoie que **trois caractères** : U+2593 (1137), U+2592 (969), U+2591 (334).
+4. Un balayage de toute la page trouve **six instances** de la même construction, toujours par
+   paires nette + floutée : la masse, les quatre icônes (bleu, magenta, vert, ambre) et la main du
+   pied de page.
+
+Autrement dit : tout le langage visuel du site tient dans une seule technique, et la seule image
+qu'il télécharge est la photographie de la main.
+
+### Ce que la ponctuation coûtait
+
+Le moteur existant mappait la luminance sur `" .:-=+*#%@"`. C'est de l'art ASCII honnête, et c'était
+le mauvais médium : la ponctuation a une forme interne, donc l'œil lit *de l'écriture qui dessine*.
+Les blocs de trame remplissent tout leur cadratin ; à `line-height: 1` et `letter-spacing: 0` ils se
+juxtaposent en aplat continu. Toute la différence entre l'ancien rendu et le nouveau tient là — le
+tramage ordonné, la correction d'aspect et la boucle partagée à 16 im/s n'ont pas bougé, parce
+qu'ils n'étaient pas le problème.
+
+### Les mains ASCII : trois tentatives, un constat
+
+Les passes précédentes gardent la trace de trois dessins successifs de main en ASCII, finissant tous
+en ovale ou en botte. La cause est structurelle et non un défaut de dessin : à cette résolution
+l'écart entre deux doigts fait **moins d'une cellule**, et le tramage les fusionne. Renoncer à
+dessiner la main pour poser une photographie n'est pas un abandon — c'est reconnaître ce que le
+médium sait faire (une masse diffuse, sans silhouette à perdre) et ce qu'il ne sait pas. La section
+y gagne son argument : un côté est **synthétisé à chaque image**, l'autre est **une vraie
+photographie**. Le contraste passe désormais par les médias, pas seulement par la légende.
+
+### Trois défauts que seul le rendu a montrés
+
+**(1) Trois icônes sur quatre en pavés uniformes.** Sur l'ancien canvas agrandi, un pixel de sprite
+valait 5,3 pixels écran, donc un trait de 1 px dans le cylindre de base de données ou une encoche de
+1 px entre deux nœuds de pipeline se voyait. À travers une grille de 27 lignes il vaut une cellule,
+et le pré-flou de 0,9 px la referme : la base de données et le presse-papiers sont sortis en
+rectangles arrondis vides, le pipeline en marteau. Seule l'icône « agent » a survécu, ses détails
+faisant déjà 2 px. Règle désormais écrite dans le fichier : **aucun détail ni aucun écart sous
+2 pixels de sprite**, et un contour plutôt qu'un aplat. Grille portée à 40 lignes, pré-flou ramené à
+0,55. Le pipeline a en plus été **décalé en escalier** : trois nœuds de même hauteur reliés à cette
+hauteur font une barre, quelle que soit la largeur des encoches.
+
+**(2) Une masse trop dense.** Avec un tramage d'amplitude 0,22, tout ce qui dépasse la mi-luminosité
+quantifie directement en ▓ et la forme sort en silhouette pleine — correct pour une icône, faux pour
+une masse censée ressembler à des particules qui trouvent une forme. L'amplitude est devenue un
+paramètre par champ (`grain`) : 0,22 pour les icônes, **0,55** pour la masse, contre une source qui
+ne dépasse pas ~0,86. Même code, même forme ; la différence entre « une plaque » et « un nuage »
+tient à ce seul nombre.
+
+**(3) Un terminateur de commentaire de trop.** En réécrivant un commentaire CSS, un `*/` s'est
+retrouvé au milieu du bloc, le refermant six lignes trop tôt et laissant de la prose dans la feuille
+de style. Le navigateur l'a ignorée, la page s'est affichée, et le seul symptôme était une règle
+« qui ne s'applique pas » — exactement la classe de panne silencieuse qui a déjà coûté cher à ce
+projet (la ligne d'audit avalée de §17, le rapport mensuel disparu de §20). Une assertion a été
+ajoutée à la sonde : elle vérifie les styles calculés qu'une erreur d'analyse mangerait. Anecdote
+instructive : le commentaire de cette assertion contenait lui-même un terminateur littéral et a
+cassé le script de la même façon, au premier essai.
+
+### La photographie, et ce qu'elle coûte
+
+`static/aca-hand.png`, 1040×585, **163 Ko**. Trois décisions :
+
+- **Niveaux de gris + alpha, pas couleur.** La page la rend désaturée de toute façon. En couleur
+  vraie le fichier pesait 487 Ko ; quantifié en palette il tombait à 69 Ko mais l'avant-bras bandait
+  visiblement. Une rampe de luminance 8 bits **ne peut pas** bander, puisqu'elle *est* la rampe.
+  Fait dans le fichier plutôt qu'avec un `filter: grayscale()`, pour que la désaturation survive là
+  où les filtres CSS ne s'appliquent pas.
+- **1040 px de large.** Mesuré : 91 / 124 / 163 / 207 Ko à 760 / 900 / 1040 / 1180 px. La main n'est
+  jamais dessinée au-delà de ~620 px CSS.
+- **La main du pied de page est précalculée**, expédiée en texte littéral dans le balisage. Relire
+  une image depuis un canvas est **bloqué sous `file://`**, ce qui aurait supprimé silencieusement
+  cette illustration dans exactement le cas « document autonome hors ligne » que cette page est
+  faite pour supporter. Elle est statique de toute façon.
+
+L'en-tête du fichier affirmait « aucune image distante, tout est dessiné à l'exécution ». C'est
+toujours vrai pour les distantes, mais l'aveu est écrit noir sur blanc, avec la **provenance** : ce
+détourage vient du modèle Framer dont la page suit la direction artistique, ce n'est pas un visuel
+original. Acceptable pour un prototype ; à remplacer ou à licencier avant toute publication
+commerciale. Ce n'est pas au code de trancher.
+
+### Ce qui n'a délibérément pas été repris
+
+Les trois portraits du site de référence. La section « témoignages » de cette page dit explicitement
+qu'il n'y a pas encore de client et cite à la place trois découvertes du projet (§16, §17, §21). Y
+coller des photos de mannequins transformerait une section honnête en section fabriquée.
+
+### Vérifié
+
+**795 tests** inchangés. Rendu mesuré à 1440 et 390 px :
+
+- chaque champ a **une seule largeur de ligne** — une ligne irrégulière signifierait que l'espace et
+  le bloc proviennent de deux polices différentes, d'où la pile `--font-block` séparée de
+  `--font-mono` (Fragment Mono n'a pas les blocs de trame, ils tomberaient en repli) ;
+- les deux copies se superposent au pixel près (`dx: 0, dy: 0`) — ce qui a demandé de remplacer
+  `inset: 0` par `top/left/right` sur la couche floutée : `inset: 0` la contraint à la hauteur du
+  conteneur, laquelle vient de la copie nette, laquelle est vide avant la première image ;
+- la photographie se charge (1040×585 naturels, 643×362 affichés), aucun débordement horizontal,
+  aucune erreur console.
+
+Branches rejouées : `prefers-reduced-motion` — les **7 champs sont dessinés**, **0 animation** en
+cours, la masse reste grise (« pas d'animation » ne doit jamais vouloir dire « pas d'image ») ;
+bascule FR — les 7 champs survivent à la réécriture du texte ; impression — tout l'artwork masqué,
+12 titres conservés.
+
+Un défaut préexistant corrigé au passage, trouvé en regardant une section atteinte par ancre sur
+mobile : aucune règle `scroll-margin-top` n'existait, donc chaque lien interne — dont « Why us? »,
+qui pointe précisément sur la section refaite ici — amenait sa cible à y = 0, là où la barre
+collante de 70 px recouvre le titre.
+
+**Non vérifié, et dit comme tel :** rien n'a été ouvert sur un vrai téléphone (uniquement un
+navigateur redimensionné) ; la page n'est hébergée nulle part ; et le rendu des blocs dépend de la
+police retenue par la pile `--font-block`, contrôlée sur Chromium/Windows seulement.
+
+### §26.1 — Icônes réduites, et le même fond dans l'application
+
+Deux demandes de suite, le même jour : les icônes étaient trop grandes, et Streamlit devait
+reprendre le fond de la page de présentation.
+
+**Une icône de ce type ne se redimensionne pas par la largeur.** Le nombre de colonnes vaut
+largeur ÷ (corps × chasse) et le nombre de lignes en découle, donc réduire la seule largeur divise
+les lignes — et c'est très exactement ce qui avait déjà transformé trois icônes sur quatre en pavés
+uniformes une heure plus tôt. En tenant le rapport à 40 px de largeur pour 1 px de corps, la grille
+reste à ~73×40 quelle que soit la taille : 280 px/7 px sont devenus 200 px/5 px, vérifié après coup
+(grille mesurée à 72×40 sur la page rendue), sans qu'un seul détail disparaisse.
+
+**Le fond de l'application.** Une seconde couche `::after` sur `stAppViewContainer` répète une tuile
+SVG de blocs éparpillés en `--aca-primary`, découpée par **les mêmes** rayons radiaux que les voiles
+du §21 et animée par **la même** image-clé `aca-ambient`. Les deux « mêmes » sont le fond du sujet :
+les pixels n'apparaissent que là où il y avait déjà de la couleur (sinon on obtient un quadrillage
+plein écran, qui ne se lit plus comme une matière), et les deux couches dérivent ensemble (sinon
+elles glissent l'une sur l'autre et se lisent comme deux calques).
+
+Ce n'est pas le moteur de la page de présentation, et c'est délibéré : là-bas les blocs sont du vrai
+texte régénéré par un canvas à chaque image ; ici `branding.py` n'émet que du CSS, contrainte qu'on
+ne lève pas pour une décoration. Le coût est dit dans la docstring : le masque fait **fondre** les
+blocs vers les bords là où un vrai tramage les **raréfie**. À 5 % d'opacité sur une tuile couverte à
+27 %, l'écart est imperceptible — mais c'est une approximation, pas la même chose.
+
+**Bayer essayé, rendu, rejeté.** Premier jet : la même matrice de Bayer que la page de présentation.
+Rendu à l'écran, cela donnait un tissage régulier avec des coutures de tuile bien visibles. La cause
+est structurelle : sur la page de présentation, Bayer est seuillée contre une densité qui **varie**
+le long de la forme, et c'est ce dégradé qui casse la régularité de la matrice. Ici la densité est
+uniforme, et Bayer seuillée à une seule valeur produit des rangées de 4, 2, 4, 0 cellules. Remplacée
+par un hachage des coordonnées : même reproductibilité (aucun `random`, aucun état), aucun axe
+privilégié — et l'argument qui impose l'ordonné là-bas (un tirage refait à chaque image scintille)
+ne s'applique pas à une texture statique.
+
+Deux réglages qui viennent de la mesure, pas du goût : **chaque rangée et chaque colonne compte au
+moins deux cellules**, parce qu'un tirage à 30 % laisse une rangée de seize vide à peu près une fois
+sur trois cents — c'est arrivé au premier essai — et qu'une rangée vide dans une tuile répétée tous
+les 96 px devient une couture horizontale que l'œil finit par suivre ; et la **même** URI est posée
+deux fois à 96 et 138 px avec des décalages premiers entre eux, la période combinée dépassant alors
+tout écran.
+
+**Le défaut le plus instructif, commis deux fois dans la même passe.** En rallongeant un commentaire
+CSS existant, un `*/` s'est retrouvé au milieu du bloc. La première fois il a laissé six lignes de
+prose dans la feuille et annulé les règles du pied de page ; la seconde, il a supprimé la dérive du
+fond — sur `::before` **et** `::after`, donc y compris l'animation d'ambiance qui existait depuis le
+§21. Dans les deux cas : aucune erreur, page affichée, seul symptôme une règle « qui ne s'applique
+pas ». D'où un test qui ne protège pas cette fonctionnalité mais tout le fichier —
+`test_les_commentaires_css_sont_tous_refermes` — et qui refuse aussi une fermeture orpheline suivie
+d'une ouverture plus loin, cas qu'un simple comptage égal laisserait passer.
+
+**Deux tests écrits faux, et ce qu'ils ont appris.** (1) « la boucle ne tourne qu'au niveau complet »
+cherchait `aca-ambient` dans la feuille : le bloc `@keyframes` est émis dès que les animations ne
+sont pas coupées, donc le test voyait la **définition** et concluait que la boucle tournait au niveau
+« sobre ». Corrigé en cherchant `animation: aca-ambient`. (2) « la texture survit à une couleur
+invalide » forçait un jeton corrompu **après** `resolve()` — or `resolve()` valide déjà chaque
+couleur et retombe sur le défaut, si bien que le test échouait dans `_variables`, c'est-à-dire
+ailleurs que dans ce qu'il prétendait vérifier. Visé désormais sur `_ambient_texture` directement.
+
+**Vérifié.** 795 → **802 tests**. Dans l'application réellement lancée (bac à sable, aucune base
+réelle ouverte, compte `operator` donc pas de TOTP) : la couche existe, porte ses deux calques aux
+bonnes échelles, est masquée, et `::before` comme `::after` portent `aca-ambient 48s`. La peinture
+est mesurée par **différence d'images** — capture, couche désactivée, seconde capture — parce
+qu'échantillonner la capture seule ne mesure que l'interface : 18,7 % des pixels échantillonnés
+changent, répartis en deux amas correspondant aux deux voiles. Un premier essai annonçait un écart
+maximal de 86/255 pour une couche à 5 % d'opacité, ce qui est arithmétiquement impossible : les
+animations n'étaient pas figées entre les deux captures et la mesure suivait le voile en train de
+dériver. Les quelques écarts résiduels élevés se situent sur les bords de glyphes — un artefact de
+rastérisation dû à la suppression d'une couche de composition, pas la texture.
+
+**Non vérifié :** rien sur un vrai téléphone ; le mode sombre et les 18 préréglages ne sont vérifiés
+que par calcul ; `mask-image` reste un détail d'implémentation navigateur, contrôlé sur
+Chromium/Windows uniquement.

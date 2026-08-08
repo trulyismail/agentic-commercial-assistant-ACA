@@ -197,7 +197,8 @@ python -m aca.ingestion.ingest chemin/vers/doc.md replace     # ou remplace tout
 
 ## Documentation
 
-[docs/landing/index.html](docs/landing/index.html) (one-pager de présentation, à ouvrir dans un
+[static/landing.html](static/landing.html) (page de présentation — atteignable depuis la barre
+latérale de l'interface, bouton « Page de présentation », ou à ouvrir directement dans un
 navigateur) · [docs/ACAM_roadmap.md](docs/ACAM_roadmap.md) (architecture, audits, décisions) ·
 [docs/PROJECT_JOURNAL.md](docs/PROJECT_JOURNAL.md) (journal de bord) ·
 [docs/DEPLOYMENT_HARDENING.md](docs/DEPLOYMENT_HARDENING.md) (TLS, secrets, rotation) ·
