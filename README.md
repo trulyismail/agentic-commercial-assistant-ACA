@@ -1,205 +1,294 @@
-# ACA — Assistant Commercial Agentique
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="static/brand/acami-lockup-dark.png">
+    <img src="static/brand/acami-lockup.png" alt="acami" width="220">
+  </picture>
+</p>
 
-**Vos e-mails commerciaux sont lus, qualifiés, enrichis et une réponse est rédigée — pendant votre
-absence. À votre connexion, tout le travail est fait : il ne reste qu'à cliquer « Valider ».**
+<h1 align="center">ACA — Agentic Commercial Assistant</h1>
 
-ACA pré-lit les e-mails entrants et leurs pièces jointes (PDF, Word, Excel), extrait les informations
-du lead, interroge votre base de connaissances, enrichit le profil de l'entreprise, rédige une
-proposition — puis **s'arrête**. Aucune ligne n'entre dans le CRM et aucun e-mail n'est envoyé avant
-qu'un humain ait validé. C'est un rédacteur, pas un agent autonome sur votre CRM.
+<p align="center">
+  A multi-agent LangGraph system that pre-reads incoming sales e-mails, qualifies the lead,<br>
+  drafts a proposal — and <b>stops</b> until a human clicks "Validate".
+</p>
 
-> Prototype de stage (8 semaines) construit sur **LangGraph** (graphe d'états à interruption native
-> pour le *human-in-the-loop*), **Groq** (Llama, gratuit) et **Google Sheets** comme CRM + base de
-> connaissances. Stack intégralement en paliers gratuits.
+<p align="center">
+  <img alt="Python" src="https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white">
+  <img alt="LangGraph" src="https://img.shields.io/badge/LangGraph-1.2-1C3C3C">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-834%2F863%20passing-4C9A2A">
+  <a href="https://github.com/trulyismail/agentic-commercial-assistant-ACA/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/trulyismail/agentic-commercial-assistant-ACA/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="Human-in-the-loop" src="https://img.shields.io/badge/CRM%20writes-human--validated-B45A1C">
+  <img alt="Demo mode" src="https://img.shields.io/badge/try%20it-no%20API%20key%20needed-0A66C2">
+</p>
 
 ---
 
-## Deux paliers de déploiement — n8n est optionnel
+ACA pre-reads incoming e-mails and their attachments (PDF, Word, Excel), extracts the lead's
+information, checks a knowledge base, enriches the company profile, and drafts a reply — then
+**stops**. Nothing is written to the CRM and no e-mail is sent until a human has reviewed and
+clicked "Validate". It is a drafting assistant, not an autonomous agent on your CRM — that
+boundary is enforced in code (`interrupt_before=["action"]`), not by prompt instructions.
 
-| Palier | Composants | Pour qui |
+Built solo as an 8-week internship project (Teamwill Tunisia, summer 2026), and since extended
+into **acami**, a small agency offer built around the same engine (§ [The acami layer](#the-acami-layer)
+below).
+
+## Screenshots
+
+<table>
+<tr>
+<td width="50%">
+
+**Intake — new e-mail**
+<br>Demo mode: no API key, real graph, CRM writes hard-blocked.
+
+<img src="docs/assets/screenshots/inbox.png" alt="ACA inbox screen">
+
+</td>
+<td width="50%">
+
+**Human validation gate**
+<br>Editable draft, then an explicit sign-off before anything reaches the CRM.
+
+<img src="docs/assets/screenshots/validation-gate.png" alt="ACA human validation gate">
+
+</td>
+</tr>
+</table>
+
+**Live agent trace** — the graph rendered below is not a diagram drawn for this README, it is
+the *actual compiled LangGraph topology*, exported at runtime
+([`graph_topology.py`](aca/core/graph_topology.py)), with the reasoning log each node produced on
+this run:
+
+<img src="docs/assets/screenshots/agent-trace.png" alt="ACA multi-agent reasoning trace and live graph render" width="820">
+
+## Two deployment tiers — n8n is optional
+
+| Tier | Components | For |
 |---|---|---|
-| **Solo** | API + interface + poller + planificateur | Consultant seul, PME, démo. **Automatisé de bout en bout, sans n8n.** |
-| **Enterprise** | idem **+ n8n** | Orchestration avec vos autres outils (CRM, ERP, ticketing) |
+| **Solo** | API + UI + poller + scheduler | A single consultant, an SME, a demo. **End-to-end automated, no n8n.** |
+| **Enterprise** | same **+ n8n** | Orchestration with your other tools (CRM, ERP, ticketing) |
 
 ```bash
-docker compose --profile solo up          # sans n8n
-docker compose --profile enterprise up    # avec n8n
+docker compose --profile solo up          # without n8n
+docker compose --profile enterprise up    # with n8n
 ```
 
-Le palier Solo n'est **pas** un mode dégradé « à boutons » : `poller.py` ingère Gmail et exécute le
-graphe 24/7 même interface fermée, `scheduler.py` passe les relances et la purge RGPD à heure fixe.
-**n8n n'apporte pas l'automatisation — il apporte l'orchestration inter-systèmes.** Les deux paliers
-font tourner la même image et la même API : on retire n8n en changeant un mot.
+Solo is **not** a crippled "buttons only" mode: `poller.py` ingests Gmail and runs the graph 24/7
+even with the UI closed, `scheduler.py` fires follow-ups and GDPR purges on a schedule. **n8n
+doesn't add automation — it adds cross-system orchestration.** Both tiers run the same image and
+the same API; n8n is one word in a Docker Compose flag.
 
-| Capacité autonome | Palier Solo | Palier Enterprise |
+| Capability | Solo tier | Enterprise tier |
 |---|---|---|
-| Ingestion des e-mails | `poller.py` | nœud Gmail Trigger |
-| Traitement passif 24/7 | `poller.py` | workflow déclenché par webhook |
-| Purge RGPD automatique | `scheduler.py` | nœud Schedule |
-| Maintenance de la file | `scheduler.py` | nœud Schedule |
-| Relances commerciales | `scheduler.py` | nœud Schedule |
+| E-mail ingestion | `poller.py` | Gmail Trigger node |
+| Passive 24/7 processing | `poller.py` | webhook-triggered workflow |
+| GDPR retention sweep | `scheduler.py` | Schedule node |
+| Queue maintenance | `scheduler.py` | Schedule node |
+| Sales follow-ups | `scheduler.py` | Schedule node |
 
-Détails d'intégration : [n8n/README.md](n8n/README.md).
+Integration details: [n8n/README.md](n8n/README.md).
 
----
-
-## Démarrage rapide
+## Quick start
 
 ```bash
-python -m venv venv && venv\Scripts\activate     # Windows ; source venv/bin/activate ailleurs
+python -m venv venv && venv\Scripts\activate     # Windows; source venv/bin/activate elsewhere
 pip install -r requirements.txt
-cp .env.example .env                             # puis remplir GROQ_API_KEY + GOOGLE_SHEETS_ID
-python scripts/setup_sheets.py                   # crée l'en-tête de l'onglet Leads (une fois)
-python scripts/setup_faq.py                      # seed la FAQ : 74 paires Q/R (une fois)
-python scripts/run_solo.py                       # API + interface + poller + planificateur
+cp .env.example .env                             # fill in GROQ_API_KEY + GOOGLE_SHEETS_ID
+python scripts/setup_sheets.py                   # creates the Leads tab header (once)
+python scripts/setup_faq.py                      # seeds the FAQ: 74 Q/A pairs (once)
+python scripts/run_solo.py                       # API + UI + poller + scheduler
 ```
 
-Interface sur <http://localhost:8501>, API sur <http://localhost:8000> (santé : `/health`).
+UI at <http://localhost:8501>, API at <http://localhost:8000> (health check: `/health`).
 
-Le **strict minimum** est `GROQ_API_KEY` + un Google Sheets. Tout le reste est optionnel : une
-variable absente signifie « fonctionnalité ignorée », jamais un plantage. Les 54 variables sont
-documentées une par une dans [.env.example](.env.example).
+The **strict minimum** is `GROQ_API_KEY` + a Google Sheet. Everything else is optional — a missing
+variable means "feature skipped", never a crash. All 68 variables are documented one by one in
+[.env.example](.env.example).
 
-Essai sans rien configurer — exécute le graphe sur 6 e-mails de démonstration et s'arrête à la
-validation, **sans jamais écrire au CRM** :
+**Try it with zero configuration** — runs the graph on 6 demo e-mails and stops at validation,
+**never writing to a CRM**:
 
 ```bash
 python -m aca.core.app
 ```
 
----
+Or, for the full UI with no API key at all: set `ACA_DEMO_MODE=1` and run `streamlit run ui.py` —
+same graph, same supervisor, same self-critique, same validation pause; only the LLM calls are
+simulated. This is exactly how the screenshots above were produced.
 
 ## Architecture
 
-Graphe multi-agents à superviseur, compilé avec `interrupt_before=["action"]` et une `RetryPolicy`
-sur chaque nœud à appel externe :
+A supervisor-and-worker multi-agent graph, compiled with `interrupt_before=["action"]` and a
+`RetryPolicy` on every node that calls an external API:
 
+```mermaid
+flowchart LR
+    START((START)) --> ingestion[Ingestion]
+    ingestion --> classifier[Classifier<br/><sub>8B, confidence score</sub>]
+    classifier --> memory[Memory Lookup]
+    memory --> risk[Risk Scan<br/><sub>deterministic regex</sub>]
+    risk --> extractor[Extractor<br/><sub>70B, structured output</sub>]
+    extractor -.->|ambiguous need| clarify{{"❓ Clarification<br/>dynamic interrupt"}}
+    clarify --> supervisor{{Supervisor<br/>8B}}
+    extractor --> supervisor
+
+    supervisor -->|pick next| enrichment[Enrichment<br/><sub>Tavily + Sheets cache</sub>]
+    supervisor -->|pick next| knowledge[Knowledge<br/><sub>hybrid RAG, dense+sparse</sub>]
+    supervisor -->|pick next| research[Web Research<br/><sub>Tavily fallback</sub>]
+    enrichment --> supervisor
+    knowledge --> supervisor
+    research --> supervisor
+
+    supervisor -->|last worker| strategist[Strategist<br/><sub>70B, drafts proposal</sub>]
+    strategist --> reflection{{Reflection<br/><sub>8B self-critique</sub>}}
+    reflection -->|rewrite x1 max| strategist
+    reflection -->|ok| routing[Routing<br/><sub>SUPPORT/AUTRE only</sub>]
+    supervisor -->|FINISH, no lead| routing
+
+    routing --> notification[Notification<br/><sub>Slack / e-mail</sub>]
+    notification --> pause[["Pause: human validation<br/>interrupt_before"]]
+    pause --> action[Action<br/><sub>CRM write, Gmail draft</sub>]
+    action --> END((END))
+
+    classDef llm fill:#0F3D3E,stroke:#0F3D3E,color:#fff
+    classDef gate fill:#B45A1C,stroke:#B45A1C,color:#fff
+    classDef plain fill:#eef1f1,stroke:#94a3a3,color:#111
+    class classifier,extractor,strategist,reflection,enrichment,knowledge,research llm
+    class clarify,pause gate
+    class ingestion,memory,risk,supervisor,routing,notification,action plain
 ```
-START → ingestion → classifier → memory_lookup → risk_scan → extractor → clarification (❓ question à l'humain)
-      → SUPERVISEUR ⇄ workers ──FINISH──→ routing → notification ──⏸ PAUSE── action → END
-           ├─ enrichissement   profil entreprise (Tavily + cache Sheets)
-           ├─ connaissance     RAG hybride dense+creux, fusion RRF (Gemini)
-           ├─ veille           repli web si la FAQ ne sait pas → enrichit la FAQ
-           └─ stratege ──→ reflection ──rewrite (1× max)──→ stratege
-                            (auto-critique du brouillon)
-```
 
-La topologie affichée dans l'interface est **dérivée du graphe compilé**, jamais recopiée
-([graph_topology.py](aca/core/graph_topology.py)). Export : `python scripts/export_graph.py` →
-[docs/assets/graph.json](docs/assets/graph.json).
+The topology drawn in the app's own UI is **derived from the compiled graph**, never hand-copied
+([graph_topology.py](aca/core/graph_topology.py)) — the diagram above matches it node for node.
+Export it yourself: `python scripts/export_graph.py` → [docs/assets/graph.json](docs/assets/graph.json).
 
-**Deux pauses humaines :** une *clarification* en cours de route (le graphe pose une question quand
-le besoin est ambigu) et la *validation* finale avant écriture CRM.
+**Two human pauses:** a mid-flow *clarification* (the graph asks one question when the need is
+ambiguous) and the final *validation* before any CRM write.
 
-**Mémoire hybride :** court terme = checkpointer LangGraph (survit aux pauses, aux redémarrages et
-au passage d'un processus à l'autre) ; long terme = Google Sheets (`Leads`, `FAQ`,
-`Enrichissement_Cache`).
+**Hybrid memory:** short-term = LangGraph checkpointer (survives pauses, restarts, and handoffs
+between processes); long-term = Google Sheets (`Leads`, `FAQ`, `Enrichissement_Cache`) or, if
+`DATABASE_URL` is set, Supabase Postgres + pgvector.
 
----
+## What's verified live, and what isn't
 
-## Ce qui est vérifié en direct, et ce qui ne l'est pas
+This section exists because a prototype that claims everything was verified isn't credible.
 
-Cette section existe parce qu'un prototype qui prétend tout avoir vérifié n'est pas crédible.
+**Verified against the real services:** Gmail (read, label, drafts), Google Sheets (CRM + RAG),
+Groq, Gemini, Tavily (enrichment + web research), Slack (alerts + interactive approval), HubSpot
+(contact + deal + note, created then deleted as a test), Supabase (pgvector + shared checkpointer
++ multi-tenant RLS), GDPR retention, follow-ups.
 
-**Vérifié contre les vrais services :** Gmail (lecture, marquage, brouillons), Google Sheets (CRM +
-RAG), Groq, Gemini, Tavily (enrichissement + veille), Slack (alertes + routage), HubSpot (contact +
-deal + note, créés puis supprimés), Supabase (pgvector + checkpointer partagé + RLS multi-tenant),
-rétention RGPD, relances.
+**Built and tested offline, never exercised live** — stated plainly, for lack of an account or
+instance:
+- the n8n workflow ([n8n/aca_workflow.json](n8n/aca_workflow.json)) — no n8n instance exists;
+- Stripe billing ([billing.py](aca/integrations/billing.py)) — no test account;
+- the Slack approval buttons — need a Slack app with Interactivity and a public URL;
+- TLS — the procedure is written ([docs/DEPLOYMENT_HARDENING.md](docs/DEPLOYMENT_HARDENING.md)), nothing is hosted.
 
-**Codé et testé hors ligne, jamais exercé en réel** — faute de compte ou d'instance, dit sans détour :
-- le workflow n8n ([n8n/aca_workflow.json](n8n/aca_workflow.json)) — aucune instance n8n n'existe ;
-- la facturation Stripe ([billing.py](aca/integrations/billing.py)) — aucun compte de test ;
-- les boutons d'approbation Slack — nécessitent une app Slack avec Interactivité et une URL publique ;
-- TLS — la procédure est écrite ([docs/DEPLOYMENT_HARDENING.md](docs/DEPLOYMENT_HARDENING.md)), rien n'est hébergé.
+**Measured:** classifier accuracy **100%** (50/50) on a labelled 50-e-mail benchmark
+(`python -m aca.eval.eval_classifier`) · **834/863 tests** passing offline in ~31s (29 pre-existing
+failures from an unfinished design pass, tracked in `CLAUDE.md`'s Known gaps) · RAG thresholds
+calibrated empirically on a 74-row FAQ.
 
-**Mesuré :** classification **100 %** (50/50) sur un jeu labellisé de 50 e-mails
-(`python -m aca.eval.eval_classifier`) · **352 tests** hors ligne en ~13 s · seuils du RAG calibrés
-empiriquement sur une FAQ de 74 lignes.
+## Security and compliance
 
----
+- **Human-in-the-loop, not bypassable** — `action_node` sits behind `interrupt_before` on *every*
+  surface (UI, API, Slack, n8n). No CRM write, no e-mail sent without a human click.
+- **Named accounts**, salted PBKDF2 passwords, `admin`/`operator`/`viewer` roles, progressive
+  lockout, TOTP 2FA on admin accounts, sessions with an absolute TTL + idle timeout.
+- **Hash-chained audit log** — editing or deleting a row breaks the chain, and
+  `python -m aca.storage.audit_log` detects and locates the break.
+- **GDPR** — age-based purge *and* right-to-erasure (`--oublier <address>`), a privacy policy,
+  multi-tenant isolation (`org_id` + Postgres RLS, live-verified).
+- **Prompt-injection detection** (flags, never blocks — the human gate stays the real protection)
+  and **contractual risk detection** (deterministic regex), both surfaced in the alert.
+- `ACA_ENV=production` makes every protection above **mandatory** — the app refuses to start if a
+  key is missing, instead of development mode's "absent = feature skipped".
 
-## Sécurité et conformité
-
-- **Human-in-the-loop non contournable** — `action_node` reste derrière `interrupt_before`. Aucune
-  écriture CRM, aucun e-mail envoyé sans clic humain, sur *toutes* les surfaces (interface, API, Slack, n8n).
-- **Comptes nominatifs**, mots de passe PBKDF2 salés, rôles `admin`/`operator`, verrou progressif,
-  sessions à TTL absolu + inactivité.
-- **Journal d'audit chaîné par hachage** — modifier ou supprimer une ligne casse la chaîne, et
-  `python -m aca.storage.audit_log` le détecte et localise la rupture.
-- **RGPD** — purge par ancienneté *et* droit à l'effacement (`--oublier <adresse>`), politique de
-  confidentialité, isolation multi-tenant (`org_id` + RLS Postgres vérifiée en direct).
-- **Injections de prompt** signalées (jamais bloquantes : le gate humain reste la protection) et
-  **risques contractuels** détectés par regex déterministe, tous deux remontés dans l'alerte.
-- `ACA_ENV=production` rend ces protections **obligatoires** : l'application refuse de démarrer si
-  une clé manque, au lieu du « absent = ouvert » du mode développement.
-
-Détail complet : §15 de [docs/ACAM_roadmap.md](docs/ACAM_roadmap.md) et
+Full detail: §15 of [docs/ACAM_roadmap.md](docs/ACAM_roadmap.md) and
 [docs/DEPLOYMENT_HARDENING.md](docs/DEPLOYMENT_HARDENING.md).
 
----
+## The surfaces
 
-## Les surfaces
-
-| Surface | Rôle | Statut |
+| Surface | Role | Status |
 |---|---|---|
-| **Streamlit** ([ui.py](ui.py)) | console opérateur complète : intake, validation, édition, ingestion, KPI, réglages | colonne vertébrale opérationnelle |
-| **API FastAPI** ([aca/api.py](aca/api.py)) | le cerveau en HTTP — pilote le dashboard, Slack et n8n | active |
-| **Slack** | valider/rejeter un lead sans ouvrir aucune interface | active (app Slack à configurer) |
-| **n8n** | orchestration avec vos autres outils | optionnelle ([n8n/](n8n/)) |
-| **Dashboard Next.js** ([dashboard/](dashboard/)) | vitrine construite, sous-ensemble en lecture seule | **parqué** (§12bis) |
+| **Streamlit** ([ui.py](ui.py)) | full operator console: intake, validation, editing, ingestion, KPIs, settings | operational backbone |
+| **FastAPI API** ([aca/api.py](aca/api.py)) | the brain over HTTP — drives the dashboard, Slack, and n8n | active |
+| **Slack** | validate/reject a lead without opening any UI | active (needs a Slack app) |
+| **n8n** | orchestration with your other tools | optional ([n8n/](n8n/)) |
+| **Next.js dashboard** ([dashboard/](dashboard/)) | built, read-only subset showcase | **parked** (see roadmap §12bis) |
 
----
+## The acami layer
 
-## Commandes utiles
+Past the internship scope, the project became the base of **acami**, a small AI-automation agency
+built around the same engine — a three-layer brand (**acami** the agency, **ACAM** the multi-agent
+framework, **ACA** the deployed system), a bilingual dependency-free landing page
+([static/landing.html](static/landing.html)), legal pages, a generated logo system reproducible
+byte-for-byte in CI ([scripts/build_brand_assets.py](scripts/build_brand_assets.py)), a
+programmatic-SEO layer, and a white-label theming engine — 19 sector palettes with automated WCAG
+contrast checking, so a client deployment ships in their own colours out of the box. Read more:
+[docs/BRAND.md](docs/BRAND.md) · [docs/AGENCY_VS_SAAS.md](docs/AGENCY_VS_SAAS.md).
+
+## Useful commands
 
 ```bash
-python -m pytest tests/                         # 352 tests, hors ligne, ~13 s
-python -m aca.eval.eval_classifier              # précision du classifieur sur 50 e-mails labellisés
-python -m aca.core.scheduler --status           # dernier passage de chaque travail planifié
-python -m aca.core.retention --oublier a@b.fr   # RGPD : effacement complet d'une personne
-python -m aca.storage.audit_log                 # vérifie l'intégrité de la chaîne d'audit
-python -m aca.storage.user_store create x --role admin   # créer un compte
-python scripts/verify_rls.py                    # audit RLS Supabase (lecture seule)
-python scripts/export_openapi.py                # régénère docs/openapi.json
+python -m pytest tests/                         # 834/863 tests, offline, ~31s
+python -m aca.eval.eval_classifier              # classifier accuracy on 50 labelled e-mails
+python -m aca.core.scheduler --status           # last run of each scheduled job
+python -m aca.core.retention --oublier a@b.fr   # GDPR: full erasure for one person
+python -m aca.storage.audit_log                 # verifies the audit chain's integrity
+python -m aca.storage.user_store create x --role admin   # create an account
+python scripts/verify_rls.py                    # Supabase RLS audit (read-only)
+python scripts/export_openapi.py                # regenerates docs/openapi.json
 ```
 
 ## Structure
 
-| Chemin | Rôle |
+| Path | Role |
 |---|---|
-| [aca/core/](aca/core/) | graphe LangGraph, poller, planificateur, relances, rétention, sécurité |
-| [aca/integrations/](aca/integrations/) | Sheets, Gmail, HubSpot, Slack, webhook sortant, pgvector, Stripe |
-| [aca/storage/](aca/storage/) | 8 registres SQLite locaux (file, analytics, audit chaîné, comptes…) |
-| [aca/ingestion/](aca/ingestion/) | extraction PDF/Word/Excel, ingestion de connaissances |
-| [ui.py](ui.py) · [aca/api.py](aca/api.py) | interface Streamlit · microservice FastAPI |
-| [tests/](tests/) · [n8n/](n8n/) · [docs/](docs/) | suite de tests · intégration n8n · documentation |
+| [aca/core/](aca/core/) | LangGraph graph, poller, scheduler, follow-ups, retention, security |
+| [aca/integrations/](aca/integrations/) | Sheets, Gmail, HubSpot, Slack, outbound webhook, pgvector, Stripe |
+| [aca/storage/](aca/storage/) | local SQLite registries (queue, analytics, chained audit, accounts…) |
+| [aca/ingestion/](aca/ingestion/) | PDF/Word/Excel extraction, knowledge ingestion |
+| [ui.py](ui.py) · [aca/api.py](aca/api.py) | Streamlit UI · FastAPI microservice |
+| [tests/](tests/) · [n8n/](n8n/) · [docs/](docs/) | test suite · n8n integration · documentation |
 
-Onglets Google Sheets — **`Leads`** : `Date · Expéditeur · Entreprise · Contact · Urgence · Besoin ·
-Catégorie · Brouillon` · **`FAQ`** : `Question · Réponse · Statut` · **`Enrichissement_Cache`** :
-`Domaine · Profil · Date`.
+Google Sheets tabs — **`Leads`**: `Date · Sender · Company · Contact · Urgency · Need ·
+Category · Draft` · **`FAQ`**: `Question · Answer · Status` · **`Enrichissement_Cache`**:
+`Domain · Profile · Date`.
 
-## Prérequis
+## Prerequisites
 
-Python 3.11+ (développé sous 3.14) · un tableur Google Sheets · un compte de service Google (Sheets)
-et un client OAuth « installed app » (Gmail) dans `credentials/` · des clés gratuites Groq et Gemini.
+Python 3.11+ (developed under 3.14) · a Google Sheet · a Google service account (Sheets) and an
+OAuth "installed app" client (Gmail) in `credentials/` · free Groq and Gemini API keys.
 
-> Au premier accès Gmail, un navigateur s'ouvre pour l'autorisation (scope `gmail.modify`) ; le jeton
-> est ensuite mis en cache. À faire une fois en local — impossible en headless.
+> On first Gmail access, a browser opens for consent (`gmail.modify` scope); the token is then
+> cached. One-time, local — not possible headless.
 
-## Alimenter la base de connaissances
+## Feeding the knowledge base
 
 ```bash
-python -m aca.ingestion.ingest chemin/vers/doc.pdf           # ajoute les Q/R extraites à la FAQ
-python -m aca.ingestion.ingest chemin/vers/doc.md replace     # ou remplace tout le contenu
+python -m aca.ingestion.ingest path/to/doc.pdf           # appends extracted Q/A to the FAQ
+python -m aca.ingestion.ingest path/to/doc.md replace     # or replaces all of it
 ```
 
-(Également possible via l'uploader de la barre latérale Streamlit.)
+(Also reachable from the Streamlit sidebar uploader.)
 
 ## Documentation
 
-[static/landing.html](static/landing.html) (page de présentation — atteignable depuis la barre
-latérale de l'interface, bouton « Page de présentation », ou à ouvrir directement dans un
-navigateur) · [docs/ACAM_roadmap.md](docs/ACAM_roadmap.md) (architecture, audits, décisions) ·
-[docs/PROJECT_JOURNAL.md](docs/PROJECT_JOURNAL.md) (journal de bord) ·
-[docs/DEPLOYMENT_HARDENING.md](docs/DEPLOYMENT_HARDENING.md) (TLS, secrets, rotation) ·
-[docs/PRIVACY_POLICY.md](docs/PRIVACY_POLICY.md) (RGPD) · [CLAUDE.md](CLAUDE.md) (référence technique).
+[static/landing.html](static/landing.html) (pitch page — reachable from the UI sidebar, "Page de
+présentation", or opened directly in a browser) · [docs/ACAM_roadmap.md](docs/ACAM_roadmap.md)
+(architecture, audits, decisions) · [docs/PROJECT_JOURNAL.md](docs/PROJECT_JOURNAL.md) (build
+journal) · [docs/DEPLOYMENT_HARDENING.md](docs/DEPLOYMENT_HARDENING.md) (TLS, secrets, rotation) ·
+[docs/PRIVACY_POLICY.md](docs/PRIVACY_POLICY.md) (GDPR) · [CLAUDE.md](CLAUDE.md) (full technical
+reference — every module, every decision, every audit).
+
+---
+
+<p align="center">
+  Built by <b>Ismail Ismail</b> — AI &amp; Full-Stack Engineer<br>
+  <a href="https://www.linkedin.com/in/trulyismail"><img alt="LinkedIn" src="https://img.shields.io/badge/LinkedIn-trulyismail-0A66C2?logo=linkedin&logoColor=white"></a>
+  <a href="https://github.com/trulyismail"><img alt="GitHub" src="https://img.shields.io/badge/GitHub-trulyismail-181717?logo=github&logoColor=white"></a>
+</p>
