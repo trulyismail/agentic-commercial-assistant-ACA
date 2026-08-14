@@ -601,6 +601,21 @@
       width: 100%
     }
 
+    /* Shared by the waitlist bubble (§20, below): a slow vertical bob for anything that wants to
+       read as "floating" rather than merely "fixed". Kept as one keyframe rather than duplicated so
+       a second floating element later reuses it instead of inventing its own. */
+    @keyframes btnFloat {
+
+      0%,
+      100% {
+        transform: translateY(0)
+      }
+
+      50% {
+        transform: translateY(-4px)
+      }
+    }
+
     @media (hover:hover) and (pointer:fine) {
       .btn--solid:hover {
         background: #1c1c1c
@@ -656,6 +671,52 @@
     .chip--signal {
       background: var(--signal-soft);
       color: var(--signal)
+    }
+
+    /* Beta chip: a status dot, not decoration for its own sake — it earns the perpetual loop the
+       same way the ambient background wash did at §21 (below the attention threshold, slow enough
+       to read as a state rather than an object moving) rather than the empty-state float that was
+       removed for competing with it. `--ink-accent` (brand petrol), never `--signal`: amber is
+       reserved for "a human must decide", and a badge that just states a fact would empty that
+       reservation the same way an all-blue preset once did. */
+    .chip--beta {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      border: 1px solid rgba(18, 94, 107, .18)
+    }
+
+    .chip--beta::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      flex: none;
+      border-radius: 50%;
+      background: var(--ink-accent)
+    }
+
+    @media (prefers-reduced-motion:no-preference) {
+      .chip--beta::before {
+        /* `ease-in-out`, not the page's `--ease-out` token: that curve is shaped for a one-way
+           entrance (fast start, slow settle) and would make the fade-in and fade-out halves of this
+           back-and-forth loop feel lopsided. A bare keyword here, not a new token, for the same
+           reason the modal backdrop's own fade above uses a plain `ease` rather than one. */
+        animation: chipPulse 2.6s ease-in-out infinite
+      }
+    }
+
+    @keyframes chipPulse {
+
+      0%,
+      100% {
+        opacity: .4;
+        transform: scale(.8)
+      }
+
+      50% {
+        opacity: 1;
+        transform: scale(1)
+      }
     }
 
     .crop {
@@ -2176,16 +2237,21 @@
     }
 
     /* Live availability. A plain iframe, deliberately NOT Calendly's widget.js: this page loads no
-   remote script at all, and that property is worth more than the convenience. The price of
-   refusing the script is that nothing auto-resizes the frame, so the height is fixed here — two
-   values, because the widget switches to its own narrow layout on a small viewport. */
+   remote script at all, and that property is worth more than the convenience. */
     /* ── Le calendrier réel ──────────────────────────────────────────────────────────────────────────
-   Trois corrections, toutes venues du rendu et aucune du code (capture envoyée : un rectangle noir
-   à la place du calendrier).
+   Quatre corrections, toutes venues du rendu et aucune du code.
 
-   1. HAUTEUR. Le cadre faisait 640 px alors que la page de Cal.com en dispose 1521 : les créneaux
-      horaires tombaient sous la ligne de flottaison, et il fallait deviner qu'on pouvait faire
-      défiler À L'INTÉRIEUR du cadre. 880 px montrent le mois entier et le début des créneaux.
+   1. CADRAGE. Demande explicite : montrer le calendrier comme l'essentiel — pas la carte de profil
+      Cal.com (nom, durée, Google Meet, fuseau horaire) qui la précède — et laisser défiler pour le
+      reste (fin de grille, créneaux). Cal.com étant une page tierce d'une autre origine, aucun script
+      ne peut lire ni faire défiler SON contenu — la carte de profil ne peut donc pas être masquée ni
+      coupée depuis notre JS. Le contournement, mesuré par rendu successif et non deviné : le cadre
+      <iframe> reste à sa hauteur naturelle, complète, mais reçoit une marge négative qui le remonte
+      au-delà du haut du conteneur, poussant la carte de profil hors champ ; c'est le CONTENEUR,
+      élément à nous, qui devient court et défilant (`overflow-y:auto`) — le calendrier apparaît donc
+      en premier, et faire défiler CE conteneur (pas l'iframe) révèle le reste. Deux valeurs de marge :
+      la carte de profil de Cal.com n'a pas la même hauteur selon la largeur de colonne (ses propres
+      sauts de ligne), donc le point de coupe diffère un peu entre desktop et mobile.
    2. COULEUR. `?theme=dark` ne fait RIEN — mesuré : la page de réservation rend
       `<html class="notranslate light">` que l'on demande `dark` ou `light`, le thème étant réglé
       dans le type d'événement chez eux. La carte est donc blanche, et l'enchâsser dans un bloc noir
@@ -2193,31 +2259,41 @@
       composant tiers : quand le vrai calendrier est actif, la carte adopte le papier de la page.
       Le fond noir reste pour le calendrier hors ligne, qui lui est à nous et le porte très bien.
    3. ATTENTE. Cal.com est une application lourde : ~10 s avant le premier pixel. Sans repère, ces
-      dix secondes se lisent comme « c'est cassé » — c'est exactement ce qui a été rapporté. */
+      dix secondes se lisent comme « c'est cassé » — c'est exactement ce qui a été rapporté.
+   4. INTERACTION. La marge négative ne casse ni le choix de date ni le choix de créneau — vérifié en
+      cliquant réellement une date puis un horaire dans le cadre recadré : Cal.com avance jusqu'à son
+      propre écran « Confirm your details » avec la bonne date et la bonne heure. Le navigateur route
+      les clics vers la boîte réellement affichée de l'iframe, la marge ne fait que la déplacer. */
     .cal__live {
       border-radius: 12px;
-      overflow: hidden;
+      overflow-y: auto;
+      overflow-x: hidden;
       position: relative;
-      min-height: 320px
+      height: 600px
     }
 
-    /* 1150 px, et la valeur vient d'une mesure, pas d'un goût : la carte de Cal.com s'ÉTIRE pour
-   remplir le cadre qu'on lui donne (relevé : 1560 px de carte dans un cadre de 1600), donc il n'y a
-   pas de « hauteur naturelle » à découvrir — il y a une hauteur en dessous de laquelle la grille du
-   mois et la liste des créneaux ne tiennent plus ensemble. À 880 px la dernière rangée du mois et
-   l'en-tête du jour étaient coupés ; à 1150 px les deux tiennent, créneaux compris. */
+    /* Hauteur d'iframe volontairement généreuse (1650 px) : elle n'a pas vocation à tenir dans le
+   cadre visible, seulement à couvrir la page Cal.com entière sans que SON propre défilement interne
+   ne se déclenche — c'est notre conteneur, ci-dessus, qui doit défiler, pas l'iframe. La marge
+   négative pousse la carte de profil hors champ ; -350 px laisse apparaître directement le titre du
+   mois. Mesuré par rendu successif dans un iframe réel isolé, pas calculé à la main : la carte de
+   profil de Cal.com n'a pas une hauteur ronde ni stable d'une largeur de colonne à l'autre. */
     .cal__live iframe {
       display: block;
       width: 100%;
-      height: 1150px;
+      height: 1650px;
       border: 0;
+      margin-top: -350px;
       position: relative;
       z-index: 1
     }
 
     @media (max-width:900px) {
       .cal__live iframe {
-        height: 1180px
+        /* Sur mobile, le bloc profil est un peu plus court (les mêmes informations tiennent sur
+           moins de lignes à cette largeur) : une marge moins profonde couperait trop haut et
+           laisserait dépasser la ligne « Google Meet »/fuseau horaire, mesuré par rendu. */
+        margin-top: -430px
       }
     }
 
@@ -2370,6 +2446,30 @@
       flex-wrap: wrap;
       font-size: .8125rem;
       color: var(--faint)
+    }
+
+    .foot__left {
+      display: flex;
+      align-items: center;
+      gap: 12px
+    }
+
+    .foot__social {
+      display: inline-flex;
+      color: var(--faint);
+      transition: color 160ms ease
+    }
+
+    @media (hover:hover) and (pointer:fine) {
+      .foot__social:hover {
+        color: var(--ink)
+      }
+    }
+
+    .foot__social:focus-visible {
+      outline: 2px solid var(--ink-accent);
+      outline-offset: 3px;
+      border-radius: 3px
     }
 
     @media (max-width:760px) {
@@ -2574,6 +2674,191 @@
         display: none
       }
     }
+
+    /* ══ 19. MODALS (demo confirm, waitlist) ══════════════════════════════════════════════════════
+   Shared box styling under one class, `.aca-modal`, because a second dialog (the Stripe waitlist,
+   added alongside this one) needs the identical card/backdrop/animation — copying the rule block a
+   second time under a second name guarantees the day one of them gets tweaked and the other does
+   not. Each dialog keeps its own id for JS targeting and its own copy inside.
+   Neither dialog presents one path as the wrong one: no "are you sure", no pre-selected default,
+   both buttons carry their normal weight (ghost / accent) exactly as everywhere else on this page —
+   the demo is offered on this page as a genuinely no-commitment option ("No commitment, no card, no
+   account"), so a modal that shames the person for choosing it would contradict copy three sections
+   up. Native <dialog>, not a hand-built overlay: focus trapping, Escape-to-close and the backdrop
+   all come from the browser for free, in keeping with this page's restraint against custom JS
+   wherever a platform primitive already does the job. */
+    dialog.aca-modal {
+      max-width: 420px;
+      width: calc(100% - 48px);
+      border: 1px solid var(--rule-2);
+      border-radius: var(--radius);
+      padding: 28px;
+      background: var(--paper);
+      color: var(--ink);
+      box-shadow: 0 24px 60px -20px rgba(0, 0, 0, .35)
+    }
+
+    dialog.aca-modal::backdrop {
+      background: rgba(0, 0, 0, .45)
+    }
+
+    .aca-modal__title {
+      margin: 0 0 10px
+    }
+
+    .aca-modal__body {
+      margin: 0 0 22px
+    }
+
+    .aca-modal__actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap
+    }
+
+    /* Waitlist-only: the email field. No border-radius token reused from `.btn` (100px, a pill) —
+       an input that shape reads as a search box, not a field to type an address into. */
+    .aca-modal__email {
+      display: block;
+      width: 100%;
+      margin-bottom: 14px;
+      padding: 11px 14px;
+      border: 1px solid var(--rule-2);
+      border-radius: 10px;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: var(--font-sans);
+      font-size: .9375rem
+    }
+
+    .aca-modal__email:focus-visible {
+      outline: 2px solid var(--ink-accent);
+      outline-offset: 1px
+    }
+
+    .aca-modal__status {
+      margin: -6px 0 14px;
+      font-size: .8125rem
+    }
+
+    @media (prefers-reduced-motion:no-preference) {
+      dialog.aca-modal {
+        animation: acaModalIn 220ms var(--ease-out)
+      }
+
+      dialog.aca-modal::backdrop {
+        animation: acaModalFade 220ms ease
+      }
+    }
+
+    @keyframes acaModalIn {
+      from {
+        opacity: 0;
+        transform: translateY(8px) scale(.98)
+      }
+
+      to {
+        opacity: 1;
+        transform: none
+      }
+    }
+
+    @keyframes acaModalFade {
+      from {
+        opacity: 0
+      }
+
+      to {
+        opacity: 1
+      }
+    }
+
+    /* ══ 20. WAITLIST BUBBLE ═══════════════════════════════════════════════════════════════════════
+   A persistent shortcut to #waitlist-modal for a visitor who never scrolls back up to the Solo
+   tier card. `position: fixed` (not `sticky`, which only pins within its own containing block)
+   is what keeps it in the same screen spot through the whole scroll — the literal ask. Kept small
+   on purpose: this is a corner affordance, not a second call to action competing with the page's
+   real ones — same restraint as everywhere else amber/accent is used sparingly.
+   Faded out, not left overlapping, once the footer's own bottom-left link (the LinkedIn icon in
+   .foot__left) scrolls into the same corner — see the IntersectionObserver in the script. JS
+   removes the button entirely once CONFIG.beta is false, the same rule as #beta-chip: a waitlist
+   means nothing once checkout is actually live. */
+    .waitlist-bubble {
+      position: fixed;
+      left: var(--gutter);
+      bottom: var(--gutter);
+      z-index: 40;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 16px;
+      border: 1px solid var(--ink);
+      border-radius: 100px;
+      background: #fff;
+      color: var(--ink);
+      font-family: var(--font-sans);
+      font-size: .8125rem;
+      font-weight: 600;
+      letter-spacing: -.006em;
+      white-space: nowrap;
+      cursor: pointer;
+      box-shadow: 0 12px 28px -12px rgba(0, 0, 0, .3);
+      /* `scale`, not `transform`, for the press feedback below — individual transform properties
+         (translate/rotate/scale) compose with `transform` rather than overwrite it, which is the
+         one thing that lets the continuous float animation (transform: translateY, see btnFloat)
+         and a momentary press-scale run at the same time without one cutting the other off. */
+      transition: opacity 200ms ease, scale 160ms var(--ease-out), box-shadow 200ms ease,
+        background-color 200ms ease
+    }
+
+    @media (prefers-reduced-motion:no-preference) {
+      .waitlist-bubble {
+        animation: btnFloat 2.8s ease-in-out infinite
+      }
+    }
+
+    .waitlist-bubble__dot {
+      width: 6px;
+      height: 6px;
+      flex: none;
+      border-radius: 50%;
+      background: var(--ink-accent)
+    }
+
+    .waitlist-bubble:active {
+      scale: .96
+    }
+
+    .waitlist-bubble:focus-visible {
+      outline: 2px solid var(--ink-accent);
+      outline-offset: 3px
+    }
+
+    @media (hover:hover) and (pointer:fine) {
+      .waitlist-bubble:hover {
+        background: var(--paper-2);
+        box-shadow: 0 14px 32px -12px rgba(0, 0, 0, .38)
+      }
+    }
+
+    /* Toggled by the footer IntersectionObserver below, not by scroll-position math. Opacity only —
+       a translateY here would fight the continuous float animation above for the same `transform`
+       property (unlike `scale` on :active, this one genuinely can't be split into a separate
+       property, since the float animation already owns translateY); opacity plus pointer-events is
+       enough to make it invisible and unclickable near the footer, which is the actual requirement. */
+    .waitlist-bubble.is-near-footer {
+      opacity: 0;
+      pointer-events: none
+    }
+
+    @media (max-width:560px) {
+      .waitlist-bubble {
+        left: var(--gutter);
+        bottom: var(--gutter);
+        padding: 9px 14px;
+        font-size: .75rem
+      }
+    }
   </style>
 </head>
 
@@ -2611,9 +2896,14 @@
          SPAN only, never on the h1 itself — the toggle script replaces an element's innerHTML
          wholesale (see setLang below), so a data-fr on the h1 would erase this image on every
          switch to French. -->
+      <p class="reveal center" style="margin-bottom:16px">
+        <!-- JS hides this if CONFIG.beta is false; visible by default so a no-JS render still says
+           it — an honesty notice is exactly the kind of thing that should survive a broken script,
+           not depend on one. -->
+        <span class="chip chip--beta" id="beta-chip"
+          data-fr="Bêta — premiers clients en cours d'accompagnement">Bêta — premiers clients en cours d'accompagnement</span>
+      </p>
       <h1 class="display h-hero center reveal" style="max-width:24ch; margin-inline:auto">
-        <img src="brand/acami-lockup.svg" alt="acami" class="hero-word"
-          style="height:0.58em; width:auto; vertical-align:-0.05em; margin-right:.16em">
         <span data-fr="&#8239;: l&#8217;ère nouvelle de la vente">&#8239;: l&#8217;ère nouvelle de la vente</span>
       </h1>
       <p class="reveal center" style="--d:70ms; max-width:47ch; margin:22px auto 0;
@@ -3118,7 +3408,8 @@
                   data-fr="Le workflow n8n">Le workflow n8n</b> <span
                   data-fr="— aucune instance n'existe pour ce projet">— aucune instance n'existe pour ce projet</span></span></div>
             <div class="ledger__item"><span class="ledger__mk ledger__mk--open">○</span><span class="ledger__t"><b
-                  data-fr="La facturation Stripe">La facturation Stripe</b> <span data-fr="— aucun compte de test">— aucun compte de test</span></span></div>
+                  data-fr="La facturation Stripe">La facturation Stripe</b> <span
+                  data-fr="— aucun compte de test">— aucun compte de test</span></span></div>
             <div class="ledger__item"><span class="ledger__mk ledger__mk--open">○</span><span class="ledger__t"><b
                   data-fr="Les boutons d'approbation Slack">Les boutons d'approbation Slack</b> <span
                   data-fr="— demandent une app Slack et une URL publique">— demandent une app Slack et une URL publique</span></span></div>
@@ -3130,18 +3421,15 @@
                   data-fr="— jamais exécuté sur douze mois de données réelles">— jamais exécuté sur douze mois de données réelles</span></span></div>
             <div class="ledger__item"><span class="ledger__mk ledger__mk--open">○</span><span class="ledger__t"><b
                   data-fr="L'image Docker">L'image Docker</b> <span
-                  data-fr="— Docker n'est pas installé ici ; seuls les profils compose sont validés">— Docker n'est pas installé ici ; seuls les profils compose sont validés</span></span></div>
+                  data-fr="— Docker n'est pas installé ici ; seuls les profils compose sont validés">— Docker n'est pas installé ici ; seuls les profils compose sont validés</span></span>
+            </div>
             <div class="ledger__item"><span class="ledger__mk ledger__mk--open">○</span><span class="ledger__t"><b
                   data-fr="TLS et hébergement">TLS et hébergement</b> <span
                   data-fr="— la procédure est écrite, rien n'est hébergé">— la procédure est écrite, rien n'est hébergé</span></span></div>
-            <div class="ledger__item"><span class="ledger__mk ledger__mk--open">○</span><span
-                class="ledger__t"><b>Mobile</b> <span
-                  data-fr="— vérifié sur navigateur redimensionné, pas sur un vrai appareil">— vérifié sur navigateur redimensionné, pas sur un vrai appareil</span></span></div>
+            <p class="body-xs" style="margin-top:18px"
+              data-fr="Chacun de ces points est un compte, un appareil ou un hébergement manquant — pas une pièce de code absente.">Chacun de ces points est un compte, un appareil ou un hébergement manquant — pas une pièce de code absente.</p>
           </div>
-          <p class="body-xs" style="margin-top:18px"
-            data-fr="Chacun de ces points est un compte, un appareil ou un hébergement manquant — pas une pièce de code absente.">Chacun de ces points est un compte, un appareil ou un hébergement manquant — pas une pièce de code absente.</p>
         </div>
-      </div>
     </section>
 
     <!-- ══ FIELD NOTES ════════════════════════════════════════════════════════════════════════ -->
@@ -3234,8 +3522,23 @@
               data-fr="Prestation unique, payée une fois. Le logiciel reste à <b>0 € de licence</b> et vos clés d'API vous appartiennent — vous ne payez pas d'abonnement pour utiliser votre propre outil.">Prestation unique, payée une fois. Le logiciel reste à <b>0 € de licence</b> et vos clés d'API vous appartiennent — vous ne payez pas d'abonnement pour utiliser votre propre outil.</span>
             <div class="tier__foot">
               <span class="tier__price">1 490 €<small data-fr="une fois · licence 0 €">une fois · licence 0 €</small></span>
-              <a class="btn btn--accent btn--sm" href="#book" data-cta="solo" data-fr="Faire installer">Faire installer</a>
+              <a class="btn btn--accent btn--sm" href="#book" data-cta="solo">
+                <svg width="16" height="12" viewBox="0 0 16 12" fill="none" aria-hidden="true">
+                  <rect x=".75" y=".75" width="14.5" height="10.5" rx="1.75" stroke="currentColor"
+                    stroke-width="1.3" />
+                  <path d="M1 4H15" stroke="currentColor" stroke-width="1.3" />
+                </svg>
+                <span data-fr="Faire installer">Faire installer</span>
+              </a>
             </div>
+            <!-- "Add a Stripe logo" — refined to the name in text rather than a hand-redrawn mark:
+               reproducing a payment brand's logo from memory risks an inaccurate copy of a mark this
+               page has no license to redraw, and it says the identical thing either way. It is also
+               deliberately not IN the button above: while `CONFIG.beta` gates this click to the
+               waitlist dialog rather than an actual charge, a payment-brand badge inside the button
+               itself would claim more than what clicking it currently does. -->
+            <p class="body-xs" style="margin-top:8px; color:var(--ink-3)"
+              data-fr="Paiement par carte via Stripe — bientôt disponible.">Paiement par carte via Stripe — bientôt disponible.</p>
           </div>
           <div class="rows">
             <div class="row" data-fr="Installation sécurisée sur vos propres données d'entreprise">Installation sécurisée sur vos propres données d'entreprise</div>
@@ -3315,6 +3618,8 @@
             data-fr="Le mode démonstration exécute le <em>vrai</em> graphe — même superviseur, même autocritique, même pause de validation — avec un modèle simulé et <b>aucune clé d'API</b>. Seul l'appel facturé est simulé ; les écritures CRM sont bloquées durement.">Le mode démonstration exécute le <em>vrai</em> graphe — même superviseur, même autocritique, même pause de validation — avec un modèle simulé et <b>aucune clé d'API</b>. Seul l'appel facturé est simulé ; les écritures CRM sont bloquées durement.</p>
           <a class="btn btn--ghost btn--sm" style="margin-top:16px" id="demo-cta-2" href="#book" hidden
             data-fr="Ouvrir la démonstration">Ouvrir la démonstration</a>
+          <a class="brk" style="display:inline-block; margin-top:16px; font-size:.875rem; color:var(--ink-2)"
+            href="docs.html#demo" data-fr="Voir comment c'est installé →">Voir comment c'est installé →</a>
         </div>
         <div>
           <span class="cell__idx">02</span>
@@ -3338,6 +3643,8 @@
 
       <p class="body-xs reveal" style="--d:180ms; margin-top:24px; color:var(--ink-3); max-width:78ch"
         data-fr="Ce que nous n'hébergeons pas : votre production. La démonstration ci-dessus tourne de notre côté et ne contient aucune donnée réelle ; votre déploiement, lui, vit chez vous — c'est ce qui rend la question « comment partir&nbsp;? » sans objet.">Ce que nous n'hébergeons pas : votre production. La démonstration ci-dessus tourne de notre côté et ne contient aucune donnée réelle ; votre déploiement, lui, vit chez vous — c'est ce qui rend la question « comment partir&nbsp;? » sans objet.</p>
+      <a class="btn btn--ghost btn--sm reveal" style="--d:200ms; margin-top:20px" href="docs.html"
+        data-fr="Lire le guide d'installation, de A à Z">Lire le guide d'installation, de A à Z</a>
     </section>
 
     <!-- ══ FAQ ════════════════════════════════════════════════════════════════════════════════ -->
@@ -3680,6 +3987,7 @@
            moins chère de perdre la crédibilité que le reste de la page dépense à gagner. -->
         <h4 data-fr="Assistance">Assistance</h4>
         <ul>
+          <li><a class="brk" href="docs.html" data-fr="Guide d'installation">Guide d'installation</a></li>
           <li><a class="brk" href="legal.html#contact" data-fr="Contact">Contact</a></li>
           <li><a class="brk" href="legal.html#privacy" data-fr="Confidentialité">Confidentialité</a></li>
           <li><a class="brk" href="legal.html#terms" data-fr="Conditions générales">Conditions générales</a></li>
@@ -3694,10 +4002,65 @@
       </div>
     </div>
     <div class="foot__bar">
-      <span>© acami. ACA and ACAM are its framework and engine.</span>
+      <span class="foot__left">
+        <a class="foot__social" href="https://www.linkedin.com/in/trulyismail" target="_blank"
+          rel="noopener noreferrer" aria-label="Ismail Ismail on LinkedIn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path
+              d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z" />
+          </svg>
+        </a>
+        <span>© acami. ACA and ACAM are its framework and engine.</span>
+      </span>
       <span data-fr="LangGraph · Groq · Google Sheets · Streamlit · FastAPI — intégralement sur des paliers gratuits.">LangGraph · Groq · Google Sheets · Streamlit · FastAPI — intégralement sur des paliers gratuits.</span>
     </div>
   </footer>
+
+  <dialog id="demo-modal" class="aca-modal">
+    <h3 class="h-card aca-modal__title" data-fr="Comment préférez-vous voir ça&nbsp;?">Comment préférez-vous voir ça&nbsp;?</h3>
+    <p class="body-sm aca-modal__body"
+      data-fr="La démonstration tourne sur votre propre machine en quelques minutes — même graphe, même pause de validation, aucune clé d'API. Vous pouvez aussi passer directement à un appel de 30 minutes&nbsp;: nous vous la montrons en direct.">La démonstration tourne sur votre propre machine en quelques minutes — même graphe, même pause de validation, aucune clé d'API. Vous pouvez aussi passer directement à un appel de 30 minutes&nbsp;: nous vous la montrons en direct.</p>
+    <div class="aca-modal__actions">
+      <button type="button" class="btn btn--ghost btn--sm" data-modal-action="book" data-fr="Réserver un appel">Réserver un appel</button>
+      <button type="button" class="btn btn--accent btn--sm" data-modal-action="demo"
+        data-fr="Continuer vers la démonstration">Continuer vers la démonstration</button>
+    </div>
+  </dialog>
+
+  <!-- §beta — opened by two different triggers with two different reasons to be here: the Solo
+     tier's "Get it installed" (checkout-specific) and the floating #waitlist-bubble (general
+     interest, nothing to do with checkout). `applyWaitlistContext()` in the script rewrites the
+     title/body to match whichever opened it, so "this button" never refers to a button the visitor
+     didn't click — the English/French pairs below are just the SOLO variant's starting values,
+     overwritten before every `showModal()`. Same box as `#demo-modal` (`.aca-modal`), its own copy:
+     this one asks for something (an email) and reports back on it, so it needs its own status line
+     and its own submit path — see the JS section, which reuses the contact form's exact
+     fetch/mailto-fallback pattern rather than inventing a second one. -->
+  <dialog id="waitlist-modal" class="aca-modal">
+    <h3 class="h-card aca-modal__title" id="waitlist-modal-title"
+      data-fr="Le paiement en ligne n’est pas encore actif">Le paiement en ligne n’est pas encore actif</h3>
+    <p class="body-sm aca-modal__body" id="waitlist-modal-body"
+      data-fr="acami est en bêta&nbsp;: les installations Solo se conviennent encore lors d’un échange direct, pas depuis ce bouton. Laissez votre e-mail, nous vous écrivons dès l’ouverture du paiement en libre-service.">acami est en bêta&nbsp;: les installations Solo se conviennent encore lors d’un échange direct, pas depuis ce bouton. Laissez votre e-mail, nous vous écrivons dès l’ouverture du paiement en libre-service.</p>
+    <form id="waitlist-form">
+      <label class="vh" for="waitlist-email" data-fr="Adresse e-mail">Adresse e-mail</label>
+      <input class="aca-modal__email" id="waitlist-email" name="email" type="email" required
+        autocomplete="email" data-fr-placeholder="vous@entreprise.com" placeholder="you@company.com">
+      <p class="aca-modal__status" id="waitlist-status" hidden></p>
+      <div class="aca-modal__actions">
+        <button type="button" class="btn btn--ghost btn--sm" data-modal-action="close"
+          data-fr="Plus tard">Plus tard</button>
+        <button type="submit" class="btn btn--accent btn--sm" data-fr="Rejoindre la liste d’attente">Rejoindre la liste d’attente</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- §waitlist-bubble — same corner, same spot, through the whole scroll: a shortcut to the dialog
+     above for anyone who never scrolls back up to the Solo tier card. Removed by JS whenever
+     CONFIG.beta is false, exactly like #beta-chip, so it never outlives the reason it exists. -->
+  <button type="button" class="waitlist-bubble" id="waitlist-bubble">
+    <span class="waitlist-bubble__dot" aria-hidden="true"></span>
+    <span data-fr="Liste d’attente">Liste d’attente</span>
+  </button>
 
   <script>
     (function () {
@@ -3753,7 +4116,22 @@
         formKey: "274075d0-57a8-4474-b697-16c4473babb9",
         contact: "hajriismail7@gmail.com",
         demo: "",
-        pay: { demo: "", solo: "", enterprise: "" }
+        /* Stripe Payment Links. `solo` is TEST MODE (buy.stripe.com/test_…) — fine for rehearsing the
+           click-through with a Stripe test card, but it will not take a real payment. Before this page
+           is public, replace it with the live-mode link (same product, toggle out of test mode in
+           Stripe, recreate/duplicate there) or a real card will simply be declined by the test link.
+           `enterprise` stays empty on purpose: that tier is quoted after the scoping call, so there is
+           no fixed amount yet for a Payment Link to charge. While `beta` (below) is true, `pay.solo`
+           is stored but deliberately NOT followed — see `beta` for why. */
+        pay: { demo: "", solo: "https://buy.stripe.com/test_5kQ8wO2JMgvT5qY6P073G00", enterprise: "" },
+        /* One flag, two effects, on purpose — the alternative is two separate switches that can drift
+           out of sync (the badge says beta, checkout is live; or the reverse). True: the "Beta" chip
+           shows in the hero, and the Solo tier's "Get it installed" opens the waitlist dialog instead
+           of `pay.solo` even though a real (test-mode) link is already configured above — acami has
+           no clients yet (see docs/BRAND.md), and a self-serve card charge landing before a single
+           installation has actually been run is a promise this page cannot yet back up. False: the
+           chip disappears and Solo goes straight to `pay.solo`, same as every other tier CTA. */
+        beta: true
       };
 
       /* ══ 1. LANGUAGE ═════════════════════════════════════════════════════════════════════════════
@@ -3767,6 +4145,15 @@
         [].forEach.call(document.querySelectorAll("[data-fr]"), function (el) {
           if (!el.hasAttribute("data-en")) el.setAttribute("data-en", el.innerHTML);
           el.innerHTML = (lang === "fr") ? el.getAttribute("data-fr") : el.getAttribute("data-en");
+        });
+        /* `placeholder` is an attribute, not content — the innerHTML swap above cannot reach it,
+           hence this second, smaller pass for the one input on the page that needs one. */
+        [].forEach.call(document.querySelectorAll("[data-fr-placeholder]"), function (el) {
+          if (!el.hasAttribute("data-en-placeholder")) {
+            el.setAttribute("data-en-placeholder", el.getAttribute("placeholder") || "");
+          }
+          el.setAttribute("placeholder", lang === "fr"
+            ? el.getAttribute("data-fr-placeholder") : el.getAttribute("data-en-placeholder"));
         });
         langButtons.forEach(function (b) {
           b.setAttribute("aria-pressed", String(b.getAttribute("data-lang") === lang));
@@ -4551,9 +4938,36 @@
         a.addEventListener("click", function (ev) {
           var tier = a.getAttribute("data-cta");
           // The demo tier leads to the demo, not to a form: sending someone who asked to *try it* into
-          // a contact form is the small bait-and-switch this page exists to avoid. Unset, it falls
-          // through to `#book` like the others rather than pointing at nothing.
-          var link = (tier === "demo") ? CONFIG.demo : (CONFIG.pay && CONFIG.pay[tier]);
+          // a contact form is the small bait-and-switch this page exists to avoid.
+          if (tier === "demo") {
+            ev.preventDefault();
+            // A quick fork, not a gate: book a call, or go straight to the demo — offered once,
+            // evenly, before either happens. See `demoModal`'s own handler below for what each
+            // button does; `CONFIG.demo` unset falls back to the self-serve setup in docs.html#demo,
+            // same as before this modal existed.
+            if (demoModal && typeof demoModal.showModal === "function") {
+              demoModal.showModal();
+            } else {
+              // No <dialog> support (a genuinely old browser): fall back to the pre-modal behaviour
+              // rather than a click that silently does nothing.
+              window.open(CONFIG.demo || "docs.html#demo", "_blank", "noopener");
+            }
+            return;
+          }
+          // Beta: Solo's card checkout is intentionally not live yet — see CONFIG.beta for why.
+          // Checked here, not by leaving `pay.solo` empty, so the real link stays one edit away
+          // (delete this branch, or flip CONFIG.beta) rather than a second value to remember later.
+          if (tier === "solo" && CONFIG.beta) {
+            ev.preventDefault();
+            if (waitlistModal && typeof waitlistModal.showModal === "function") {
+              applyWaitlistContext("solo");
+              waitlistModal.showModal();
+            } else {
+              window.location.hash = "book";   // no <dialog> support: fall back to the booking path
+            }
+            return;
+          }
+          var link = CONFIG.pay && CONFIG.pay[tier];
           if (link) { ev.preventDefault(); window.location.href = link; return; }
           chosenTier = tier;
           paintTier();
@@ -4561,6 +4975,189 @@
              that would wipe a booking someone had started filling in. */
         });
       });
+
+      /* ══ MODALS (demo confirm, waitlist) ═════════════════════════════════════════════════════════
+         `closeOnBackdrop` is the one behaviour both dialogs share verbatim: a click landing on the
+         <dialog> element itself, not on anything inside it, is by definition a click on its own
+         padding box outside the visible card — since `::backdrop` cannot be targeted directly by a
+         click listener, `ev.target === dialog` is the standard way to detect that. Each dialog's own
+         listener still handles its own action buttons; only this one part was worth sharing. */
+      function closeOnBackdrop(dialog) {
+        if (!dialog) return;
+        dialog.addEventListener("click", function (ev) {
+          if (ev.target === dialog) dialog.close();
+        });
+      }
+
+      var demoModal = document.getElementById("demo-modal");
+      if (demoModal) {
+        demoModal.addEventListener("click", function (ev) {
+          var action = ev.target.closest && ev.target.closest("[data-modal-action]");
+          if (!action) return;
+          demoModal.close();
+          if (action.getAttribute("data-modal-action") === "demo") {
+            window.open(CONFIG.demo || "docs.html#demo", "_blank", "noopener");
+          } else {
+            // `scroll-behavior: smooth` is already set globally (and dropped under
+            // prefers-reduced-motion), so a plain hash jump is enough — no scrollIntoView needed.
+            window.location.hash = "book";
+          }
+        });
+        closeOnBackdrop(demoModal);
+      }
+
+      var waitlistModal = document.getElementById("waitlist-modal");
+      var waitlistForm = document.getElementById("waitlist-form");
+      var waitlistStatus = document.getElementById("waitlist-status");
+      var waitlistTitleEl = document.getElementById("waitlist-modal-title");
+      var waitlistBodyEl = document.getElementById("waitlist-modal-body");
+      var waitlistContext = "solo";
+
+      /* Two openers, two reasons to be here — see the dialog's own comment. Each entry's title/body
+         is a real (en, fr) pair, not just en with a French afterthought, so `applyWaitlistContext`
+         can write straight into data-en/data-fr and stay compatible with `setLang` (§1 above) if the
+         visitor switches language while the dialog is open. subject/confirm exist for the same
+         reason: "we'll email you when checkout opens" is simply false for someone who clicked a
+         general waitlist bubble that has nothing to do with checkout. */
+      var WAITLIST_COPY = {
+        solo: {
+          title: { en: "Card checkout isn't live yet", fr: "Le paiement en ligne n’est pas encore actif" },
+          body: {
+            en: "acami is in beta — Solo installations are still arranged through a direct conversation, not this button. Leave your email and we'll write the moment self-serve checkout opens.",
+            fr: "acami est en bêta&nbsp;: les installations Solo se conviennent encore lors d’un échange direct, pas depuis ce bouton. Laissez votre e-mail, nous vous écrivons dès l’ouverture du paiement en libre-service."
+          },
+          subject: { en: "acami — Solo waitlist", fr: "acami — liste d’attente Solo" },
+          confirm: {
+            en: "You're on the list — we'll email you when checkout opens.",
+            fr: "Inscription reçue — nous vous écrivons à l’ouverture du paiement."
+          }
+        },
+        general: {
+          title: { en: "acami is in beta", fr: "acami est en bêta" },
+          body: {
+            en: "We're onboarding our first clients directly, one conversation at a time — not through self-serve signup yet. Leave your email and we'll write the moment there's room, or self-serve opens up.",
+            fr: "Nous accompagnons nos premiers clients directement, un échange à la fois — pas encore par inscription en libre-service. Laissez votre e-mail&nbsp;: nous vous écrivons dès qu’une place se libère, ou dès l’ouverture du libre-service."
+          },
+          subject: { en: "acami — waitlist", fr: "acami — liste d’attente" },
+          confirm: {
+            en: "You're on the list — we'll email you as soon as there's room.",
+            fr: "Inscription reçue — nous vous écrivons dès qu’une place se libère."
+          }
+        }
+      };
+
+      function applyWaitlistContext(kind) {
+        waitlistContext = WAITLIST_COPY[kind] ? kind : "solo";
+        var copy = WAITLIST_COPY[waitlistContext];
+        var lang = document.documentElement.lang === "fr" ? "fr" : "en";
+        if (waitlistTitleEl) {
+          waitlistTitleEl.setAttribute("data-en", copy.title.en);
+          waitlistTitleEl.setAttribute("data-fr", copy.title.fr);
+          waitlistTitleEl.innerHTML = copy.title[lang];
+        }
+        if (waitlistBodyEl) {
+          waitlistBodyEl.setAttribute("data-en", copy.body.en);
+          waitlistBodyEl.setAttribute("data-fr", copy.body.fr);
+          waitlistBodyEl.innerHTML = copy.body[lang];
+        }
+      }
+
+      function waitlistSay(text, ok) {
+        if (!waitlistStatus) return;
+        waitlistStatus.hidden = false;
+        waitlistStatus.textContent = text;
+        waitlistStatus.style.color = ok ? "var(--ink-2)" : "var(--signal)";
+      }
+
+      if (waitlistModal) {
+        waitlistModal.addEventListener("click", function (ev) {
+          if (ev.target.closest && ev.target.closest('[data-modal-action="close"]')) {
+            waitlistModal.close();
+          }
+        });
+        closeOnBackdrop(waitlistModal);
+        // A stale "you're on the list" from a previous visit must not still be showing the next
+        // time this opens — `close` fires for every path out (Escape, backdrop, either button).
+        waitlistModal.addEventListener("close", function () {
+          if (waitlistForm) waitlistForm.reset();
+          if (waitlistStatus) { waitlistStatus.hidden = true; waitlistStatus.textContent = ""; }
+        });
+      }
+
+      /* Same fetch/mailto-fallback shape as the contact form above (`FORM_URL`, declared there, is
+         reused as-is): a direct POST to the same collection endpoint when configured, tagged with
+         its own subject so it doesn't read as a booking request; a `mailto:` with the address in the
+         body when it is not, or if the direct send fails. */
+      if (waitlistForm) waitlistForm.addEventListener("submit", function (ev) {
+        ev.preventDefault();
+        var fr = document.documentElement.lang === "fr";
+        var lang = fr ? "fr" : "en";
+        var copy = WAITLIST_COPY[waitlistContext] || WAITLIST_COPY.solo;
+        var email = (new FormData(waitlistForm)).get("email") || "";
+        var subject = copy.subject[lang];
+        var mailto = "mailto:" + CONFIG.contact + "?subject=" + encodeURIComponent(subject)
+          + "&body=" + encodeURIComponent((fr ? "E-mail : " : "Email: ") + email);
+
+        if (FORM_URL) {
+          var btn = waitlistForm.querySelector('button[type="submit"]');
+          if (btn) btn.disabled = true;
+          waitlistSay(fr ? "Envoi en cours…" : "Sending…", true);
+          var payload = { subject: subject, email: email };
+          if (CONFIG.formKey) payload.access_key = CONFIG.formKey;
+          fetch(FORM_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Accept": "application/json" },
+            body: JSON.stringify(payload)
+          }).then(function (r) {
+            if (!r.ok) throw new Error("HTTP " + r.status);
+            waitlistSay(copy.confirm[lang], true);
+          }).catch(function () {
+            waitlistSay(fr ? "L’envoi direct a échoué — votre messagerie prend le relais."
+              : "Direct send failed — handing over to your mail app.", false);
+            window.location.href = mailto;
+          }).then(function () { if (btn) btn.disabled = false; });
+          return;
+        }
+
+        window.location.href = mailto;
+      });
+
+      var waitlistBubble = document.getElementById("waitlist-bubble");
+      if (waitlistBubble) {
+        waitlistBubble.addEventListener("click", function () {
+          if (waitlistModal && typeof waitlistModal.showModal === "function") {
+            applyWaitlistContext("general");
+            waitlistModal.showModal();
+          } else {
+            // No <dialog> support: send them to the tier card, which carries the same fallback.
+            window.location.hash = "pricing";
+          }
+        });
+
+        // The footer's own bottom-left link (the LinkedIn icon in .foot__left) lives in this exact
+        // corner; fading the fixed bubble out while the footer is on screen avoids the two sitting
+        // on top of each other. IntersectionObserver over a scroll listener for the same reason as
+        // the reveal system above: the browser does the work off the main thread.
+        var waitlistFoot = document.querySelector(".foot__bar");
+        if (waitlistFoot && "IntersectionObserver" in window) {
+          new IntersectionObserver(function (entries) {
+            entries.forEach(function (e) {
+              waitlistBubble.classList.toggle("is-near-footer", e.isIntersecting);
+            });
+          }).observe(waitlistFoot);
+        }
+      }
+
+      /* The hero's "Beta" chip and the waitlist bubble are both visible by default in the HTML (see
+         their own comments); this is the one place that removes both when a deployment has actually
+         exited beta — one flag, one line, so the two can't drift out of sync with each other. */
+      if (!CONFIG.beta) {
+        var betaChip = document.getElementById("beta-chip");
+        if (betaChip && betaChip.parentNode) betaChip.parentNode.removeChild(betaChip);
+        if (waitlistBubble && waitlistBubble.parentNode) {
+          waitlistBubble.parentNode.removeChild(waitlistBubble);
+        }
+      }
 
       /* Demo links point somewhere only if a hosted instance exists. */
       if (CONFIG.demo) {
