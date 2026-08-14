@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACA contre un chatbot RAG — répondre à des questions n&#x27;est pas exécuter le flux</title>
+<meta name="description" content="Un chatbot RAG d&#x27;agence classique répond à des questions sur vos documents. Il ne classe pas un lead entrant, ne l&#x27;enrichit pas, ne rédige pas de proposition personnalisée, ne s&#x27;auto-critique pas, et ne s&#x27;arrête pas pour un humain avant d&#x27;agir.">
+<link rel="canonical" href="https://acami.example/seo/vs-rag-chatbot.fr.html">
+<style>
+:root{--paper:#fdfdfd;--ink:#12171c;--ink-2:#4b5560;--ink-3:#636363;--rule:#e3e3e3;
+--primary:#125e6b;--accent:#b4622a;--radius:10px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+font-family:Figtree,Inter,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+line-height:1.6}
+.wrap{max-width:760px;margin:0 auto;padding:48px 24px 96px}
+nav{border-bottom:1px solid var(--rule);padding:16px 24px}
+nav a{color:var(--ink);text-decoration:none;font-weight:600;font-size:.9rem}
+nav a.back{color:var(--ink-2);font-weight:500;float:right}
+h1{font-family:'Instrument Serif',Georgia,serif;font-size:2.1rem;line-height:1.15;margin:.4em 0 .3em}
+h2{font-size:1.2rem;margin-top:2.2em}
+.kicker{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.72rem;letter-spacing:.08em;
+text-transform:uppercase;color:var(--primary)}
+.lede{color:var(--ink-2);font-size:1.05rem;max-width:60ch}
+p{max-width:68ch}
+code{background:#f1f4f5;padding:.1em .35em;border-radius:4px;font-size:.9em}
+ol,ul{max-width:66ch;padding-left:1.3em}
+li{margin-bottom:.6em}
+table{border-collapse:collapse;width:100%;margin:1.4em 0;font-size:.92rem}
+th,td{border:1px solid var(--rule);padding:.55em .7em;text-align:left;vertical-align:top}
+th{background:#f6f8f8;font-weight:600}
+.verified{border-left:3px solid var(--primary);padding:.2em 0 .2em 1em;margin:2em 0;
+color:var(--ink-2);font-size:.92rem}
+.verified.live{border-left-color:var(--accent)}
+.sources{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.78rem;color:var(--ink-3)}
+.sources a{color:inherit}
+footer{border-top:1px solid var(--rule);padding:32px 24px;text-align:center;
+color:var(--ink-3);font-size:.82rem}
+footer a{color:inherit}
+</style>
+</head>
+<body>
+<nav><a href="../fr/index.html">acami</a><a class="back" href="../fr/index.html">&larr; Retour sur acami.com</a></nav>
+<main class="wrap">
+<p class="kicker">Comparaison</p>
+<h1>ACA contre un chatbot RAG — répondre à des questions n&#x27;est pas exécuter le flux</h1>
+<p class="lede">Un « chatbot RAG personnalisé sur vos documents » est la chose la plus fréquemment livrée par une agence IA, parce que c'est réellement la plus simple à bien construire. C'est aussi un produit différent d'ACA, et la différence tient dans tout le flux qui entoure la seule étape de question-réponse.</p>
+<table><thead><tr><th></th><th>Chatbot RAG générique</th><th>ACA</th></tr></thead><tbody><tr><td>Classe un lead entrant</td><td>Non</td><td>Oui, avec un seuil de confiance qui escalade les cas incertains vers un humain</td></tr><tr><td>Récupère depuis une base de connaissances</td><td>Oui — tout son métier</td><td>Oui — un agent parmi d&#x27;autres, hybride dense+éparse</td></tr><tr><td>Enrichit par une recherche sur l&#x27;entreprise</td><td>Non</td><td>Oui, mis en cache</td></tr><tr><td>Rédige une proposition commerciale complète</td><td>Non — répond à une question, ne compose pas un document</td><td>Oui</td></tr><tr><td>S&#x27;auto-critique</td><td>Non</td><td>Oui, plafonné à une réécriture</td></tr><tr><td>Escalade une question sans réponse vers un humain, et met la réponse web en attente de validation</td><td>Non — dit généralement juste qu&#x27;il ne sait pas</td><td>Oui — l&#x27;agent de veille + la mise en attente FAQ</td></tr><tr><td>Écrit dans un CRM</td><td>Non, en général</td><td>Oui, après validation humaine</td></tr><tr><td>Nécessite une base vectorielle payante</td><td>Souvent</td><td>Non — pgvector optionnel, repli en mémoire sinon</td></tr></tbody></table>
+<div class="verified">Comparaison structurelle avec la catégorie, tirée de docs/ACA_presentation_source.md. Chaque ligne côté ACA est une capacité réelle et testée de ce projet.</div>
+<p class="sources">Sources : <code>docs/ACA_presentation_source.md</code>, <code>aca/core/app.py</code><br>Mis à jour : 2026-08-08</p>
+<p><a href="../seo/vs-rag-chatbot.html">English version</a></p>
+</main>
+<footer>acami — Agence IA. <a href="../legal.html#privacy">Confidentialité</a> &middot; <a href="../legal.html#terms">Conditions</a></footer>
+</body>
+</html>

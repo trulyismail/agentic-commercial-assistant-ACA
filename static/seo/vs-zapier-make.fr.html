@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACA contre Zapier / Make — l&#x27;orchestrateur n&#x27;est pas le jugement</title>
+<meta name="description" content="Zapier et Make déplacent des données entre applications sur déclencheur. Aucun des deux ne lit un e-mail, ne détermine ce dont un prospect a besoin, ne rédige une réponse, ni ne sait quand il ne connaît pas la réponse. C&#x27;est ce raisonnement qu&#x27;ACA ajoute.">
+<link rel="canonical" href="https://acami.example/seo/vs-zapier-make.fr.html">
+<style>
+:root{--paper:#fdfdfd;--ink:#12171c;--ink-2:#4b5560;--ink-3:#636363;--rule:#e3e3e3;
+--primary:#125e6b;--accent:#b4622a;--radius:10px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+font-family:Figtree,Inter,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+line-height:1.6}
+.wrap{max-width:760px;margin:0 auto;padding:48px 24px 96px}
+nav{border-bottom:1px solid var(--rule);padding:16px 24px}
+nav a{color:var(--ink);text-decoration:none;font-weight:600;font-size:.9rem}
+nav a.back{color:var(--ink-2);font-weight:500;float:right}
+h1{font-family:'Instrument Serif',Georgia,serif;font-size:2.1rem;line-height:1.15;margin:.4em 0 .3em}
+h2{font-size:1.2rem;margin-top:2.2em}
+.kicker{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.72rem;letter-spacing:.08em;
+text-transform:uppercase;color:var(--primary)}
+.lede{color:var(--ink-2);font-size:1.05rem;max-width:60ch}
+p{max-width:68ch}
+code{background:#f1f4f5;padding:.1em .35em;border-radius:4px;font-size:.9em}
+ol,ul{max-width:66ch;padding-left:1.3em}
+li{margin-bottom:.6em}
+table{border-collapse:collapse;width:100%;margin:1.4em 0;font-size:.92rem}
+th,td{border:1px solid var(--rule);padding:.55em .7em;text-align:left;vertical-align:top}
+th{background:#f6f8f8;font-weight:600}
+.verified{border-left:3px solid var(--primary);padding:.2em 0 .2em 1em;margin:2em 0;
+color:var(--ink-2);font-size:.92rem}
+.verified.live{border-left-color:var(--accent)}
+.sources{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.78rem;color:var(--ink-3)}
+.sources a{color:inherit}
+footer{border-top:1px solid var(--rule);padding:32px 24px;text-align:center;
+color:var(--ink-3);font-size:.82rem}
+footer a{color:inherit}
+</style>
+</head>
+<body>
+<nav><a href="../fr/index.html">acami</a><a class="back" href="../fr/index.html">&larr; Retour sur acami.com</a></nav>
+<main class="wrap">
+<p class="kicker">Comparaison</p>
+<h1>ACA contre Zapier / Make — l&#x27;orchestrateur n&#x27;est pas le jugement</h1>
+<p class="lede">« Je ne peux pas juste construire ça dans Zapier ? » est une question légitime, et la réponse honnête est : vous pouvez câbler la plomberie dans Zapier, mais Zapier ne fera pas la réflexion. Une automatisation Zapier est une séquence fixe d'étapes déclenchée par un événement ; elle n'a aucun jugement sur la valeur d'un lead, aucune mémoire de ce qui a été dit à cet expéditeur auparavant, et aucun moyen de dire « je ne connais pas vraiment la réponse à cette question » plutôt que d'en inventer une.</p>
+<table><thead><tr><th></th><th>Zapier / Make</th><th>ACA</th></tr></thead><tbody><tr><td>Lit et classe l&#x27;e-mail</td><td>Non — un filtre par mot-clé au mieux</td><td>Oui — un modèle de langage, avec un score de confiance</td></tr><tr><td>Recherche l&#x27;entreprise de l&#x27;expéditeur</td><td>Non, sauf à construire et payer une étape séparée</td><td>Intégré, mis en cache, palier gratuit</td></tr><tr><td>Répond depuis votre propre base de connaissances</td><td>Non</td><td>Oui — recherche hybride dense + éparse sur votre FAQ</td></tr><tr><td>Rédige une réponse personnalisée</td><td>Non</td><td>Oui, avec une passe d&#x27;auto-critique avant qu&#x27;une personne ne la voie</td></tr><tr><td>Sait quand il ne sait pas</td><td>Sans objet</td><td>Oui — signale le manque plutôt que de deviner</td></tr><tr><td>S&#x27;arrête pour une validation humaine avant d&#x27;agir</td><td>Seulement si vous construisez cette étape vous-même</td><td>Architectural — ne peut pas être contourné</td></tr><tr><td>Où n8n s&#x27;insère</td><td>—</td><td>Une couche de câblage optionnelle par-dessus — voir la page d&#x27;intégration n8n</td></tr></tbody></table>
+<div class="verified">Ceci est une comparaison structurelle, pas un test contre un compte Zapier réel — aucun compte de ce type n'existe pour ce projet. Chaque affirmation côté ACA du tableau renvoie à une capacité vérifiée décrite sur sa propre page d'intégration ou de capacité.</div>
+<p class="sources">Sources : <code>aca/core/app.py</code><br>Mis à jour : 2026-08-08</p>
+<p><a href="../seo/vs-zapier-make.html">English version</a></p>
+</main>
+<footer>acami — Agence IA. <a href="../legal.html#privacy">Confidentialité</a> &middot; <a href="../legal.html#terms">Conditions</a></footer>
+</body>
+</html>

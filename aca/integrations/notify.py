@@ -73,6 +73,33 @@ def send(
     return False
 
 
+def send_all(
+    message: str,
+    webhook_url: str | None = None,
+    email_to: str | None = None,
+    subject: str | None = None,
+) -> list:
+    """
+    Envoie sur **tous** les canaux configurés et renvoie la liste de ceux qui ont abouti
+    (`["Slack", "e-mail"]`).
+
+    Différent de `send()`, qui s'arrête au premier succès. La distinction n'est pas cosmétique :
+    une alerte de routage n'a besoin d'atteindre l'équipe qu'une fois, peu importe par où — la
+    chaîne de repli est alors le bon comportement. Un **rappel personnel**, lui, est posé par
+    quelqu'un pour ne pas oublier : le recevoir dans Slack *et* dans sa boîte e-mail est ce que la
+    personne attend, et la chaîne de repli le lui refusait silencieusement dès que Slack
+    fonctionnait.
+
+    Ne lève jamais, comme `send()` : chaque canal échoue pour son propre compte.
+    """
+    delivered = []
+    if _notify_slack(message, webhook_url):
+        delivered.append("Slack")
+    if _notify_email(message, email_to, subject):
+        delivered.append("e-mail")
+    return delivered
+
+
 def _approval_blocks(message: str, thread_id: str) -> list:
     """
     Message Block Kit avec deux boutons « Valider »/« Rejeter » portant le `thread_id` dans leur

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACA + Gmail — réception de la boîte, brouillons dans le fil</title>
+<meta name="description" content="Comment ACA lit les e-mails Gmail non lus, extrait chaque pièce jointe PDF/Word/Excel, et rédige sa réponse comme un vrai brouillon Gmail dans le fil d&#x27;origine — jamais envoyé seul.">
+<link rel="canonical" href="https://acami.example/seo/gmail-integration.fr.html">
+<style>
+:root{--paper:#fdfdfd;--ink:#12171c;--ink-2:#4b5560;--ink-3:#636363;--rule:#e3e3e3;
+--primary:#125e6b;--accent:#b4622a;--radius:10px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+font-family:Figtree,Inter,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+line-height:1.6}
+.wrap{max-width:760px;margin:0 auto;padding:48px 24px 96px}
+nav{border-bottom:1px solid var(--rule);padding:16px 24px}
+nav a{color:var(--ink);text-decoration:none;font-weight:600;font-size:.9rem}
+nav a.back{color:var(--ink-2);font-weight:500;float:right}
+h1{font-family:'Instrument Serif',Georgia,serif;font-size:2.1rem;line-height:1.15;margin:.4em 0 .3em}
+h2{font-size:1.2rem;margin-top:2.2em}
+.kicker{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.72rem;letter-spacing:.08em;
+text-transform:uppercase;color:var(--primary)}
+.lede{color:var(--ink-2);font-size:1.05rem;max-width:60ch}
+p{max-width:68ch}
+code{background:#f1f4f5;padding:.1em .35em;border-radius:4px;font-size:.9em}
+ol,ul{max-width:66ch;padding-left:1.3em}
+li{margin-bottom:.6em}
+table{border-collapse:collapse;width:100%;margin:1.4em 0;font-size:.92rem}
+th,td{border:1px solid var(--rule);padding:.55em .7em;text-align:left;vertical-align:top}
+th{background:#f6f8f8;font-weight:600}
+.verified{border-left:3px solid var(--primary);padding:.2em 0 .2em 1em;margin:2em 0;
+color:var(--ink-2);font-size:.92rem}
+.verified.live{border-left-color:var(--accent)}
+.sources{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.78rem;color:var(--ink-3)}
+.sources a{color:inherit}
+footer{border-top:1px solid var(--rule);padding:32px 24px;text-align:center;
+color:var(--ink-3);font-size:.82rem}
+footer a{color:inherit}
+</style>
+</head>
+<body>
+<nav><a href="../fr/index.html">acami</a><a class="back" href="../fr/index.html">&larr; Retour sur acami.com</a></nav>
+<main class="wrap">
+<p class="kicker">Intégration</p>
+<h1>ACA + Gmail — réception de la boîte, brouillons dans le fil</h1>
+<p class="lede">La plupart des outils « IA pour e-mail » se contentent d'une règle de transfert et appellent ça une intégration. ACA s'authentifie directement auprès de l'API Gmail (OAuth, client « application installée », portée <code>gmail.modify</code>) et fait trois choses qu'une règle de transfert ne peut pas : il lit chaque pièce jointe d'un message, pas seulement le corps ; il rédige la réponse <em>dans le fil d'origine</em>, avec les bons en-têtes <code>threadId</code> et <code>In-Reply-To</code>, pour qu'une personne voie une conversation continue plutôt qu'un nouveau message isolé ; et il n'envoie jamais rien lui-même — le brouillon reste dans Gmail exactement là où une personne l'aurait laissé pour elle-même.</p>
+<h2>Comment ça marche</h2><ol><li><b>list_unread_emails()</b> interroge la boîte de réception — via <code>poller.py</code> en arrière-plan, ou un « vérifier maintenant » manuel dans l'interface.</li><li><b>get_email()</b> récupère le corps et parcourt récursivement chaque partie MIME pour collecter les pièces jointes PDF, Word et Excel — pas seulement la première trouvée.</li><li>Le texte extrait (e-mail + chaque pièce jointe, plafonné une seule fois à 15 000 caractères combinés, pas par fichier) alimente le pipeline de classification et de rédaction.</li><li>Après validation, <b>create_draft_reply()</b> crée le brouillon Gmail dans le fil. <b>mark_as_processed()</b> retire le libellé <code>UNREAD</code> et ajoute un libellé <code>ACA-Traité</code> pour que le même e-mail ne soit jamais remis en file.</li></ol>
+<div class="verified live">Vérifié en direct de bout en bout, y compris le chemin multi-pièces-jointes (PDF + Word + Excel synthétiques dans un même e-mail, les trois extraits, une extension non gérée ignorée en silence) et les en-têtes du brouillon dans le fil.</div>
+<p class="sources">Sources : <code>aca/integrations/gmail_reader.py</code>, <code>aca/ingestion/attachment_reader.py</code><br>Mis à jour : 2026-08-08</p>
+<p><a href="../seo/gmail-integration.html">English version</a></p>
+</main>
+<footer>acami — Agence IA. <a href="../legal.html#privacy">Confidentialité</a> &middot; <a href="../legal.html#terms">Conditions</a></footer>
+</body>
+</html>

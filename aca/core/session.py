@@ -71,6 +71,28 @@ def is_valid(session: dict, now: float) -> bool:
     return expiry_reason(session, now) is None
 
 
+def seconds_until_expiry(session: dict, now: float):
+    """
+    Secondes avant expiration, ou `None` si aucune des deux bornes n'est active (§18, recap #6).
+
+    Sert à avertir AVANT l'expiration silencieuse (perdre un brouillon retouché à la main est la
+    petite frustration qui décrédibilise un outil) — même logique de « la plus stricte des deux
+    bornes l'emporte » que `expiry_reason`, mais renvoyant un délai plutôt qu'un motif.
+    """
+    if not session:
+        return 0
+    candidates = []
+    ttl = session_ttl_seconds()
+    if ttl > 0:
+        candidates.append(ttl - (now - session.get("started_at", 0)))
+    idle = session_idle_seconds()
+    if idle > 0:
+        candidates.append(idle - (now - session.get("last_seen", 0)))
+    if not candidates:
+        return None
+    return max(0, min(candidates))
+
+
 def touch(session: dict, now: float) -> dict:
     """
     Repousse le compteur d'inactivité (à appeler à chaque interaction). Ne touche JAMAIS

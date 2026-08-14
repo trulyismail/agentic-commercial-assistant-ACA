@@ -1,0 +1,264 @@
+{
+  "pages": [
+    {
+      "slug": "gmail-integration",
+      "kind": "integration",
+      "title_en": "ACA + Gmail — inbox intake, drafts in-thread",
+      "title_fr": "ACA + Gmail — réception de la boîte, brouillons dans le fil",
+      "meta_en": "How ACA reads unread Gmail, extracts every PDF/Word/Excel attachment, and drafts its reply as a real Gmail draft in the original thread — never auto-sent.",
+      "meta_fr": "Comment ACA lit les e-mails Gmail non lus, extrait chaque pièce jointe PDF/Word/Excel, et rédige sa réponse comme un vrai brouillon Gmail dans le fil d'origine — jamais envoyé seul.",
+      "intro_en": "Most \"AI email\" tools bolt on a forwarding rule and call it an integration. ACA authenticates directly against the Gmail API (OAuth, an installed-app client, scope <code>gmail.modify</code>) and does three things a forwarding rule cannot: it reads every attachment on a message, not just the body; it drafts the reply <em>inside the original thread</em>, with the correct <code>threadId</code> and <code>In-Reply-To</code> headers, so a human sees one continuous conversation instead of a new stray message; and it never sends anything itself — the draft sits in Gmail exactly where a person would leave one for themselves.",
+      "intro_fr": "La plupart des outils « IA pour e-mail » se contentent d'une règle de transfert et appellent ça une intégration. ACA s'authentifie directement auprès de l'API Gmail (OAuth, client « application installée », portée <code>gmail.modify</code>) et fait trois choses qu'une règle de transfert ne peut pas : il lit chaque pièce jointe d'un message, pas seulement le corps ; il rédige la réponse <em>dans le fil d'origine</em>, avec les bons en-têtes <code>threadId</code> et <code>In-Reply-To</code>, pour qu'une personne voie une conversation continue plutôt qu'un nouveau message isolé ; et il n'envoie jamais rien lui-même — le brouillon reste dans Gmail exactement là où une personne l'aurait laissé pour elle-même.",
+      "how_en": [
+        "<b>list_unread_emails()</b> polls the inbox — via <code>poller.py</code> in the background, or a manual \"check now\" in the UI.",
+        "<b>get_email()</b> pulls the body and walks every MIME part recursively to collect PDF, Word and Excel attachments — not just the first one found.",
+        "The extracted text (email + every attachment, capped once at 15,000 characters combined, not per file) feeds the classification and drafting pipeline.",
+        "On approval, <b>create_draft_reply()</b> creates the Gmail draft in-thread. <b>mark_as_processed()</b> removes the <code>UNREAD</code> label and adds an <code>ACA-Traité</code> label so the same email is never re-queued."
+      ],
+      "how_fr": [
+        "<b>list_unread_emails()</b> interroge la boîte de réception — via <code>poller.py</code> en arrière-plan, ou un « vérifier maintenant » manuel dans l'interface.",
+        "<b>get_email()</b> récupère le corps et parcourt récursivement chaque partie MIME pour collecter les pièces jointes PDF, Word et Excel — pas seulement la première trouvée.",
+        "Le texte extrait (e-mail + chaque pièce jointe, plafonné une seule fois à 15 000 caractères combinés, pas par fichier) alimente le pipeline de classification et de rédaction.",
+        "Après validation, <b>create_draft_reply()</b> crée le brouillon Gmail dans le fil. <b>mark_as_processed()</b> retire le libellé <code>UNREAD</code> et ajoute un libellé <code>ACA-Traité</code> pour que le même e-mail ne soit jamais remis en file."
+      ],
+      "verified_en": "Live-verified end to end, including the multi-attachment path (synthetic PDF + Word + Excel in one email, all three extracted, an unsupported extension silently skipped) and the draft-reply thread headers.",
+      "verified_fr": "Vérifié en direct de bout en bout, y compris le chemin multi-pièces-jointes (PDF + Word + Excel synthétiques dans un même e-mail, les trois extraits, une extension non gérée ignorée en silence) et les en-têtes du brouillon dans le fil.",
+      "source_files": ["aca/integrations/gmail_reader.py", "aca/ingestion/attachment_reader.py"],
+      "verified_live": true,
+      "updated": "2026-08-08"
+    },
+    {
+      "slug": "hubspot-integration",
+      "kind": "integration",
+      "title_en": "ACA + HubSpot — a real CRM write, behind a human gate",
+      "title_fr": "ACA + HubSpot — une écriture CRM réelle, derrière une validation humaine",
+      "meta_en": "ACA upserts a HubSpot Contact, Deal and Note only after a person clicks Validate. Runs alongside Google Sheets, never replacing your existing lead memory.",
+      "meta_fr": "ACA crée ou met à jour un Contact, un Deal et une Note HubSpot uniquement après qu'une personne a cliqué Valider. Fonctionne aux côtés de Google Sheets, sans jamais remplacer votre mémoire de leads existante.",
+      "intro_en": "HubSpot is the CRM most of ACA's prospects already run — so ACA writes to it directly rather than asking a team to copy leads out of a spreadsheet. The write is real (Contact, Deal, Note, all three genuinely associated via HubSpot's v4 API), and it happens exactly once, only after the validation gate.",
+      "intro_fr": "HubSpot est le CRM que la plupart des prospects d'ACA utilisent déjà — ACA y écrit donc directement plutôt que de demander à une équipe de recopier des leads depuis un tableur. L'écriture est réelle (Contact, Deal, Note, tous trois réellement associés via l'API v4 de HubSpot), et elle a lieu exactement une fois, uniquement après la validation.",
+      "how_en": [
+        "On \"Valider\", <b>create_lead()</b> searches HubSpot for an existing Contact by e-mail — patches it if found, creates it if not.",
+        "A Deal is created in the configured pipeline/stage (defaults to any fresh portal's \"default\"/\"appointmentscheduled\") and associated to the Contact.",
+        "Urgency, stated need and the drafted proposal are attached as a Note — Deals carry no free-text field by default.",
+        "Sheets is written in the same step, not replaced by it: Sheets stays the duplicate-detection memory (<code>find_leads_by_sender</code>) and the dashboard's data source."
+      ],
+      "how_fr": [
+        "Sur « Valider », <b>create_lead()</b> recherche dans HubSpot un Contact existant par e-mail — le met à jour s'il existe, le crée sinon.",
+        "Un Deal est créé dans le pipeline/étape configuré (par défaut « default »/« appointmentscheduled », présents dans tout portail neuf) et associé au Contact.",
+        "L'urgence, le besoin exprimé et la proposition rédigée sont joints en tant que Note — les Deals n'ont pas de champ texte libre par défaut.",
+        "Sheets est écrit à la même étape, pas remplacé par elle : Sheets reste la mémoire de détection des doublons (<code>find_leads_by_sender</code>) et la source du tableau de bord."
+      ],
+      "verified_en": "Live-verified against a real HubSpot portal: contact, deal, note and associations all created correctly, then deleted as test cleanup. A real bug was caught during that verification — a Windows console encoding crash <em>after</em> a successful write, which the graph's retry policy would have turned into a duplicate write — fixed by making the write's return value never depend on a print succeeding.",
+      "verified_fr": "Vérifié en direct sur un vrai portail HubSpot : contact, deal, note et associations tous créés correctement, puis supprimés en nettoyage de test. Un vrai bug a été détecté pendant cette vérification — un plantage d'encodage console Windows <em>après</em> une écriture réussie, que la politique de reprise du graphe aurait transformé en écriture en double — corrigé en faisant en sorte que la valeur de retour de l'écriture ne dépende jamais d'un affichage réussi.",
+      "source_files": ["aca/integrations/hubspot.py"],
+      "verified_live": true,
+      "updated": "2026-08-08"
+    },
+    {
+      "slug": "slack-integration",
+      "kind": "integration",
+      "title_en": "ACA + Slack — validate a lead without opening a browser",
+      "title_fr": "ACA + Slack — valider un lead sans ouvrir de navigateur",
+      "meta_en": "ACA posts an approval card with real Valider/Rejeter buttons to Slack. A click is HMAC-verified and resumes the graph — the whole validation loop can happen inside Slack.",
+      "meta_fr": "ACA publie une carte d'approbation avec de vrais boutons Valider/Rejeter dans Slack. Un clic est vérifié par HMAC et relance le graphe — toute la boucle de validation peut se dérouler dans Slack.",
+      "intro_en": "A sales team that already lives in Slack should not have to open a separate tool to approve a lead. ACA's Slack alert is not a notification with a link back to the app — it carries real interactive buttons (Block Kit), and clicking one resumes the paused analysis directly.",
+      "intro_fr": "Une équipe commerciale qui vit déjà dans Slack ne devrait pas avoir à ouvrir un outil séparé pour approuver un lead. L'alerte Slack d'ACA n'est pas une notification avec un lien vers l'application — elle porte de vrais boutons interactifs (Block Kit), et cliquer sur l'un d'eux relance directement l'analyse en pause.",
+      "how_en": [
+        "<b>send_approval()</b> posts the analysis summary with \"✅ Valider\"/\"✕ Rejeter\" buttons, the lead's <code>thread_id</code> carried in the button's value.",
+        "A click POSTs to <code>/slack/interactions</code>, which verifies Slack's HMAC-SHA256 request signature — the endpoint <b>fails closed</b> (503) if the signing secret is not configured, rather than accepting an unverified click.",
+        "The same <code>_do_validate</code>/<code>_do_reject</code> helpers back both this endpoint and the REST API, so a Slack approval and a dashboard approval write identically to the audit log and the CRM.",
+        "If Slack is not configured, the alert falls back to a plain e-mail — buttonless, but the human gate still fires."
+      ],
+      "how_fr": [
+        "<b>send_approval()</b> publie le résumé de l'analyse avec les boutons « ✅ Valider »/« ✕ Rejeter », le <code>thread_id</code> du lead porté dans la valeur du bouton.",
+        "Un clic envoie une requête POST vers <code>/slack/interactions</code>, qui vérifie la signature HMAC-SHA256 de Slack — le point d'entrée <b>refuse par défaut</b> (503) si le secret de signature n'est pas configuré, plutôt que d'accepter un clic non vérifié.",
+        "Les mêmes fonctions <code>_do_validate</code>/<code>_do_reject</code> alimentent ce point d'entrée et l'API REST, de sorte qu'une approbation Slack et une approbation depuis le tableau de bord écrivent de façon identique dans le journal d'audit et le CRM.",
+        "Si Slack n'est pas configuré, l'alerte se replie sur un simple e-mail — sans bouton, mais la barrière humaine se déclenche toujours."
+      ],
+      "verified_en": "The Slack alert itself is live-verified (a real message delivered to a real workspace channel). The interactive-button callback loop is covered by 36 automated tests building genuinely HMAC-signed requests — approve, reject, bad signature, unconfigured secret — but has not been exercised against a real Slack app's Interactivity feature, which needs a public HTTPS endpoint this project does not currently have.",
+      "verified_fr": "L'alerte Slack elle-même est vérifiée en direct (un vrai message livré dans un vrai canal de workspace). La boucle de rappel des boutons interactifs est couverte par 36 tests automatisés construisant des requêtes réellement signées en HMAC — approbation, rejet, signature invalide, secret non configuré — mais n'a pas été testée contre la fonctionnalité Interactivity d'une vraie application Slack, qui nécessite un point d'entrée HTTPS public que ce projet n'a pas actuellement.",
+      "source_files": ["aca/integrations/notify.py", "aca/core/slack_verify.py", "aca/api.py"],
+      "verified_live": false,
+      "updated": "2026-08-08"
+    },
+    {
+      "slug": "n8n-integration",
+      "kind": "integration",
+      "title_en": "ACA + n8n — the orchestrator doesn't replace the judgement",
+      "title_fr": "ACA + n8n — l'orchestrateur ne remplace pas le jugement",
+      "meta_en": "ACA exposes 5 outbound webhook events and a REST API built for n8n specifically — attachments, idempotent retries, an async mode and a /health probe. n8n wires ACA into what you already use; it doesn't add the reasoning.",
+      "meta_fr": "ACA expose 5 événements webhook sortants et une API REST conçue spécifiquement pour n8n — pièces jointes, reprises idempotentes, un mode asynchrone et une sonde /health. n8n branche ACA sur ce que vous utilisez déjà ; il n'ajoute pas le raisonnement.",
+      "intro_en": "A common misconception, stated plainly because it shapes how this integration should be evaluated: n8n does not make ACA automatic — ACA is already autonomous up to the validation pause, on its own, via a background poller and a scheduler. What n8n adds is <em>wiring</em>: connecting ACA's events to whatever else a team already runs, without reimplementing ACA's reasoning inside a workflow canvas.",
+      "intro_fr": "Une confusion fréquente, dite ici clairement car elle détermine comment évaluer cette intégration : n8n ne rend pas ACA automatique — ACA est déjà autonome jusqu'à la pause de validation, seul, via un scrutateur en arrière-plan et un planificateur. Ce que n8n ajoute, c'est le <em>câblage</em> : relier les événements d'ACA à tout ce qu'une équipe utilise déjà, sans réimplémenter le raisonnement d'ACA dans un canevas de workflow.",
+      "how_en": [
+        "Five signed outbound events (<code>analysis.paused</code>, <code>analysis.clarification</code>, <code>analysis.routed</code>, <code>lead.validated</code>, <code>lead.rejected</code>) — an n8n workflow becomes event-driven instead of polling on a Schedule node.",
+        "Attachments accepted directly over the API (base64, bounded at 10 files / 20 MB decoded), so a multi-document RFP reaches the same graph n8n triggers as it does through the manual UI.",
+        "A known <code>thread_id</code> returns the existing analysis with <code>already_exists: true</code> — n8n's default HTTP-node retry behaviour cannot trigger a duplicate two-70B-model analysis and a duplicate team notification.",
+        "<code>GET /health</code> makes no external call and leaks no secret — an orchestrator can probe it every few seconds without burning API quota."
+      ],
+      "how_fr": [
+        "Cinq événements sortants signés (<code>analysis.paused</code>, <code>analysis.clarification</code>, <code>analysis.routed</code>, <code>lead.validated</code>, <code>lead.rejected</code>) — un workflow n8n devient piloté par événement plutôt qu'en sondage via un nœud Schedule.",
+        "Les pièces jointes sont acceptées directement via l'API (base64, plafonnées à 10 fichiers / 20 Mo décodés), pour qu'un appel d'offres multi-documents atteigne le même graphe que n8n déclenche que via l'interface manuelle.",
+        "Un <code>thread_id</code> déjà connu renvoie l'analyse existante avec <code>already_exists: true</code> — le comportement de reprise par défaut du nœud HTTP de n8n ne peut donc pas déclencher une analyse en double (deux appels à un modèle 70B) ni une notification en double à l'équipe.",
+        "<code>GET /health</code> n'effectue aucun appel externe et ne révèle aucun secret — un orchestrateur peut le sonder toutes les quelques secondes sans consommer de quota d'API."
+      ],
+      "verified_en": "Every mechanism above is covered by automated tests (attachment bounds rejected before the LLM is ever called, idempotence, the async mode, each webhook firing at the correct moment). Not exercised against a real n8n instance or workflow — none exists for this project; n8n would simply be an HTTP client and webhook subscriber of this API.",
+      "verified_fr": "Chaque mécanisme ci-dessus est couvert par des tests automatisés (limites des pièces jointes rejetées avant même l'appel au LLM, idempotence, mode asynchrone, chaque webhook déclenché au bon moment). Non testé contre une vraie instance ou un vrai workflow n8n — aucun n'existe pour ce projet ; n8n serait simplement un client HTTP et un abonné aux webhooks de cette API.",
+      "source_files": ["aca/api.py", "aca/integrations/webhook.py", "n8n/README.md"],
+      "verified_live": false,
+      "updated": "2026-08-08"
+    },
+    {
+      "slug": "vs-zapier-make",
+      "kind": "comparison",
+      "title_en": "ACA vs. Zapier / Make — the orchestrator isn't the judgement",
+      "title_fr": "ACA contre Zapier / Make — l'orchestrateur n'est pas le jugement",
+      "meta_en": "Zapier and Make move data between apps on a trigger. Neither reads an email, decides what a prospect needs, drafts a reply, or knows when it doesn't know the answer. That reasoning is what ACA adds.",
+      "meta_fr": "Zapier et Make déplacent des données entre applications sur déclencheur. Aucun des deux ne lit un e-mail, ne détermine ce dont un prospect a besoin, ne rédige une réponse, ni ne sait quand il ne connaît pas la réponse. C'est ce raisonnement qu'ACA ajoute.",
+      "intro_en": "\"Can't I just build this in Zapier?\" is a fair question, and the honest answer is: you can wire the plumbing in Zapier, but Zapier will not do the thinking. A Zapier automation is a fixed sequence of steps triggered by an event; it has no judgement about whether a lead is worth a fast reply, no memory of what was said to that sender before, and no way to say \"I don't actually know the answer to this question\" instead of inventing one.",
+      "intro_fr": "« Je ne peux pas juste construire ça dans Zapier ? » est une question légitime, et la réponse honnête est : vous pouvez câbler la plomberie dans Zapier, mais Zapier ne fera pas la réflexion. Une automatisation Zapier est une séquence fixe d'étapes déclenchée par un événement ; elle n'a aucun jugement sur la valeur d'un lead, aucune mémoire de ce qui a été dit à cet expéditeur auparavant, et aucun moyen de dire « je ne connais pas vraiment la réponse à cette question » plutôt que d'en inventer une.",
+      "table_en": [
+        ["", "Zapier / Make", "ACA"],
+        ["Reads and classifies the email", "No — a keyword filter at best", "Yes — a language model, with a confidence score"],
+        ["Researches the sender's company", "No, unless you build and pay for a separate step", "Built in, cached, free-tier"],
+        ["Answers from your own knowledge base", "No", "Yes — hybrid dense + sparse retrieval over your FAQ"],
+        ["Drafts a personalised reply", "No", "Yes, with a self-critique pass before a human sees it"],
+        ["Knows when it doesn't know", "N/A", "Yes — flags the gap instead of guessing"],
+        ["Stops for human approval before acting", "Only if you build that step yourself", "Architectural — cannot be skipped"],
+        ["Where n8n fits", "—", "Optional wiring layer on top — see the n8n integration page"]
+      ],
+      "table_fr": [
+        ["", "Zapier / Make", "ACA"],
+        ["Lit et classe l'e-mail", "Non — un filtre par mot-clé au mieux", "Oui — un modèle de langage, avec un score de confiance"],
+        ["Recherche l'entreprise de l'expéditeur", "Non, sauf à construire et payer une étape séparée", "Intégré, mis en cache, palier gratuit"],
+        ["Répond depuis votre propre base de connaissances", "Non", "Oui — recherche hybride dense + éparse sur votre FAQ"],
+        ["Rédige une réponse personnalisée", "Non", "Oui, avec une passe d'auto-critique avant qu'une personne ne la voie"],
+        ["Sait quand il ne sait pas", "Sans objet", "Oui — signale le manque plutôt que de deviner"],
+        ["S'arrête pour une validation humaine avant d'agir", "Seulement si vous construisez cette étape vous-même", "Architectural — ne peut pas être contourné"],
+        ["Où n8n s'insère", "—", "Une couche de câblage optionnelle par-dessus — voir la page d'intégration n8n"]
+      ],
+      "verified_en": "This is a structural comparison, not a benchmark against a live Zapier account — no such account exists for this project. Every ACA-side claim in the table links to a verified capability described on its own integration or capability page.",
+      "verified_fr": "Ceci est une comparaison structurelle, pas un test contre un compte Zapier réel — aucun compte de ce type n'existe pour ce projet. Chaque affirmation côté ACA du tableau renvoie à une capacité vérifiée décrite sur sa propre page d'intégration ou de capacité.",
+      "source_files": ["aca/core/app.py"],
+      "verified_live": false,
+      "updated": "2026-08-08"
+    },
+    {
+      "slug": "vs-rag-chatbot",
+      "kind": "comparison",
+      "title_en": "ACA vs. a RAG chatbot — answering questions isn't running the workflow",
+      "title_fr": "ACA contre un chatbot RAG — répondre à des questions n'est pas exécuter le flux",
+      "meta_en": "A typical agency RAG chatbot answers questions about your documents. It doesn't classify an inbound lead, enrich it, draft a personalised proposal, self-critique the draft, or stop for a human before acting.",
+      "meta_fr": "Un chatbot RAG d'agence classique répond à des questions sur vos documents. Il ne classe pas un lead entrant, ne l'enrichit pas, ne rédige pas de proposition personnalisée, ne s'auto-critique pas, et ne s'arrête pas pour un humain avant d'agir.",
+      "intro_en": "A \"custom RAG chatbot over your documents\" is the most common thing an AI agency ships, because it is genuinely the easiest thing to build well. It is also a different product from ACA, and the difference is the whole workflow around the single Q&A step.",
+      "intro_fr": "Un « chatbot RAG personnalisé sur vos documents » est la chose la plus fréquemment livrée par une agence IA, parce que c'est réellement la plus simple à bien construire. C'est aussi un produit différent d'ACA, et la différence tient dans tout le flux qui entoure la seule étape de question-réponse.",
+      "table_en": [
+        ["", "Generic RAG chatbot", "ACA"],
+        ["Classifies an inbound lead", "No", "Yes, with a confidence threshold that escalates low-confidence cases to a human"],
+        ["Retrieves from a knowledge base", "Yes — its whole job", "Yes — one worker among several, hybrid dense+sparse"],
+        ["Enriches with company research", "No", "Yes, cached"],
+        ["Drafts a full commercial proposal", "No — answers a question, does not compose a document", "Yes"],
+        ["Self-critiques its own draft", "No", "Yes, capped at one rewrite"],
+        ["Escalates an unanswered question to a human, and stages the web answer for review", "No — usually just says it doesn't know", "Yes — the veille worker + FAQ staging"],
+        ["Writes to a CRM", "No, typically", "Yes, after human approval"],
+        ["Needs a paid vector database", "Often", "No — pgvector optional, an in-memory fallback otherwise"]
+      ],
+      "table_fr": [
+        ["", "Chatbot RAG générique", "ACA"],
+        ["Classe un lead entrant", "Non", "Oui, avec un seuil de confiance qui escalade les cas incertains vers un humain"],
+        ["Récupère depuis une base de connaissances", "Oui — tout son métier", "Oui — un agent parmi d'autres, hybride dense+éparse"],
+        ["Enrichit par une recherche sur l'entreprise", "Non", "Oui, mis en cache"],
+        ["Rédige une proposition commerciale complète", "Non — répond à une question, ne compose pas un document", "Oui"],
+        ["S'auto-critique", "Non", "Oui, plafonné à une réécriture"],
+        ["Escalade une question sans réponse vers un humain, et met la réponse web en attente de validation", "Non — dit généralement juste qu'il ne sait pas", "Oui — l'agent de veille + la mise en attente FAQ"],
+        ["Écrit dans un CRM", "Non, en général", "Oui, après validation humaine"],
+        ["Nécessite une base vectorielle payante", "Souvent", "Non — pgvector optionnel, repli en mémoire sinon"]
+      ],
+      "verified_en": "Structural comparison against the category, drawn from docs/ACA_presentation_source.md. Each ACA-side row is a real, tested capability of this project.",
+      "verified_fr": "Comparaison structurelle avec la catégorie, tirée de docs/ACA_presentation_source.md. Chaque ligne côté ACA est une capacité réelle et testée de ce projet.",
+      "source_files": ["docs/ACA_presentation_source.md", "aca/core/app.py"],
+      "verified_live": false,
+      "updated": "2026-08-08"
+    },
+    {
+      "slug": "vs-hiring-sdr",
+      "kind": "comparison",
+      "title_en": "ACA vs. hiring an SDR — a tool that prepares, not one that decides",
+      "title_fr": "ACA contre l'embauche d'un SDR — un outil qui prépare, pas qui décide",
+      "meta_en": "An SDR reads, qualifies and replies to inbound leads — and costs a salary. ACA does the reading, research and drafting; the deciding stays with your team, at a fraction of the cost of a hire.",
+      "meta_fr": "Un SDR lit, qualifie et répond aux leads entrants — et coûte un salaire. ACA fait la lecture, la recherche et la rédaction ; la décision reste dans votre équipe, pour une fraction du coût d'une embauche.",
+      "intro_en": "The realistic alternative to ACA is usually not another piece of software — it is hiring a junior SDR to triage the inbox. That is a legitimate option, and this page states plainly where ACA is not a substitute for a person, not just where it is cheaper.",
+      "intro_fr": "L'alternative réaliste à ACA n'est généralement pas un autre logiciel — c'est l'embauche d'un SDR junior pour trier la boîte de réception. C'est une option légitime, et cette page dit clairement où ACA ne remplace pas une personne, pas seulement où il coûte moins cher.",
+      "table_en": [
+        ["", "Hiring a junior SDR", "ACA"],
+        ["Cost", "A salary, every month, indefinitely", "1 490 € one-off installation (Solo tier), 0 € software licence"],
+        ["Available outside office hours", "No", "Yes — background intake via a poller, with an intake-window setting"],
+        ["Reads every email at consistent quality", "Depends on the day, the mood, the workload", "Consistent, at the model's own limits"],
+        ["Understands your product deeply on day one", "No — needs training", "No — needs your knowledge base ingested, same idea, faster"],
+        ["Builds real relationships with prospects", "Yes — this is what people are good at", "No — and is not meant to"],
+        ["Makes the final call on what gets sent", "The person, always", "The person, always — this is architectural, not a feature"],
+        ["Scales to a second inbox", "Hire again", "Configuration, not headcount"]
+      ],
+      "table_fr": [
+        ["", "Embaucher un SDR junior", "ACA"],
+        ["Coût", "Un salaire, chaque mois, indéfiniment", "1 490 € d'installation unique (palier Solo), 0 € de licence logicielle"],
+        ["Disponible hors des heures de bureau", "Non", "Oui — réception en arrière-plan via un scrutateur, avec une fenêtre de réception réglable"],
+        ["Lit chaque e-mail avec une qualité constante", "Dépend du jour, de l'humeur, de la charge", "Constant, dans la limite du modèle lui-même"],
+        ["Comprend votre produit en profondeur dès le premier jour", "Non — nécessite une formation", "Non — nécessite l'ingestion de votre base de connaissances, même principe, plus rapide"],
+        ["Construit de vraies relations avec les prospects", "Oui — c'est ce que les gens font de mieux", "Non — et ce n'est pas son rôle"],
+        ["Décide en dernier ressort de ce qui part", "La personne, toujours", "La personne, toujours — c'est architectural, pas une fonctionnalité"],
+        ["Passe à l'échelle sur une seconde boîte mail", "Réembaucher", "Une configuration, pas un effectif"]
+      ],
+      "verified_en": "Cost figures are the real numbers on this site's pricing page. Capability rows describe what this codebase actually does, each covered by the project's test suite.",
+      "verified_fr": "Les chiffres de coût sont les prix réels de la page tarifs de ce site. Les lignes de capacité décrivent ce que ce code fait réellement, chacune couverte par la suite de tests du projet.",
+      "source_files": ["static/landing.html", "aca/core/intake_window.py"],
+      "verified_live": false,
+      "updated": "2026-08-08"
+    },
+    {
+      "slug": "glossary-human-in-the-loop",
+      "kind": "glossary",
+      "title_en": "What is human-in-the-loop AI?",
+      "title_fr": "Qu'est-ce que l'IA « human-in-the-loop » ?",
+      "meta_en": "Human-in-the-loop means a system stops and waits for a person before an action with consequences. A worked definition, illustrated with a real implementation rather than a diagram.",
+      "meta_fr": "Human-in-the-loop signifie qu'un système s'arrête et attend une personne avant une action ayant des conséquences. Une définition construite, illustrée par une implémentation réelle plutôt que par un schéma.",
+      "body_en": "<p><b>Human-in-the-loop</b> (HITL) describes an AI system architected so that a person's approval is a required step before a consequential action — not an optional review someone could skip, but a point the system genuinely cannot pass without a person acting.</p><p>The distinction that matters in practice is between a system that <em>can be checked</em> and one that <em>must be checked</em>. Many products describe themselves as human-in-the-loop because a person <em>could</em> review the output before it's used elsewhere. That is oversight, not a loop — nothing stops the system from proceeding if nobody looks.</p><p>A concrete example, from this project: ACA's graph is built with LangGraph's <code>interrupt_before=[\"action\"]</code>, which is a structural property of the compiled graph, not a check somewhere in application code. The graph physically cannot reach its CRM-writing step without a person resuming it. In demo mode, a separate <code>guard_write()</code> function goes further and <em>raises an exception</em> rather than silently skipping the write — because for a safety mechanism, \"absent = skipped\" is the wrong default; a silent no-op there would be exactly what a human-in-the-loop system must never do.</p><p>A second, subtler form appears mid-process rather than at the end: ACA also pauses to ask a clarifying question when a lead's stated need is too ambiguous to act on (a dynamic <code>interrupt()</code>, resumed with the human's answer). Human-in-the-loop is not only the final gate — it can be any point where the system's confidence genuinely runs out.</p>",
+      "body_fr": "<p><b>Human-in-the-loop</b> (HITL) désigne un système d'IA conçu pour que l'approbation d'une personne soit une étape obligatoire avant une action ayant des conséquences — pas une relecture facultative que quelqu'un pourrait sauter, mais un point que le système ne peut réellement pas franchir sans qu'une personne agisse.</p><p>La distinction qui compte en pratique est entre un système qui <em>peut être vérifié</em> et un système qui <em>doit être vérifié</em>. De nombreux produits se décrivent comme human-in-the-loop parce qu'une personne <em>pourrait</em> relire le résultat avant qu'il ne serve ailleurs. C'est de la supervision, pas une boucle — rien n'empêche le système d'avancer si personne ne regarde.</p><p>Un exemple concret, tiré de ce projet : le graphe d'ACA est construit avec <code>interrupt_before=[\"action\"]</code> de LangGraph, une propriété structurelle du graphe compilé, pas une vérification quelque part dans le code applicatif. Le graphe ne peut physiquement pas atteindre son étape d'écriture CRM sans qu'une personne le relance. En mode démonstration, une fonction séparée <code>guard_write()</code> va plus loin et <em>lève une exception</em> plutôt que d'ignorer silencieusement l'écriture — car pour un mécanisme de sécurité, « absent = ignoré » est le mauvais défaut ; une absence silencieuse serait précisément ce qu'un système human-in-the-loop ne doit jamais faire.</p><p>Une seconde forme, plus subtile, apparaît en cours de traitement plutôt qu'à la fin : ACA s'arrête aussi pour poser une question de clarification quand le besoin exprimé d'un lead est trop ambigu pour agir (un <code>interrupt()</code> dynamique, relancé avec la réponse humaine). Le human-in-the-loop n'est pas seulement la barrière finale — cela peut être tout point où la confiance du système s'épuise réellement.</p>",
+      "verified_en": "Both mechanisms described are exercised by the project's automated test suite (interrupt-before-action, the demo-mode guard raising, and the dynamic clarification interrupt resuming correctly).",
+      "verified_fr": "Les deux mécanismes décrits sont couverts par la suite de tests automatisés du projet (interruption avant l'action, la garde du mode démonstration qui lève une exception, et l'interruption dynamique de clarification relancée correctement).",
+      "source_files": ["aca/core/app.py", "aca/core/demo.py"],
+      "verified_live": false,
+      "updated": "2026-08-08"
+    },
+    {
+      "slug": "glossary-agentic-workflow",
+      "kind": "glossary",
+      "title_en": "What is an agentic workflow?",
+      "title_fr": "Qu'est-ce qu'un flux agentique ?",
+      "meta_en": "An agentic workflow is a pipeline where a language model decides what happens next, not just what to say. A worked definition against a real supervisor-and-worker implementation.",
+      "meta_fr": "Un flux agentique est un pipeline où un modèle de langage décide de ce qui se passe ensuite, pas seulement de ce qu'il faut dire. Une définition construite face à une implémentation réelle de superviseur et d'agents.",
+      "body_en": "<p>An <b>agentic workflow</b> is a pipeline in which a language model participates in deciding <em>what happens next</em>, not merely what text to produce. The test that separates it from a plain \"call the model and use the output\" script: does control flow depend on a model's judgement at runtime, or is every step fixed in advance regardless of what the model says?</p><p>A single prompt-and-response call is not agentic, even a very good one. Feeding a chatbot's output into the next fixed step is not agentic either — that is a pipeline with a language model in it, not a workflow the model steers.</p><p>ACA's implementation is a concrete instance: a <b>supervisor</b> node (a small model) reads what has been done so far and decides which specialised <em>worker</em> to call next — <code>enrichissement</code> (company research), <code>connaissance</code> (retrieval from a knowledge base), <code>veille</code> (a web-search fallback), or <code>stratege</code> (the drafting model) — from a real decision space, not a fixed sequence. Deterministic guardrails narrow that space where a choice genuinely shouldn't be left to the model (a spam email never reaches the drafting worker; the drafting worker is always the final step) — agentic does not mean unconstrained, it means the model's judgement genuinely changes the path taken.</p>",
+      "body_fr": "<p>Un <b>flux agentique</b> est un pipeline dans lequel un modèle de langage participe à la décision de <em>ce qui se passe ensuite</em>, pas seulement du texte à produire. Le test qui le distingue d'un simple script « appeler le modèle et utiliser le résultat » : le déroulement dépend-il du jugement d'un modèle à l'exécution, ou chaque étape est-elle fixée d'avance quoi que dise le modèle ?</p><p>Un seul appel question-réponse n'est pas agentique, même excellent. Faire passer la sortie d'un chatbot dans l'étape fixe suivante ne l'est pas non plus — c'est un pipeline qui contient un modèle de langage, pas un flux que le modèle pilote.</p><p>L'implémentation d'ACA en est un exemple concret : un nœud <b>superviseur</b> (un petit modèle) lit ce qui a déjà été fait et décide quel <em>agent</em> spécialisé appeler ensuite — <code>enrichissement</code> (recherche sur l'entreprise), <code>connaissance</code> (récupération depuis une base de connaissances), <code>veille</code> (repli par recherche web), ou <code>stratege</code> (le modèle de rédaction) — depuis un espace de décision réel, pas une séquence fixe. Des garde-fous déterministes restreignent cet espace là où un choix ne devrait vraiment pas être laissé au modèle (un e-mail de spam n'atteint jamais l'agent de rédaction ; l'agent de rédaction est toujours la dernière étape) — agentique ne veut pas dire sans contrainte, cela veut dire que le jugement du modèle change réellement le chemin emprunté.</p>",
+      "verified_en": "The supervisor's routing logic and its deterministic guardrails are exercised by unit tests covering each branch (SPAM/AUTRE/SUPPORT skip straight to FINISH, veille is forced after an empty connaissance result, stratege is never repeated).",
+      "verified_fr": "La logique de routage du superviseur et ses garde-fous déterministes sont couverts par des tests unitaires sur chaque branche (SPAM/AUTRE/SUPPORT vont directement à FINISH, veille est forcé après un résultat vide de connaissance, stratege n'est jamais répété).",
+      "source_files": ["aca/core/app.py"],
+      "verified_live": false,
+      "updated": "2026-08-08"
+    },
+    {
+      "slug": "glossary-supervisor-agent",
+      "kind": "glossary",
+      "title_en": "What is a supervisor agent?",
+      "title_fr": "Qu'est-ce qu'un agent superviseur ?",
+      "meta_en": "A supervisor agent is a model that routes work to specialised workers instead of doing everything itself. A worked definition against ACA's own supervisor node.",
+      "meta_fr": "Un agent superviseur est un modèle qui répartit le travail entre des agents spécialisés plutôt que de tout faire lui-même. Une définition construite face au nœud superviseur d'ACA.",
+      "body_en": "<p>A <b>supervisor agent</b> is a model whose job is to decide which of several specialised <em>worker</em> agents should act next, rather than performing the task itself. The pattern trades one large, general-purpose model doing everything for several smaller, focused models each doing one thing — plus a coordinator deciding the order.</p><p>Why this beats one model doing everything: a worker prompt written for exactly one job (research a company, retrieve from a knowledge base, draft a proposal) can be shorter, more testable, and easier to catch regressing than one enormous prompt trying to do all four at once — and a smaller, cheaper model can often do the routing decision itself, reserving the larger, more expensive model for the step that actually needs it.</p><p>In ACA, the supervisor runs on a small 8-billion-parameter model and picks the next worker — enrichment, knowledge retrieval, or drafting — from what has completed so far, appending its reasoning to a visible log a human can read before approving anything. The drafting step itself runs on a larger 70-billion-parameter model, reserved for the one task that genuinely needs it. Every worker returns control to the supervisor when done, except the drafting worker, which always goes to a self-critique step next — the one edge in the graph that is fixed rather than decided, because drafting is deliberately always the last worker to run.</p>",
+      "body_fr": "<p>Un <b>agent superviseur</b> est un modèle dont le rôle est de décider lequel de plusieurs agents <em>spécialisés</em> doit agir ensuite, plutôt que d'exécuter la tâche lui-même. Ce schéma échange un grand modèle généraliste faisant tout contre plusieurs modèles plus petits et spécialisés, chacun faisant une chose — plus un coordinateur qui décide de l'ordre.</p><p>Pourquoi c'est préférable à un seul modèle qui fait tout : une consigne d'agent écrite pour exactement un métier (rechercher une entreprise, récupérer depuis une base de connaissances, rédiger une proposition) peut être plus courte, plus testable, et plus facile à surveiller qu'une consigne unique et énorme essayant de faire les quatre à la fois — et un modèle plus petit et moins coûteux peut souvent assurer lui-même la décision de routage, réservant le modèle plus grand et plus coûteux à l'étape qui en a réellement besoin.</p><p>Dans ACA, le superviseur tourne sur un petit modèle à 8 milliards de paramètres et choisit l'agent suivant — enrichissement, récupération de connaissances, ou rédaction — à partir de ce qui a déjà été fait, en ajoutant son raisonnement à un journal visible qu'une personne peut lire avant de valider quoi que ce soit. L'étape de rédaction elle-même tourne sur un modèle plus grand à 70 milliards de paramètres, réservé à la seule tâche qui en a réellement besoin. Chaque agent rend la main au superviseur une fois terminé, sauf l'agent de rédaction, qui passe toujours ensuite à une étape d'auto-critique — la seule arête du graphe qui est fixe plutôt que décidée, car la rédaction est délibérément toujours le dernier agent à s'exécuter.</p>",
+      "verified_en": "The supervisor's model tier, its guardrails, and the fixed drafting-to-reflection edge are all directly readable in the compiled graph and covered by the project's graph-topology tests.",
+      "verified_fr": "Le niveau de modèle du superviseur, ses garde-fous, et l'arête fixe rédaction-vers-réflexion sont tous directement lisibles dans le graphe compilé et couverts par les tests de topologie du graphe du projet.",
+      "source_files": ["aca/core/app.py", "aca/core/graph_topology.py"],
+      "verified_live": false,
+      "updated": "2026-08-08"
+    }
+  ]
+}

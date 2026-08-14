@@ -24,44 +24,31 @@ Les lignes écrites avant cette migration n'ont pas d'empreinte : `verify_chain(
 « héritées, non chaînées » et ne les signale jamais comme falsifiées — un journal antérieur au
 mécanisme n'est pas une preuve de fraude.
 """
-import hashlib
-import hmac
 import os
 import sqlite3
 from datetime import datetime
 from .sqlite_retry import with_sqlite_retry
+from .tamper_chain import chain_hash
 from aca.core.tenant import current_org_id
 
 DB_PATH = os.getenv("ACA_AUDIT_DB", "data/audit.sqlite")
 
-# Séparateur d'unité ASCII (0x1F) : jamais présent dans une adresse, un nom ou une classification,
-# donc deux lignes différentes ne peuvent pas produire la même chaîne canonique par concaténation
-# ambiguë (« ab | c » vs « a | bc »).
-_FIELD_SEPARATOR = "\x1f"
-
-
-def _digest(payload: str) -> str:
-    """
-    Empreinte d'une ligne : HMAC-SHA256 si `ACA_AUDIT_HMAC_KEY` est réglée, SHA-256 sinon.
-
-    Clé lue dynamiquement (jamais figée à l'import — même leçon que `DATABASE_URL`/`ACA_ORG_ID`
-    ailleurs dans le projet) : elle peut être injectée par un `load_dotenv()` postérieur au premier
-    import de ce module.
-    """
-    key = os.getenv("ACA_AUDIT_HMAC_KEY")
-    if key:
-        return hmac.new(key.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
 
 def _row_hash(prev_hash: str, thread_id: str, validated_by: str, classification: str,
               sender: str, validated_at: str, org_id: str) -> str:
-    """Empreinte chaînée d'une ligne : dépend de son contenu ET de l'empreinte de la précédente."""
-    payload = _FIELD_SEPARATOR.join([
-        prev_hash or "", thread_id or "", validated_by or "", classification or "",
+    """
+    Empreinte chaînée d'une ligne : dépend de son contenu ET de l'empreinte de la précédente.
+
+    Le calcul lui-même (séparateur `\\x1f`, choix SHA-256/HMAC, lecture dynamique de la clé) vit
+    désormais dans [tamper_chain.py](aca/storage/tamper_chain.py), partagé avec le journal
+    d'activité (§17) qui avait besoin de la même garantie. L'ordre des champs ci-dessous EST le
+    contrat de chaînage de cette table : le changer invaliderait toutes les empreintes déjà
+    écrites, qui apparaîtraient alors comme falsifiées.
+    """
+    return chain_hash(prev_hash, (
+        thread_id or "", validated_by or "", classification or "",
         sender or "", validated_at or "", org_id or "",
-    ])
-    return _digest(payload)
+    ))
 
 
 def _connect() -> sqlite3.Connection:

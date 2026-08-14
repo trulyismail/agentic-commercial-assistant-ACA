@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What is an agentic workflow?</title>
+<meta name="description" content="An agentic workflow is a pipeline where a language model decides what happens next, not just what to say. A worked definition against a real supervisor-and-worker implementation.">
+<link rel="canonical" href="https://acami.example/seo/glossary-agentic-workflow.html">
+<style>
+:root{--paper:#fdfdfd;--ink:#12171c;--ink-2:#4b5560;--ink-3:#636363;--rule:#e3e3e3;
+--primary:#125e6b;--accent:#b4622a;--radius:10px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+font-family:Figtree,Inter,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+line-height:1.6}
+.wrap{max-width:760px;margin:0 auto;padding:48px 24px 96px}
+nav{border-bottom:1px solid var(--rule);padding:16px 24px}
+nav a{color:var(--ink);text-decoration:none;font-weight:600;font-size:.9rem}
+nav a.back{color:var(--ink-2);font-weight:500;float:right}
+h1{font-family:'Instrument Serif',Georgia,serif;font-size:2.1rem;line-height:1.15;margin:.4em 0 .3em}
+h2{font-size:1.2rem;margin-top:2.2em}
+.kicker{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.72rem;letter-spacing:.08em;
+text-transform:uppercase;color:var(--primary)}
+.lede{color:var(--ink-2);font-size:1.05rem;max-width:60ch}
+p{max-width:68ch}
+code{background:#f1f4f5;padding:.1em .35em;border-radius:4px;font-size:.9em}
+ol,ul{max-width:66ch;padding-left:1.3em}
+li{margin-bottom:.6em}
+table{border-collapse:collapse;width:100%;margin:1.4em 0;font-size:.92rem}
+th,td{border:1px solid var(--rule);padding:.55em .7em;text-align:left;vertical-align:top}
+th{background:#f6f8f8;font-weight:600}
+.verified{border-left:3px solid var(--primary);padding:.2em 0 .2em 1em;margin:2em 0;
+color:var(--ink-2);font-size:.92rem}
+.verified.live{border-left-color:var(--accent)}
+.sources{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.78rem;color:var(--ink-3)}
+.sources a{color:inherit}
+footer{border-top:1px solid var(--rule);padding:32px 24px;text-align:center;
+color:var(--ink-3);font-size:.82rem}
+footer a{color:inherit}
+</style>
+</head>
+<body>
+<nav><a href="../landing.html">acami</a><a class="back" href="../landing.html">&larr; Back to acami.com</a></nav>
+<main class="wrap">
+<p class="kicker">Glossary</p>
+<h1>What is an agentic workflow?</h1>
+<p>An <b>agentic workflow</b> is a pipeline in which a language model participates in deciding <em>what happens next</em>, not merely what text to produce. The test that separates it from a plain "call the model and use the output" script: does control flow depend on a model's judgement at runtime, or is every step fixed in advance regardless of what the model says?</p><p>A single prompt-and-response call is not agentic, even a very good one. Feeding a chatbot's output into the next fixed step is not agentic either — that is a pipeline with a language model in it, not a workflow the model steers.</p><p>ACA's implementation is a concrete instance: a <b>supervisor</b> node (a small model) reads what has been done so far and decides which specialised <em>worker</em> to call next — <code>enrichissement</code> (company research), <code>connaissance</code> (retrieval from a knowledge base), <code>veille</code> (a web-search fallback), or <code>stratege</code> (the drafting model) — from a real decision space, not a fixed sequence. Deterministic guardrails narrow that space where a choice genuinely shouldn't be left to the model (a spam email never reaches the drafting worker; the drafting worker is always the final step) — agentic does not mean unconstrained, it means the model's judgement genuinely changes the path taken.</p>
+<div class="verified">The supervisor's routing logic and its deterministic guardrails are exercised by unit tests covering each branch (SPAM/AUTRE/SUPPORT skip straight to FINISH, veille is forced after an empty connaissance result, stratege is never repeated).</div>
+<p class="sources">Sources : <code>aca/core/app.py</code><br>Updated : 2026-08-08</p>
+<p><a href="../seo/glossary-agentic-workflow.fr.html">Version française</a></p>
+</main>
+<footer>acami — AI agency. <a href="../legal.html#privacy">Privacy</a> &middot; <a href="../legal.html#terms">Terms</a></footer>
+</body>
+</html>

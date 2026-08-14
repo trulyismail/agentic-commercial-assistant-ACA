@@ -3,6 +3,9 @@ venv/
 
 # Secrets — NE JAMAIS committer les clés API
 .env
+.env.*
+# ... mais le modèle documenté, lui, DOIT être versionné (§16.2)
+!.env.example
 credentials/
 
 # Cache Python
@@ -22,3 +25,17 @@ __pycache__/
 # Checkpointer LangGraph (persistance des analyses en attente de validation)
 *.sqlite
 *.sqlite-journal
+# Le dossier lui-même : les règles ci-dessus couvrent les fichiers, pas le répertoire ni ses
+# éventuels artefacts annexes (8 registres SQLite y vivent — cf. .env.example §8).
+data/
+
+# Dépendances et build du dashboard Next.js (parqué, §12bis) — dashboard/.gitignore les couvre
+# déjà, répété ici pour qu'un `git add -A` depuis la racine ne puisse pas les happer.
+node_modules/
+.next/
+
+# Artefacts de travail à la racine — trois pages HTML sauvegardées depuis le navigateur et trois
+# charges utiles de démonstration s'y étaient accumulées (§16.2.3), sans qu'aucun code ne les
+# référence. Elles polluaient la première impression du dépôt.
+/*.html
+/seed_*.json

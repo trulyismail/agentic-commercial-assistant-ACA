@@ -1,0 +1,108 @@
+# Les deux paliers de déploiement d'ACA (§16.0 / §16.1.5 de docs/ACAM_roadmap.md).
+#
+#   docker compose --profile solo up          → API + interface + poller + planificateur (SANS n8n)
+#   docker compose --profile enterprise up    → idem + n8n
+#
+# C'est la démonstration concrète que **n8n est optionnel** : les deux paliers font tourner la même
+# image, le même code, la même API. On retire l'orchestrateur en changeant un mot.
+#
+# Le palier Solo n'est PAS un mode dégradé « à boutons » : le poller ingère Gmail et exécute le
+# graphe 24/7, le planificateur passe les relances et la purge RGPD. À la connexion, tout le travail
+# lourd est déjà fait — il ne reste qu'à cliquer « Valider ». n8n n'apporte pas l'automatisation,
+# il apporte l'orchestration avec d'AUTRES systèmes.
+#
+# Pour lancer le palier Solo SANS Docker (développement, démo rapide) : `python scripts/run_solo.py`.
+# Contrainte 0 € respectée (§11.5) : image n8n community edition, jamais n8n Cloud (payant).
+
+x-aca-common: &aca-common
+  build: .
+  image: aca:latest
+  env_file: [.env]
+  volumes:
+    # Registres SQLite (file d'attente, audit, journal d'activité, analytics, planificateur,
+    # comptes, réglages, checkpoints) : un volume nommé, sinon valider un lead puis redémarrer
+    # perdrait le journal d'audit — et depuis §17 la chaîne d'empreintes du journal d'activité, dont
+    # la disparition ressemblerait à une falsification.
+    - aca-data:/app/data
+    # Identifiants Google en LECTURE SEULE, montés et jamais copiés dans l'image (cf. Dockerfile).
+    - ./credentials:/app/credentials:ro
+  restart: unless-stopped
+
+services:
+  api:
+    <<: *aca-common
+    profiles: [solo, enterprise]
+    ports:
+      # Boucle locale uniquement. Exposer publiquement demande TLS + `ACA_API_KEY` obligatoire :
+      # voir docs/DEPLOYMENT_HARDENING.md, et `ACA_ENV=production` refusera de démarrer sans.
+      - "127.0.0.1:8000:8000"
+    command: ["uvicorn", "aca.api:api", "--host", "0.0.0.0", "--port", "8000"]
+
+  ui:
+    <<: *aca-common
+    profiles: [solo, enterprise]
+    ports:
+      - "127.0.0.1:8501:8501"
+    command:
+      - streamlit
+      - run
+      - ui.py
+      - --server.port=8501
+      - --server.address=0.0.0.0
+      - --browser.gatherUsageStats=false
+
+  # ── Les deux services qui rendent le palier Solo autonome ───────────────────────────────────
+  poller:
+    <<: *aca-common
+    profiles: [solo, enterprise]
+    # Ingestion Gmail + traitement passif 24/7. Ne valide jamais : le graphe s'arrête à la pause
+    # humaine, exactement comme le flux manuel.
+    command: ["python", "-m", "aca.core.poller"]
+    depends_on: [api]
+
+  scheduler:
+    <<: *aca-common
+    profiles: [solo, enterprise]
+    # Relances commerciales, purge RGPD, maintenance de la file (§16.0).
+    command: ["python", "-m", "aca.core.scheduler"]
+    depends_on: [api]
+
+  # ── Palier Enterprise uniquement ────────────────────────────────────────────────────────────
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest   # community edition — gratuite (cf. §11.5)
+    profiles: [enterprise]
+    ports:
+      - "127.0.0.1:5678:5678"
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - GENERIC_TIMEZONE=Europe/Paris
+      # n8n joint l'API par le nom de service du réseau compose, pas par localhost.
+      - ACA_API_URL=http://api:8000
+      # La clé d'API, transmise depuis le `.env` (jamais écrite en dur ici : ce fichier est
+      # versionné). Sans elle, les nœuds HTTP du workflow envoient un en-tête `X-API-Key` vide et
+      # l'API répond 401 dès que `ACA_API_KEY` est configurée côté ACA — panne d'autant plus
+      # déroutante que le workflow, lui, paraît parfaitement correct.
+      - ACA_API_KEY=${ACA_API_KEY:-}
+      # Le nœud « Alerter l'équipe (Slack) » du workflow poste sur ce webhook entrant — le MÊME que
+      # celui de notify.py, pour n'avoir ni second canal ni identifiant n8n à créer. Absente, le
+      # nœud échoue sans faire tomber le workflow (`onError: continueRegularOutput`).
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
+      # Destinataire du lien d'approbation envoyé par le nœud « Envoyer le lien d'approbation ».
+      # Sans elle, personne n'est prévenu qu'un lead attend une décision — le formulaire reste
+      # néanmoins accessible depuis la liste des exécutions n8n.
+      - NOTIFY_EMAIL=${NOTIFY_EMAIL:-}
+      # `$env` est accessible dans les expressions n8n par défaut ; on l'affirme explicitement pour
+      # que le workflow ne dépende pas d'un défaut susceptible de changer d'une version à l'autre.
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+    volumes:
+      - n8n-data:/home/node/.n8n
+      # Le workflow prêt à importer est monté en lecture seule : dans l'interface n8n,
+      # Workflows → Import from File → /workflows/aca_workflow.json (cf. n8n/README.md).
+      - ./n8n:/workflows:ro
+    depends_on: [api]
+    restart: unless-stopped
+
+volumes:
+  aca-data:
+  n8n-data:

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What is a supervisor agent?</title>
+<meta name="description" content="A supervisor agent is a model that routes work to specialised workers instead of doing everything itself. A worked definition against ACA&#x27;s own supervisor node.">
+<link rel="canonical" href="https://acami.example/seo/glossary-supervisor-agent.html">
+<style>
+:root{--paper:#fdfdfd;--ink:#12171c;--ink-2:#4b5560;--ink-3:#636363;--rule:#e3e3e3;
+--primary:#125e6b;--accent:#b4622a;--radius:10px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+font-family:Figtree,Inter,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+line-height:1.6}
+.wrap{max-width:760px;margin:0 auto;padding:48px 24px 96px}
+nav{border-bottom:1px solid var(--rule);padding:16px 24px}
+nav a{color:var(--ink);text-decoration:none;font-weight:600;font-size:.9rem}
+nav a.back{color:var(--ink-2);font-weight:500;float:right}
+h1{font-family:'Instrument Serif',Georgia,serif;font-size:2.1rem;line-height:1.15;margin:.4em 0 .3em}
+h2{font-size:1.2rem;margin-top:2.2em}
+.kicker{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.72rem;letter-spacing:.08em;
+text-transform:uppercase;color:var(--primary)}
+.lede{color:var(--ink-2);font-size:1.05rem;max-width:60ch}
+p{max-width:68ch}
+code{background:#f1f4f5;padding:.1em .35em;border-radius:4px;font-size:.9em}
+ol,ul{max-width:66ch;padding-left:1.3em}
+li{margin-bottom:.6em}
+table{border-collapse:collapse;width:100%;margin:1.4em 0;font-size:.92rem}
+th,td{border:1px solid var(--rule);padding:.55em .7em;text-align:left;vertical-align:top}
+th{background:#f6f8f8;font-weight:600}
+.verified{border-left:3px solid var(--primary);padding:.2em 0 .2em 1em;margin:2em 0;
+color:var(--ink-2);font-size:.92rem}
+.verified.live{border-left-color:var(--accent)}
+.sources{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.78rem;color:var(--ink-3)}
+.sources a{color:inherit}
+footer{border-top:1px solid var(--rule);padding:32px 24px;text-align:center;
+color:var(--ink-3);font-size:.82rem}
+footer a{color:inherit}
+</style>
+</head>
+<body>
+<nav><a href="../landing.html">acami</a><a class="back" href="../landing.html">&larr; Back to acami.com</a></nav>
+<main class="wrap">
+<p class="kicker">Glossary</p>
+<h1>What is a supervisor agent?</h1>
+<p>A <b>supervisor agent</b> is a model whose job is to decide which of several specialised <em>worker</em> agents should act next, rather than performing the task itself. The pattern trades one large, general-purpose model doing everything for several smaller, focused models each doing one thing — plus a coordinator deciding the order.</p><p>Why this beats one model doing everything: a worker prompt written for exactly one job (research a company, retrieve from a knowledge base, draft a proposal) can be shorter, more testable, and easier to catch regressing than one enormous prompt trying to do all four at once — and a smaller, cheaper model can often do the routing decision itself, reserving the larger, more expensive model for the step that actually needs it.</p><p>In ACA, the supervisor runs on a small 8-billion-parameter model and picks the next worker — enrichment, knowledge retrieval, or drafting — from what has completed so far, appending its reasoning to a visible log a human can read before approving anything. The drafting step itself runs on a larger 70-billion-parameter model, reserved for the one task that genuinely needs it. Every worker returns control to the supervisor when done, except the drafting worker, which always goes to a self-critique step next — the one edge in the graph that is fixed rather than decided, because drafting is deliberately always the last worker to run.</p>
+<div class="verified">The supervisor's model tier, its guardrails, and the fixed drafting-to-reflection edge are all directly readable in the compiled graph and covered by the project's graph-topology tests.</div>
+<p class="sources">Sources : <code>aca/core/app.py</code>, <code>aca/core/graph_topology.py</code><br>Updated : 2026-08-08</p>
+<p><a href="../seo/glossary-supervisor-agent.fr.html">Version française</a></p>
+</main>
+<footer>acami — AI agency. <a href="../legal.html#privacy">Privacy</a> &middot; <a href="../legal.html#terms">Terms</a></footer>
+</body>
+</html>

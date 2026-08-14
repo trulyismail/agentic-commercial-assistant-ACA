@@ -32,6 +32,18 @@ _ENV_OVERRIDES = {
     "SUPPORT_SLACK_WEBHOOK_URL": "",
     "HR_EMAIL": "",
     "HR_SLACK_WEBHOOK_URL": "",
+    # §16.1.2 — le SEUL canal sortant qui avait été oublié ici, et le plus coûteux à oublier :
+    # `webhook.emit()` est appelé depuis les nœuds du graphe, donc depuis presque tous les tests
+    # d'intégration. Sans ces deux lignes, `ACA_WEBHOOK_URL` du `.env` réel restait actif pendant
+    # la suite et chaque exécution de pytest expédiait de VRAIS événements à l'instance n8n de
+    # production — constaté le 2026-07-29 : une rafale de 10 exécutions `analysis.paused` portant
+    # de faux prospects (« jean@entreprise.fr ») dans le journal n8n Cloud. Inoffensif tant que le
+    # workflow s'arrêtait à l'alerte ; depuis qu'il porte la moitié « validation », le même
+    # incident enverrait des e-mails d'approbation et laisserait autant d'exécutions en attente
+    # pour toujours. `test_webhook.py`/`test_api_n8n.py` posent leur propre valeur par monkeypatch
+    # et ne sont donc pas affectés.
+    "ACA_WEBHOOK_URL": "",                   # → webhook.emit() no-op silencieux, comme notify.send()
+    "ACA_WEBHOOK_SECRET": "",
     "HUBSPOT_ACCESS_TOKEN": "",              # → hubspot.is_enabled() False
     "STRIPE_API_KEY": "",                    # → billing.is_enabled() False
     "CALENDLY_URL": "",                      # → pas de lien ajouté par défaut (test dédié le simule)
@@ -50,8 +62,39 @@ _ENV_OVERRIDES = {
     "ACA_QUEUE_DB": os.path.join(_TMP_DIR, "queue.sqlite"),
     "ACA_ANALYTICS_DB": os.path.join(_TMP_DIR, "analytics.sqlite"),
     "ACA_AUDIT_DB": os.path.join(_TMP_DIR, "audit.sqlite"),
+    # §17 — journal d'activité. Sans cette ligne, la suite écrirait dans le VRAI
+    # `data/activity.sqlite` : des connexions et des validations fictives viendraient se mêler aux
+    # traces réelles, dans le journal même dont l'intérêt est d'être digne de foi.
+    "ACA_ACTIVITY_DB": os.path.join(_TMP_DIR, "activity.sqlite"),
     "ACA_FOLLOWUP_DB": os.path.join(_TMP_DIR, "followup.sqlite"),
     "ACA_CONFIG_DB": os.path.join(_TMP_DIR, "config.sqlite"),
+    "ACA_SCHEDULE_DB": os.path.join(_TMP_DIR, "schedule.sqlite"),
+    # §19 : sans cette redirection, un test qui programme un envoi écrirait dans le vrai
+    # `data/tasks.sqlite` — et le planificateur de la machine de développement finirait par
+    # exécuter une tâche née d'un test, c'est-à-dire par envoyer un e-mail pour de bon.
+    "ACA_TASK_DB": os.path.join(_TMP_DIR, "tasks.sqlite"),
+    # §20 : même raison que `ACA_TASK_DB` ci-dessus. Sans cette redirection, un test qui crée une
+    # demande de relecture écrirait dans le vrai `data/reviews.sqlite`, et un administrateur
+    # verrait apparaître à sa connexion des demandes fictives portant de faux prospects — dans
+    # l'écran même dont l'intérêt est de ne montrer que du travail réel.
+    "ACA_REVIEW_DB": os.path.join(_TMP_DIR, "reviews.sqlite"),
+    # §24 : redirigée pour la même raison que les précédentes, avec un enjeu qui lui est propre —
+    # une ligne écrite ici autorise un navigateur à SAUTER le second facteur. Un test qui en
+    # créerait une dans la vraie base affaiblirait l'authentification de l'installation réelle,
+    # ce qu'aucune suite ne doit pouvoir faire par effet de bord.
+    "ACA_DEVICE_TRUST_DB": os.path.join(_TMP_DIR, "device_trust.sqlite"),
+    # Répertoire des rapports mensuels (§20). Redirigé pour la même raison que les bases : le
+    # travail planifié `report` écrit un PDF sur disque, et une exécution de la suite ne doit pas
+    # déposer de document dans `data/reports/` — ni, pire, en écraser un vrai.
+    "ACA_REPORT_DIR": os.path.join(_TMP_DIR, "reports"),
+    # §29 — le même piège que `ACA_WEBHOOK_URL` ci-dessus, sous une autre forme : `branding.py` lit
+    # `BRAND_NAME` dynamiquement depuis l'environnement (jamais figé à l'import, par contrat), donc
+    # une vraie personnalisation posée dans le `.env` réel de la machine de développement (ici,
+    # `BRAND_NAME=acami`, §29) fuiterait dans `branding.resolve()` dès qu'un module `aca.*` important
+    # `load_dotenv()` (app.py, sheets.py...) s'exécute pendant la suite — faisant échouer
+    # `test_customised_tokens_ne_liste_que_les_ecarts` selon l'ORDRE de collecte des tests, un défaut
+    # découvert précisément ainsi (passait isolé, échouait dans la suite complète).
+    "BRAND_NAME": "",
 }
 os.environ.update(_ENV_OVERRIDES)
 

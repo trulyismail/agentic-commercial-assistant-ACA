@@ -2,6 +2,7 @@ import os
 import json
 import operator
 import sqlite3
+import uuid
 from typing import TypedDict, Optional, Annotated, Literal
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
@@ -11,9 +12,9 @@ from langgraph.types import interrupt, RetryPolicy, default_retry_on
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_groq import ChatGroq
-from aca.integrations import sheets, notify, hubspot
+from aca.integrations import sheets, notify, hubspot, webhook
 from aca.agents import enrichment, veille
-from aca.core import prompt_guard, risk_scan
+from aca.core import demo, prompt_guard, risk_scan
 from aca.ingestion.attachment_reader import extract_text_from_attachments
 
 # Charger toutes les clés API du fichier .env
@@ -25,16 +26,27 @@ load_dotenv()
 # llama-3.1-8b-instant    → ultra-rapide, tâches simples (classification)
 # llama-3.3-70b-versatile → plus puissant (extraction JSON, rédaction)
 
+# §16.3 — `ACA_DEMO_MODE=1` substitue un modèle factice déterministe aux trois fabriques, pour que
+# le projet soit essayable SANS AUCUNE CLÉ. Le graphe reste le vrai (mêmes nœuds, même superviseur,
+# même pause humaine) : seul l'appel au modèle est simulé. La bascule se fait ici, en un seul point,
+# plutôt que dans chaque nœud — un nœud ajouté demain en hérite gratuitement.
+
 def fast_llm():
     """Llama 3.1 8B — ultra-rapide pour la classification."""
+    if demo.is_enabled():
+        return demo.DemoLLM("fast")
     return ChatGroq(model="llama-3.1-8b-instant", temperature=0)
 
 def smart_llm():
     """Llama 3.3 70B — puissant pour l'extraction JSON structurée."""
+    if demo.is_enabled():
+        return demo.DemoLLM("smart")
     return ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
 
 def creative_llm():
     """Llama 3.3 70B — légèrement créatif pour les brouillons de réponse."""
+    if demo.is_enabled():
+        return demo.DemoLLM("creative")
     return ChatGroq(model="llama-3.3-70b-versatile", temperature=0.3)
 
 
@@ -50,6 +62,40 @@ def sum_usage(usage_metadata: dict) -> tuple[int, int]:
     total_in = sum(usage.get("input_tokens", 0) or 0 for usage in usage_metadata.values())
     total_out = sum(usage.get("output_tokens", 0) or 0 for usage in usage_metadata.values())
     return total_in, total_out
+
+
+def snapshot_from_state(state: dict, thread_id: str = None) -> dict:
+    """
+    Vue « client » d'un état du graphe — **forme de charge utile unique** (§16.1.2).
+
+    Consommée par `api._snapshot()` (qui y ajoute les trois champs liés à la pause :
+    `pending_clarification`, `awaiting_validation`, `done`, seuls connus du `StateSnapshot`
+    LangGraph) ET par les webhooks sortants de `notification_node`/`routing_node`. Sans ce
+    partage, un client de l'API et un abonné au webhook recevraient deux formes différentes du même
+    lead, et la seconde dériverait en silence à chaque champ ajouté — exactement le problème de
+    recopie corrigé au §16.1.6 pour la topologie du graphe.
+
+    Fonction pure : aucun accès au checkpointer, donc appelable depuis l'intérieur d'un nœud.
+    `injection_flags` et `risk_flags` sont inclus délibérément — c'est précisément ce qu'un humain
+    doit voir avant de valider, y compris quand il valide depuis n8n ou Slack.
+    """
+    email = state.get("email_raw") or {}
+    return {
+        "thread_id": thread_id,
+        "classification": state.get("classification"),
+        "classification_confidence": state.get("classification_confidence"),
+        "extracted_info": state.get("extracted_info"),
+        "company_profile": state.get("company_profile"),
+        "risk_flags": state.get("risk_flags"),
+        "injection_flags": state.get("injection_flags"),
+        "knowledge_gap": state.get("knowledge_gap"),
+        "draft_response": state.get("draft_response"),
+        "reasoning_log": state.get("reasoning_log"),
+        "completed_agents": state.get("completed_agents"),
+        "action_status": state.get("action_status"),
+        "sender": email.get("sender"),
+        "subject": email.get("subject"),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -75,6 +121,11 @@ class AgentState(TypedDict):
     gmail_message_id: Optional[str]  # ID Gmail (sérialisable) pour marquer l'e-mail traité
     gmail_thread_id: Optional[str]   # Vrai threadId Gmail (relances, cf. relance.py) — hors graphe
     action_status: str         # Message de résultat de l'écriture CRM (rempli par action_node)
+    gmail_draft_id: Optional[str]    # §19 — ID du brouillon Gmail créé par action_node. Rendu au
+                                     # lieu d'être jeté : c'est l'objet qu'un envoi programmé
+                                     # expédiera le moment venu (cf. storage/task_store.py), donc
+                                     # exactement le texte que l'humain a relu — pas une
+                                     # regénération ultérieure du modèle.
     # ── Orchestration multi-agents (superviseur) ──
     next_agent: str            # Décision du superviseur : prochain worker ou "FINISH"
     completed_agents: Annotated[list, operator.add]  # Workers déjà exécutés (réducteur = concat)
@@ -275,7 +326,9 @@ def memory_lookup_node(state: AgentState) -> dict:
     """
     print("\n🗃️  [Mémoire CRM] Recherche de l'expéditeur dans l'historique...")
     sender = state["email_raw"].get("sender", "")
-    previous = sheets.find_leads_by_sender(sender)
+    # §16.3 : en démonstration, aucun Google Sheets n'est configuré — on simule un contact nouveau
+    # plutôt que de laisser `sheets` échouer et de faire rejouer le nœud 3 fois via RETRY_POLICY.
+    previous = [] if demo.is_enabled() else sheets.find_leads_by_sender(sender)
 
     if not previous:
         print("   → Nouveau contact.")
@@ -381,7 +434,13 @@ def connaissance_node(state: AgentState) -> dict:
     """
     print("\n📚 [Agent Connaissance] Recherche sémantique dans la Knowledge_Base...")
     query = _build_rag_query(state)
-    context = sheets.search_knowledge_base_semantic(query)
+    if demo.is_enabled():
+        # §16.3 : sans clé Gemini ni Google Sheets, la vraie recherche ne renverrait rien et le
+        # Stratège rédigerait une proposition creuse — la démonstration perdrait justement ce
+        # qu'elle doit montrer (une réponse ancrée dans la base de connaissances).
+        context = demo.DEMO_FAQ_CONTEXT
+    else:
+        context = sheets.search_knowledge_base_semantic(query)
 
     # Zone ambre (aca/integrations/sheets.py) : correspondance FAQ trouvée mais peu fiable — on la
     # garde (mieux qu'un rejet sec sur un cas limite réel) mais on prévient l'humain dans le
@@ -678,6 +737,15 @@ def action_node(state: AgentState) -> dict:
     """
     print("\n📥 [Action] Écriture du lead validé dans le CRM...")
     email = state["email_raw"]
+
+    # §16.3 — barrière du mode démonstration. Placée ICI, au seul point du graphe qui écrit
+    # réellement, plutôt que dispersée dans sheets/hubspot/gmail. Elle LÈVE au lieu de dégrader
+    # gracieusement : écrire un faux lead dans le CRM d'un prospect pendant une démonstration
+    # serait un incident, alors qu'un échec bruyant n'en est pas un. C'est la seule exception
+    # assumée au « absent = fonctionnalité ignorée » qui régit tout le reste du projet.
+    if demo.is_enabled():
+        demo.guard_write("écriture CRM (action_node)")
+
     sheets.append_lead(
         email_classification=state["classification"],
         extracted_info=state.get("extracted_info", {}),
@@ -694,6 +762,10 @@ def action_node(state: AgentState) -> dict:
     status = "Lead ajouté au CRM."
     if hubspot_deal_id:
         status += " Deal HubSpot créé."
+    # Initialisé avant les deux conditions qui l'alimentent : une saisie manuelle n'a pas de
+    # message Gmail, donc pas de brouillon, et l'état doit alors porter `None` explicitement
+    # plutôt que de faire lever un NameError au retour de la fonction.
+    draft_id = None
     msg_id = state.get("gmail_message_id")
     if msg_id:
         service = None
@@ -708,7 +780,12 @@ def action_node(state: AgentState) -> dict:
         draft_text = state.get("draft_response", "")
         if draft_text and service is not None:
             try:
-                gmail_reader.create_draft_reply(
+                # §19 : l'ID du brouillon était jusqu'ici jeté. Le conserver est ce qui rend
+                # l'envoi programmé possible ET honnête — la tâche différée expédiera CE
+                # brouillon-là, celui que l'humain vient de relire, au lieu de reconstruire un
+                # message plus tard. Si la personne le modifie ou le supprime dans Gmail
+                # entre-temps, c'est sa version qui part, ou rien.
+                draft_id = gmail_reader.create_draft_reply(
                     service, msg_id, to=email.get("sender", ""),
                     subject=email.get("subject", ""), body=draft_text,
                 )
@@ -716,7 +793,7 @@ def action_node(state: AgentState) -> dict:
             except Exception as e:
                 status += f" (Échec de la création du brouillon Gmail : {e})"
     print(f"   → {status}")
-    return {"action_status": status}
+    return {"action_status": status, "gmail_draft_id": draft_id}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -868,6 +945,22 @@ def notification_node(state: AgentState, config: RunnableConfig | None = None) -
         sent = notify.send(message)
     print(f"   → {'Notification envoyée.' if sent else 'Aucun canal configuré (repli gracieux).'}")
     reason = "Notification envoyée." if sent else "Notification : aucun canal configuré."
+
+    # §16.1.2 — webhook sortant : ce nœud s'exécute juste avant la pause `interrupt_before`, c'est
+    # donc l'instant exact où « une analyse attend un humain ». `notify` prévient une PERSONNE
+    # (Slack/e-mail) ; ceci prévient une MACHINE (n8n) avec la charge utile structurée, pour que le
+    # workflow soit déclenché par événement plutôt que par sondage. No-op sans `ACA_WEBHOOK_URL`,
+    # et ne lève jamais (ce nœud est sous RETRY_POLICY).
+    if is_real_lead:
+        # `reasoning_log` est recomposé avec l'entrée que ce nœud s'apprête à renvoyer : le
+        # webhook décrit l'état AU MOMENT DE LA PAUSE, or LangGraph n'aura fusionné cette entrée
+        # qu'après le retour du nœud. Sans ce recollement, l'abonné webhook recevait un journal
+        # amputé de sa dernière ligne par rapport au même lead lu via `GET /threads/{id}` — écart
+        # attrapé par `test_webhook_payload_matches_api_snapshot_shape`.
+        payload = snapshot_from_state(state, thread_id)
+        payload["reasoning_log"] = (state.get("reasoning_log") or []) + [reason]
+        webhook.emit(webhook.EVENT_PAUSED, payload)
+
     return {"reasoning_log": [reason]}
 
 
@@ -921,6 +1014,15 @@ def routing_node(state: AgentState) -> dict:
         except Exception as e:
             print(f"   → Échec du brouillon de transfert : {e}")
             reasons.append(f"Routage : échec du brouillon de transfert ({e}).")
+
+    # §16.1.2 — un SUPPORT/AUTRE routé ne s'arrête à aucune pause de validation : sans cet
+    # événement, un workflow n8n n'apprendrait jamais qu'il s'est passé quelque chose sur ces
+    # catégories. On y joint la destination, la seule information propre au routage.
+    # Même recollement du journal que dans `notification_node` ci-dessus : l'événement décrit
+    # l'état tel qu'il sera une fois ce nœud terminé, pas tel qu'il était en y entrant.
+    routed_payload = snapshot_from_state(state)
+    routed_payload["reasoning_log"] = (state.get("reasoning_log") or []) + reasons
+    webhook.emit(webhook.EVENT_ROUTED, {**routed_payload, "routed_to": dest.get("label")})
 
     return {"reasoning_log": reasons}
 
@@ -1028,6 +1130,11 @@ app = workflow.compile(checkpointer=checkpointer, interrupt_before=["action"])
 # 9. Test manuel avec des faux e-mails (mock) — s'arrête à l'interruption, sans écrire au CRM
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # Identifiant d'exécution : rend les fils de démonstration uniques à chaque lancement (cf. le
+    # commentaire sur `thread_id` plus bas). `uuid4` plutôt qu'un horodatage — deux lancements dans
+    # la même seconde resteraient distincts.
+    _RUN_ID = uuid.uuid4().hex[:8]
+
     exemples = [
         {
             "sender": "alice.martin@startup-tech.fr",
@@ -1079,8 +1186,16 @@ if __name__ == "__main__":
         print(f"  Objet : {faux_email['subject']}")
         print(f"{'='*60}")
 
-        # Chaque e-mail = un fil (thread) distinct pour le checkpointer (mémoire court terme)
-        config = {"configurable": {"thread_id": f"cli-test-{i}"}}
+        # Chaque e-mail = un fil (thread) distinct pour le checkpointer (mémoire court terme).
+        # Le suffixe `_RUN_ID` rend le fil distinct **à chaque exécution** : les identifiants
+        # étaient auparavant fixes (`cli-test-1`…`cli-test-6`), si bien qu'un deuxième
+        # `python -m aca.core.app` reprenait l'état du précédent et ré-accumulait les listes à
+        # réducteur (`completed_agents`, `reasoning_log`) — 15 « stratege » et un journal répété
+        # 8 fois ont été observés, sur un graphe qui n'avait pourtant exécuté chaque nœud qu'une
+        # seule fois. Inoffensif pour le graphe, mais illisible précisément là où ça compte le
+        # plus : c'est la commande que le §16.3, le README et le one-pager donnent comme
+        # « essayez sans aucune clé ».
+        config = {"configurable": {"thread_id": f"cli-test-{_RUN_ID}-{i}"}}
         # Le graphe s'arrête avant 'action' (interrupt_before) : aucune écriture CRM en démo.
         output = app.invoke({"email_raw": faux_email}, config=config)
 

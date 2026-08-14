@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qu&#x27;est-ce qu&#x27;un flux agentique ?</title>
+<meta name="description" content="Un flux agentique est un pipeline où un modèle de langage décide de ce qui se passe ensuite, pas seulement de ce qu&#x27;il faut dire. Une définition construite face à une implémentation réelle de superviseur et d&#x27;agents.">
+<link rel="canonical" href="https://acami.example/seo/glossary-agentic-workflow.fr.html">
+<style>
+:root{--paper:#fdfdfd;--ink:#12171c;--ink-2:#4b5560;--ink-3:#636363;--rule:#e3e3e3;
+--primary:#125e6b;--accent:#b4622a;--radius:10px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+font-family:Figtree,Inter,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+line-height:1.6}
+.wrap{max-width:760px;margin:0 auto;padding:48px 24px 96px}
+nav{border-bottom:1px solid var(--rule);padding:16px 24px}
+nav a{color:var(--ink);text-decoration:none;font-weight:600;font-size:.9rem}
+nav a.back{color:var(--ink-2);font-weight:500;float:right}
+h1{font-family:'Instrument Serif',Georgia,serif;font-size:2.1rem;line-height:1.15;margin:.4em 0 .3em}
+h2{font-size:1.2rem;margin-top:2.2em}
+.kicker{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.72rem;letter-spacing:.08em;
+text-transform:uppercase;color:var(--primary)}
+.lede{color:var(--ink-2);font-size:1.05rem;max-width:60ch}
+p{max-width:68ch}
+code{background:#f1f4f5;padding:.1em .35em;border-radius:4px;font-size:.9em}
+ol,ul{max-width:66ch;padding-left:1.3em}
+li{margin-bottom:.6em}
+table{border-collapse:collapse;width:100%;margin:1.4em 0;font-size:.92rem}
+th,td{border:1px solid var(--rule);padding:.55em .7em;text-align:left;vertical-align:top}
+th{background:#f6f8f8;font-weight:600}
+.verified{border-left:3px solid var(--primary);padding:.2em 0 .2em 1em;margin:2em 0;
+color:var(--ink-2);font-size:.92rem}
+.verified.live{border-left-color:var(--accent)}
+.sources{font-family:'Fragment Mono',ui-monospace,monospace;font-size:.78rem;color:var(--ink-3)}
+.sources a{color:inherit}
+footer{border-top:1px solid var(--rule);padding:32px 24px;text-align:center;
+color:var(--ink-3);font-size:.82rem}
+footer a{color:inherit}
+</style>
+</head>
+<body>
+<nav><a href="../fr/index.html">acami</a><a class="back" href="../fr/index.html">&larr; Retour sur acami.com</a></nav>
+<main class="wrap">
+<p class="kicker">Glossaire</p>
+<h1>Qu&#x27;est-ce qu&#x27;un flux agentique ?</h1>
+<p>Un <b>flux agentique</b> est un pipeline dans lequel un modèle de langage participe à la décision de <em>ce qui se passe ensuite</em>, pas seulement du texte à produire. Le test qui le distingue d'un simple script « appeler le modèle et utiliser le résultat » : le déroulement dépend-il du jugement d'un modèle à l'exécution, ou chaque étape est-elle fixée d'avance quoi que dise le modèle ?</p><p>Un seul appel question-réponse n'est pas agentique, même excellent. Faire passer la sortie d'un chatbot dans l'étape fixe suivante ne l'est pas non plus — c'est un pipeline qui contient un modèle de langage, pas un flux que le modèle pilote.</p><p>L'implémentation d'ACA en est un exemple concret : un nœud <b>superviseur</b> (un petit modèle) lit ce qui a déjà été fait et décide quel <em>agent</em> spécialisé appeler ensuite — <code>enrichissement</code> (recherche sur l'entreprise), <code>connaissance</code> (récupération depuis une base de connaissances), <code>veille</code> (repli par recherche web), ou <code>stratege</code> (le modèle de rédaction) — depuis un espace de décision réel, pas une séquence fixe. Des garde-fous déterministes restreignent cet espace là où un choix ne devrait vraiment pas être laissé au modèle (un e-mail de spam n'atteint jamais l'agent de rédaction ; l'agent de rédaction est toujours la dernière étape) — agentique ne veut pas dire sans contrainte, cela veut dire que le jugement du modèle change réellement le chemin emprunté.</p>
+<div class="verified">La logique de routage du superviseur et ses garde-fous déterministes sont couverts par des tests unitaires sur chaque branche (SPAM/AUTRE/SUPPORT vont directement à FINISH, veille est forcé après un résultat vide de connaissance, stratege n'est jamais répété).</div>
+<p class="sources">Sources : <code>aca/core/app.py</code><br>Mis à jour : 2026-08-08</p>
+<p><a href="../seo/glossary-agentic-workflow.html">English version</a></p>
+</main>
+<footer>acami — Agence IA. <a href="../legal.html#privacy">Confidentialité</a> &middot; <a href="../legal.html#terms">Conditions</a></footer>
+</body>
+</html>

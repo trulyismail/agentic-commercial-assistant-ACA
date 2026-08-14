@@ -1,47 +1,47 @@
-# Thème Fluent (Microsoft Design), clair et professionnel — adapté à un outil B2B interne.
-# Source : skill developing-with-streamlit, assets/templates/themes/configs/fluent.toml
+[server]
+# §23 — expose le dossier `static/` de la racine de l'application sur `/app/static/`. C'est ce qui
+# permet au bouton « Page de présentation » de la barre latérale (ui.py) d'ouvrir
+# `static/landing.html` sans copier le fichier ni le dupliquer : un seul fichier, une seule URL,
+# aucune dérive possible entre deux exemplaires. Lu au DÉMARRAGE du serveur — l'activer sur une
+# instance déjà lancée demande un redémarrage.
+# Conservé par `branding.merge_config_toml()` : seules les sections `[theme…]` sont réécrites lors
+# d'un enregistrement depuis « Réglages → Apparence ».
+enableStaticServing = true
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Section [theme] GÉNÉRÉE par aca/core/branding.py (onglet « Réglages » → Apparence).
+# Toute modification manuelle ici sera écrasée au prochain enregistrement de la marque.
+# Les autres sections du fichier (server, client, browser…) sont préservées telles quelles.
+# ─────────────────────────────────────────────────────────────────────────────
 [theme]
 base = "light"
-primaryColor = "#0078D4"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F5F5F5"
-codeBackgroundColor = "#F3F3F3"
-textColor = "#1A1A1A"
-linkColor = "#0078D4"
-borderColor = "#E0E0E0"
+primaryColor = "#125E6B"
+backgroundColor = "#F1F4F5"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#12171C"
+linkColor = "#125E6B"
+borderColor = "#82898D"
 showWidgetBorder = true
-showSidebarBorder = false
-baseRadius = "4px"
-buttonRadius = "4px"
-font = "'Segoe UI', 'Open Sans':https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;500;600;700&display=swap"
-codeFont = "'Cascadia Code', 'Fira Code':https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&display=swap"
-codeFontSize = "0.875rem"
-codeTextColor = "#1A1A1A"
+showSidebarBorder = true
+baseRadius = "8px"
+buttonRadius = "8px"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
 baseFontSize = 14
-baseFontWeight = 400
-headingFontSizes = ["28px", "24px", "20px", "16px", "14px", "12px"]
-headingFontWeights = [600, 600, 600, 600, 600, 600]
 linkUnderline = false
-chartCategoricalColors = ["#0078D4", "#107C10", "#D83B01", "#FFB900", "#8764B8", "#00B7C3", "#E81123"]
-
-blueColor = "#0078D4"
+headingFontSizes = ["28px", "22px", "18px", "16px", "14px", "12px"]
+headingFontWeights = [650, 640, 620, 600, 600, 600]
+chartCategoricalColors = ["#125E6B", "#107C10", "#B4622A", "#A32C1E", "#63604A", "#76A2A9", "#CFA485", "#12454F"]
+blueColor = "#125E6B"
 greenColor = "#107C10"
-redColor = "#E81123"
-yellowColor = "#FFB900"
-orangeColor = "#D83B01"
-violetColor = "#8764B8"
-grayColor = "#737373"
-
-dataframeBorderColor = "#E0E0E0"
-dataframeHeaderBackgroundColor = "#F5F5F5"
+redColor = "#A32C1E"
+orangeColor = "#B4622A"
+violetColor = "#B4622A"
+dataframeBorderColor = "#82898D"
+dataframeHeaderBackgroundColor = "#FFFFFF"
 
 [theme.sidebar]
-backgroundColor = "#F3F3F3"
-secondaryBackgroundColor = "#EBEBEB"
-codeBackgroundColor = "#E5E5E5"
-textColor = "#1A1A1A"
-borderColor = "#D1D1D1"
-primaryColor = "#0078D4"
-dataframeHeaderBackgroundColor = "#EBEBEB"
-dataframeBorderColor = "#D1D1D1"
+backgroundColor = "#E9EEEF"
+secondaryBackgroundColor = "#DCE1E2"
+textColor = "#12171C"
+borderColor = "#82898D"
+primaryColor = "#125E6B"

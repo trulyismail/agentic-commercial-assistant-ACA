@@ -183,13 +183,51 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   per-model token counts — consumed by `ui.py`/`poller.py`/`aca/api.py`), `_calendly_url()`/
   `_routing_destinations()` (§12 item 7 — read `config_store` first, falling back to the
   `CALENDLY_URL`/`SUPPORT_EMAIL`/etc. `.env` defaults, so the Streamlit "Réglages" panel takes
-  effect without a restart), the `SqliteSaver`/`PostgresSaver`/`interrupt_before` compile, and a
+  effect without a restart), `snapshot_from_state(state, thread_id)` (§16.1.2 — the single "client
+  view" of a graph state, shared by `api._snapshot()` and the outbound webhooks so a REST client and
+  a webhook subscriber can never see two different shapes of the same lead; pure, so it is callable
+  from inside a node, and it deliberately includes `risk_flags`/`injection_flags` — precisely what a
+  human must see before validating, including when validating from n8n or Slack), the demo-mode
+  substitution in the three LLM factories (§16.3) and `demo.guard_write()` in `action_node`, and a
   `__main__` block with 6 mock emails (incl. `AUTRE`, `SUPPORT`, and one with a contractual risk
   clause + an out-of-FAQ question to exercise `risk_flags`/`knowledge_gap`) that run through the
   interrupt without a CRM write (`python -m aca.core.app`).
 - [risk_scan.py](aca/core/risk_scan.py) — §13: `scan_risks(text) -> list[str]`, pure/deterministic
   (bilingual FR/EN regexes, accent/case-insensitive via `unicodedata` normalization) for
   `risk_scan_node`. No LLM, no external call, no `RETRY_POLICY` needed.
+- [device_trust.py](aca/core/device_trust.py) — §24: **"remember this device"**, the bounded TOTP
+  bypass. TOTP was required of every `admin` at *every* login, forever; on a personal machine used
+  several times a day that friction's usual outcome is not more security but a homemade workaround
+  (a shared secret, one authenticator app for the whole team, or switching it off) — a protection
+  people abandon protects nothing. **What is actually traded, stated plainly**: a remembered device
+  skips **the code, and only the code**. The password is still required every time and no session is
+  extended (`session.py` answers a different question), so for that browser and that window the
+  account moves from "password + TOTP" to "password + possession of a token held by this browser".
+  That is one factor fewer than ideal, and it is what the checkbox *means* — the trade is chosen,
+  not imposed. **Deliberately not the `(IP, user-agent)` fingerprint** already computed by
+  `activity_log.device_fingerprint()`: it is not a secret — two people behind one office NAT on the
+  same browser produce the same value, so anyone with the password on that network would skip the
+  second factor. A real 256-bit random token was reachable instead, established **by experiment
+  rather than from the docs**: a scratch page proved a `components.html` iframe (`srcdoc`, so it
+  inherits the page origin) *can* write the parent's `document.cookie`, and `st.context.cookies`
+  reads it back next pass. Only the token's SHA-256 is stored — no salt and no stretching, on
+  purpose: 256 bits of entropy have no weakness to compensate, so a database leak replays nothing.
+  **Revocation without coupling**: each record carries `auth_fingerprint(password_hash, totp_secret)`
+  as of issue time, so changing the password *or* resetting TOTP invalidates every remembered device
+  automatically, with `user_store` never needing to know this module exists (Django's
+  `session_auth_hash` technique) — a revocation wired by an explicit call is one you forget to wire
+  the day a third password-change path appears. Expiry is judged **server-side**; the cookie's
+  `max-age` is a courtesy to the browser, editable by whoever holds the machine. `user_agent_hash()`
+  is a free extra notch against replay (a cookie presented by another browser simply re-asks for the
+  code; the known, accepted false positive is a browser update costing one extra code).
+  `cookie_script()` adds `Secure` **only over HTTPS** — setting it on local HTTP would make the
+  browser silently drop the cookie and the checkbox would have no visible effect, the worst kind of
+  failure for a convenience feature; `HttpOnly` is unreachable by construction (a cookie written in
+  JS is readable in JS), a stated limit rather than a silent one. Pure/stdlib with `now` injected,
+  no Streamlit (same posture as `session.py`/`auth_lockout.py`/`totp.py`). `ACA_TOTP_TRUST_DAYS`
+  (default 3, `0` disables and removes the checkbox — the only way a strict deployment refuses this
+  trade without code changes; a malformed value falls back to 3 rather than disabling silently or
+  breaking login).
 - [auth_lockout.py](aca/core/auth_lockout.py) — §14 item US-41 (security audit, 2026-07-21):
   `lockout_remaining_seconds()`/`next_lockout_seconds()`, pure functions backing a progressive
   lockout on `ui.py`'s optional password gate (`_check_auth()`) — exponential backoff (30s, 60s,
@@ -201,7 +239,13 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   an **idle timeout** (`ACA_SESSION_IDLE_SECONDS`, 30min), strictest bound winning. `touch()`
   pushes back idleness but deliberately never `started_at` — otherwise a stolen-but-kept-active
   session never dies. Before this, `st.session_state.authed = True` stayed valid for as long as the
-  browser tab lived.
+  browser tab lived. §18 (recap #6) adds `seconds_until_expiry(session, now)` — the stricter of the
+  two bounds' remaining time, or `None` if both are disabled — consumed by
+  `aca/ui/shared.py::_warn_before_expiry()` to `st.toast()` a warning in the last 5 minutes (a
+  brouillon lost to a silent expiry is the small frustration that discredits a tool). Computed
+  **before** `touch()`, not after — `touch()` always resets the idle clock to its full window, so
+  checking afterward would make the idle-based warning permanently unreachable (the absolute-TTL
+  bound is unaffected by `touch()` either way).
 - [prod_check.py](aca/core/prod_check.py) — §15.1.5/§15.3.3: startup security-posture check. The
   whole project is built on graceful degradation ("absent = feature skipped"), the right default
   locally and exactly wrong on a public host, where it becomes "absent = exposed". `ACA_ENV` is the
@@ -218,6 +262,375 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   (`interrupt_before=["action"]`) remains the actual protection; this only makes it informed, since
   an instruction buried on page 14 of an RFP previously surfaced in the draft as one more plausible
   sentence. No LLM (asking a model to detect model-manipulation exposes it to that manipulation).
+- [demo.py](aca/core/demo.py) — §16.3: `ACA_DEMO_MODE=1` runs the whole project **with no API key at
+  all**. Trying ACA used to require five external accounts (Groq, Gemini, Tavily, a Google service
+  account, a Gmail OAuth client), so an evaluating company could read the code but never run it.
+  `DemoLLM` (deterministic, same `invoke`/`with_structured_output` interface as `ChatGroq`) is
+  substituted in `app.py`'s three factories — one switch point, so a node added later inherits it
+  for free — and **the graph stays the real one**: same nodes, same supervisor, same self-critique,
+  same validation pause. Only the billable call is simulated. `guard_write()` is the deliberate
+  exception to the project's graceful degradation: it **raises** in `action_node` rather than
+  no-op'ing, because "absent = skipped" is the right default for an optional feature and the wrong
+  one for a safety barrier — writing a fake lead into a prospect's CRM during a demo is an
+  incident, a loud failure isn't. Also ships `DEMO_EMAILS` (the 6 cases from `app.py`'s `__main__`,
+  now reachable from the UI) and `DEMO_FAQ_CONTEXT`. Distinct from `tests/conftest.py`'s `FakeLLM`,
+  which lives in the test tree and is excluded from the Docker image.
+- [scheduler.py](aca/core/scheduler.py) — §16.0: the one **real** gap the Solo-tier audit found.
+  `relance.py`, `retention.py` and `billing.py` were each written, tested and documented "schedule
+  this periodically" — but **nothing scheduled them**: no scheduling dependency in
+  `requirements.txt`, and a Windows dev machine with no `cron`. In practice the GDPR purge and the
+  sales follow-ups only ran if a human remembered the command, i.e. never. Declarative `JOBS` table
+  (adding a periodic job = one entry, same spirit as `ROUTING_DESTINATIONS`), per-job interval env
+  var where `0` **disables** the job, and no new dependency — a `time.sleep` loop over persisted
+  timestamps is ample for four jobs whose most frequent runs hourly. `run_job()` never raises
+  toward the loop (same contract as `poller.run_forever()`). `is_due(job, now)` takes `now`
+  injected, so it is pure w.r.t. time and testable without touching the clock. CLI: bare (service
+  loop), `--once` (cron/n8n), `--job … --force`, `--status`, and `--prime` — which marks never-run
+  jobs as just-run **without executing them**, because a never-run job is "due" by construction
+  (else a fresh install would never purge), so a first boot would otherwise fire all four at once
+  including `relance`, which writes real Gmail drafts. §18 adds a fifth job, `archive` — monthly
+  signed export of the activity journal (`activity_log.archive_period()`, `ACA_ARCHIVE_DIR`, default
+  `data/archives`), via the pure helper `_last_completed_month(now)` (the **previous** calendar
+  month, never the current one, which isn't finished receiving rows yet) — "monthly" describes what
+  gets archived, not how often the scheduler checks; `ACA_SCHEDULE_ARCHIVE_HOURS` (default 720, like
+  `billing`) only controls the check cadence, and `archive_period()`'s own idempotence absorbs an
+  over-eager check. Also logs `ACTION_JOB_RAN` to `activity_log` for **every** job on every tick
+  (success or failure) — the piece that answers "did the scheduler even run today", visible even for
+  jobs (`maintenance`, `billing`) that have nothing of their own to log.
+- [reporting.py](aca/core/reporting.py) — §20: **what happened over a period, and how it differs
+  from the one before**. Every figure already existed — `analytics_store` counts emails, `audit_log`
+  the validations, `activity_log` each person's gestures, `task_store` the scheduled sends,
+  `review_store` the reviews — but only **on screen, in "last N days", and never compared**. Nobody
+  could answer "what did this tool bring us in July versus June", which is the only question a
+  manager actually asks and the only one that justifies renewing the tool: a dashboard shows a
+  state, a report tells a change. **One engine for both features**: the automatic monthly report
+  (`scheduler`'s `report` job) and the UI's customisable report are the same `collect(spec)` with
+  two specs — `monthly_spec()` is simply frozen (last completed calendar month, `MONTHLY_SECTIONS`,
+  comparison on). Two code paths would have guaranteed that one day one of them shows a number the
+  other doesn't know. **Collection is strictly separated from rendering**: this module doesn't know
+  what a PDF is, it emits typed blocks (`kpis`/`bars`/`line`/`table`/`text`) that
+  `report_pdf.py` draws — so content is testable without opening a document, and an HTML or CSV
+  export would need no query rewritten. `previous_period()` returns the **same-length** window
+  immediately before, not "the previous month": comparing 31 days to 28 would show February down
+  10% every year with nothing having happened. `last_completed_month()` never returns the current
+  month (same rule and reason as `scheduler._last_completed_month`). Every KPI declares which
+  direction is *favourable* (`better`) — a rising median response time is a degradation, and
+  painting every increase green would produce a flattering, false report; a 0→3 move reports the
+  absolute delta with **no** percentage, since "+100%" would claim growth from no base. `SECTIONS`
+  is a declarative registry (adding a section = one entry, same spirit as `ROUTING_DESTINATIONS`
+  and scheduler `JOBS`), grouped into four families matching four different readers; each block
+  carries a `context` sentence, because a report circulates away from its screen and a number
+  without its method of calculation is at best useless and at worst misleading. A section that
+  raises is replaced by a text block saying so rather than taking the report down — and rather than
+  staying silent, which would read as "nothing happened". `MONTHLY_SECTIONS` excludes the
+  email-by-email detail: it can run to dozens of pages and copies prospect addresses into a file
+  that will circulate, so it stays a conscious choice in the customisable report. Presets
+  (`save_preset`/`list_presets`/`delete_preset`) live in `config_store` under `REPORT_PRESET_<name>`
+  like §18's brand profiles, and deliberately store everything **except the dates** — a preset named
+  "Monthly management review" describes a *content*, not a month.
+- [intake_window.py](aca/core/intake_window.py) — §19: **when automatic intake is allowed to run**.
+  `poller.py` looped bare — `time.sleep(POLL_INTERVAL_SECONDS)` and nothing else — with two
+  consequences: an email arriving at 3am was analysed at 3am (burning quota and firing an alert for
+  a team that would only see it at 9am, and making the analysis *look* stale by the time anyone
+  could act), and the interval was read **at import**, so changing it meant editing `.env` and
+  restarting. Pure, with `now` always injected (same posture as `auth_lockout.py`/`session.py`/
+  `scheduler.is_due`), so it is testable without touching the clock or Gmail. **Naive local time,
+  deliberately**: a sales team states its hours as office hours, not UTC, and the process runs on
+  that team's machine (Solo tier, `run_solo.py`), so the local clock *is* the right reference.
+  Handles the **overnight window** (22:00 → 06:00), which naive `start <= t <= end` silently turns
+  into an empty range — the allowed day is the one the window *opens* on, else a Monday-night
+  on-call setting would stop dead at midnight. Every parser is deliberately forgiving
+  (`parse_days`/`parse_time`/`parse_interval` never raise, falling back to "every day"/default):
+  these values come from a form, and a malformed entry that killed the loop would mean **no** email
+  ever gets collected — far worse than the bad setting that caused it. Defaults reproduce the exact
+  pre-§19 behaviour (always open, 60s), honouring the project's "absent = feature skipped"
+  contract. Settings resolve `config_store` → env → default, so the "Réglages → Réception
+  automatique" panel takes effect on the next cycle **without a restart**. `describe()` lives here
+  rather than in the page because the same sentence appears in the sidebar and in settings, and two
+  divergent wordings for one setting make a person doubt which screen tells the truth.
+- [task_store.py](aca/storage/task_store.py) — §19: **dated tasks a human placed on a lead** —
+  scheduled sends and reminders. Distinct from the two neighbouring registries, and the distinction
+  is why it exists: `schedule_store.py` records when a *system* job last ran (no per-lead rows, no
+  chosen deadline, nothing to cancel); `followup_store.py` tracks leads eligible for the
+  *automatic* `relance.py` cadence (the machine picks the moment; no free text, no chosen hour).
+  This stores what a **person decided**, for **one lead**, at **a moment they chose** — a different
+  business object with its own lifecycle (cancellable, traceable, named author). Two kinds in one
+  table on purpose: a scheduled send and a reminder have the same shape and lifecycle, and two
+  tables would mean two purges, two lists, and a second "what's overdue" query that eventually
+  diverges from the first. **The scheduled send does not weaken the product's central guarantee**:
+  the person read the draft, corrected it if needed, then explicitly said "leave at 9am" — the
+  human authorisation exists, it is merely *prior* to execution, exactly like any mail client's
+  send-later. What is scheduled is the **already-created Gmail draft** (`gmail_draft_id`), so if
+  they edit or delete it in Gmail before the deadline, their version goes out or nothing does; the
+  human keeps the last word (see `gmail_reader.send_draft`). `_set_status` carries
+  `status = 'pending'` **inside the SQL clause**, so it is atomic: without it a slow scheduler and
+  a simultaneous human cancellation could cross, and a cancelled task would flip to "done" — an
+  email going out after someone explicitly stopped it. `purge_older_than` deliberately spares
+  *pending* tasks regardless of age, since a distant deadline is still a valid intention.
+- [review_store.py](aca/storage/review_store.py) — §20: **review requests** — an operator hands an
+  admin specific emails they don't want to decide alone, several in one gesture
+  (`data/reviews.sqlite`, `ACA_REVIEW_DB`). The gap it closes: an operator facing a lead beyond
+  their authority had exactly three options — validate (writes to the CRM), reject (removes the lead
+  from *everyone's* queue), or do nothing and tell their manager through some other channel, where
+  the information leaves the product and stops being traceable. The third gesture — "I'm not
+  deciding this, someone must look" — did not exist. **Deliberately a separate registry from
+  `task_store.py`**, and the distinction is the module's reason to exist (the same reasoning that
+  separated `task_store` from `followup_store`/`schedule_store` at §19): a task is **dated** (the
+  scheduler fires it, `list_due()` queries a clock) and ends by itself; a review request is
+  **addressed** (the recipient's login surfaces it) and ends with a *human decision* that can carry
+  a written answer (`resolution_note`). The query is not "what's overdue" but "what's waiting for
+  me". Merging them would force `list_due` to exclude this kind, the scheduler to skip it and the
+  purge to treat it apart — three exceptions at the heart of a table whose docstring praises its
+  uniformity. **A batch, not one-at-a-time**: one row per email (each is resolved and commented
+  individually) but all rows of one gesture share a `batch_id`, note and priority, so the recipient
+  reads "Marie sent you 4 emails" and can answer the lot with `resolve_batch()` without losing
+  per-email granularity. **`RECIPIENT_ADMINS` (`@admins`) is resolved at read time, not write
+  time** — an admin hired tomorrow must see what was addressed to the *role* yesterday; expanding it
+  into one row per existing admin at send time would have frozen that list. `mark_seen()` never
+  touches `status`: "seen" and "resolved" are distinct events (same reasoning as
+  `task_store.acknowledged_at`), otherwise a request opened then set aside would vanish from the
+  queue with nobody having handled it. `_close()` carries `status = 'pending'` **inside the SQL**,
+  so two admins opening the same queue can't overwrite each other's answer. Email metadata
+  (subject/sender/classification) is **copied** into the request rather than referenced, so it stays
+  readable after the lead is purged by GDPR retention — a request whose subject evaporates can
+  neither be understood nor closed. `cancel_for_thread()` (wired into `retention.purge_subject`) and
+  `purge_older_than()` (spares *pending* requests at any age — an un-triaged review is outstanding
+  work, and erasing it would delete the trace along with the data).
+- [schedule_store.py](aca/storage/schedule_store.py) — §16.0: when each periodic job last ran
+  (`data/schedule.sqlite`, `ACA_SCHEDULE_DB`). Without it `scheduler.py` would replay every job on
+  each process restart — a retention purge and a burst of Gmail follow-up drafts on every
+  `docker compose up`. Same shape as `config_store.py`: org-scoped, `sqlite_retry`-wrapped (the
+  scheduler writes outside the graph, hence outside `RETRY_POLICY`). Not to be confused with
+  `config_store.py`, which stores what a human **set**; this stores what the machine **did**. The
+  timestamp is stored twice on purpose: `last_run_epoch` (REAL) for the due-date arithmetic, no
+  timezone or format question; `last_run_at` (TEXT) purely so a human inspecting the DB can see
+  why a job didn't fire. `record_run()` records failures too — otherwise a durably broken service
+  (Gmail unreachable, quota exhausted) would be retried every tick, turning an outage into a
+  hammering.
+- [graph_topology.py](aca/core/graph_topology.py) — §16.1.6: **single source** for the agent graph's
+  topology, derived from the compiled graph itself (`app.get_graph()`). §12bis had flagged the
+  hand-copied edge lists in `app.py`/`ui.py`/`dashboard/lib/graph-topology.ts` as a drift risk —
+  and **the drift had already happened**: `ui.py` was missing the `supervisor → routing` edge (the
+  supervisor's FINISH path), so the diagram shown to the user depicted a supervisor with no exit to
+  the rest of the pipeline, and nothing could catch it because nothing compared the two lists.
+  Adding a node in `app.py` now surfaces it everywhere; only its French label in `NODE_LABELS` is
+  hand-maintained (and a test fails if it's forgotten). Exposes `nodes()`/`edges()`/`to_dot()`
+  (consumed by `ui.py`'s live `st.graphviz_chart`) and `to_dict()` (consumed by
+  `scripts/export_graph.py`). No Streamlit import in `aca/core/`.
+- [console.py](aca/core/console.py) — UTF-8-tolerant console output (2026-07-26). The project logs
+  heavily with emoji (68 `print()` calls across 13 modules); on this Windows box `sys.stdout` is
+  **cp1252** as soon as output is redirected (service, log file, backgrounded `uvicorn`), so a bare
+  `print("⚡ …")` raises `UnicodeEncodeError`. Not cosmetic: those prints happen **inside graph
+  nodes**, all wrapped by `RETRY_POLICY`, so a decorative log line could trigger up to 3 node
+  re-executions and — for a writing node — a double CRM write. Exactly the `hubspot.py` incident of
+  2026-07-12, whose local two-`print()` try/except fix doesn't scale to 68 calls. Fixed at the
+  **process boundary** instead: `enable_utf8_console()` reconfigures `stdout`/`stderr` once with
+  `errors="replace"` (no character can ever make a `print()` raise again — worst case it renders
+  `?`), is idempotent, and never raises if the stream can't be reconfigured (pytest capture,
+  `StringIO`). Called from `aca/__init__.py`, so every entry point inherits it.
+- [branding.py](aca/core/branding.py) — §17: **white-label theming, parametrable at runtime**. The
+  look used to live entirely in a static, version-controlled `.streamlit/config.toml`, so shipping
+  ACA to a company whose spec mandates its logo and colours meant *modifying the product* per
+  client. Appearance is now **data**: 22 `BRAND_*` tokens (name, tagline, company, logo, 10 colours,
+  font, radius, density, light/dark, animation level, hero style) resolved on every call —
+  `config_store` (per tenant, editable from the UI) → same-named env var (so a Docker image can ship
+  already in the client's colours) → selected preset (7 of them) → mode defaults → token default. A
+  colour explicitly chosen is never overridden by a preset or by dark mode. **Two layers on
+  purpose**: `css()` is injected every rerun (instant effect, carries all animations and the brand
+  hero banner) and `config_toml()` rewrites `.streamlit/config.toml` on explicit admin action — the
+  only layer that reaches *inside* Streamlit's React components (open dropdown, `st.dataframe`
+  header, Vega palette), effective on page reload. This deliberately contradicts the project's
+  default doctrine ("never CSS, always config.toml", per the `developing-with-streamlit` skill),
+  which remains right for a *fixed* theme: a theme that changes at runtime, per tenant, cannot be a
+  static file read at server start. Stated cost: the `data-testid`/`data-baseweb` selectors are
+  Streamlit 1.59 implementation details, so a version bump can make the page **less pretty, never
+  broken** — every rule is decorative, none gates a feature. Also ships `readable_text_on()`
+  (auto black/white button text, so a client picking a vivid yellow doesn't get unreadable buttons —
+  that would be *our* defect, not their taste), `accessibility_report()` (WCAG contrast checks that
+  **warn but never refuse** — it's the client's brand), `merge_config_toml()` (pure, idempotent,
+  preserves every non-`[theme]` section, since clobbering a `[server]` block would break the
+  deployment rather than the looks), and `encode_logo()` (512 KB cap — the logo is re-injected on
+  *every* rerun, so a 5 MB PNG would slow down each interaction). No Streamlit import (same stance
+  as `risk_scan.py`/`session.py`/`graph_topology.py`), so it is fully unit-testable offline. §18
+  extends `PRESETS` from 7 to 18 sectoral profiles (industry, healthcare, finance, tech/SaaS, luxury,
+  education, food, real estate, energy, logistics, accessibility — each varying font/radius/density/
+  animation level, not just colour, on the "a sector has a look, not just a colour" principle), adds
+  `saved_profiles()`/`all_profiles()`/`profile_payload()` (an admin can save a custom-tuned palette as
+  a named, reusable profile stored in `config_store` under `BRAND_PROFILE_<name>`, logo deliberately
+  excluded from the payload to avoid bloating the settings table), and `favicon_for_streamlit()` (the
+  client logo as the browser-tab icon via `st.set_page_config(page_icon=...)`; SVG excluded since
+  `st.image`/favicon rendering of SVG is unreliable — it remains fine as the sidebar logo via
+  `st.logo`). **§18 tangent** (visual-polish follow-up request): the old `.stTabs [data-baseweb=…]`
+  rules were dead — `st.tabs()` is no longer called anywhere since the `st.navigation` restructure
+  above — replaced with real selectors for Streamlit's **top-nav** internals, found by grepping the
+  compiled JS bundle rather than guessing (`data-testid="stTopNavLinkContainer"`/`stTopNavLink`,
+  undocumented and version-fragile, same "decorative, never gates a feature" stance as the rest of
+  this module): a gradient card around the nav row, a hover lift/glow per link, and staggered
+  entrance animations at the `_ANIMATIONS_FULL` level (a lighter `aca-fade` at `_ANIMATIONS_SUBTLE`,
+  none at `_ANIMATIONS_OFF` — an OS-level `prefers-reduced-motion` still wins regardless, per the
+  existing contract). **This first attempt didn't actually work** — caught only when the user
+  reported the bar was still neither visible nor centered and a live Playwright inspection of the
+  real rendered DOM (not just the minified bundle) was run against it: `*:has(> […])` matches the
+  nearest ancestor with `stTopNavLinkContainer` as a *direct* child, which is a private, per-item
+  Streamlit wrapper div (one per page, shrink-to-content, no flex role) — never the actual flex row
+  that lays all four links out side by side. Every rule aimed at "the bar" (background, border,
+  `margin-inline: auto`/`width: max-content` for centering) was silently landing on four separate,
+  nearly-invisible per-item boxes instead of one shared bar, and the stagger animation's
+  `:nth-child(N)` was dead too, for the identical reason — a lone child is always its parent's
+  `:nth-child(1)`, so all four links always matched the same rule. Fixed by targeting `.rc-overflow`/
+  `.rc-overflow-item` instead — the actual flex container and repeated item, both stable classes
+  from the third-party `rc-overflow` list library Streamlit uses here (not Streamlit's own hashed
+  per-version classes) — confirmed via the real computed `justify-content`/`background`/`box-shadow`
+  on the live element before and after. The admin-only
+  security-posture banner (`ui.py`, `key="security_banner"`) gets a warm gradient plus a slow
+  `aca-warn-glow` pulse — deliberately only at the animated levels, so a client who disabled motion
+  doesn't get a wandering hint that something needs attention when nothing changed.
+  **§21 (design pass, measured against the live DOM rather than the source)** — five rules were
+  written but never rendered, which is why the pass was mostly *making the existing design exist*:
+  (1) `h1,h2,h3 { font-family: var(--aca-display) }` is specificity (0,0,1) and lost to Streamlit's
+  own `.st-emotion-cache-XXXX h1..h6` (0,1,1), so **no real heading was ever in the display serif** —
+  the hero title only worked because `.aca-hero__title` is a class; now anchored on
+  `stMarkdownContainer`/`stHeadingWithActionElements`, no `!important`; (2) a stale
+  `[data-testid="stHeader"] { background: transparent }` sat 130 lines below §19's opaque-header fix
+  and silently undid it (measured `rgba(0,0,0,0)`); (3) `--aca-header-h` was `3.5rem` = 49px under
+  `config.toml`'s `baseFontSize = 14`, describing a bar that actually measures 52.5px — now px;
+  (4) the **active** nav item was Streamlit's neutral grey while *hover* carried the brand colour,
+  lift and shadow, i.e. the hierarchy was inverted — now `aria-current` takes the brand fill and
+  hover is deliberately subordinate; (5) `chart_colors()` concatenated the six semantic tokens, but
+  nothing makes them distinct (default: `BRAND_INFO == BRAND_PRIMARY`, `BRAND_WARNING ==
+  BRAND_ACCENT`), so two dashboard categories drew in the same colour — now de-duplicated and
+  topped up with derived tints to 8. Also: `--aca-muted` 0.42 → **0.34** (was 4.2:1, below AA, and
+  it is the colour of *small* text — calibrated across all 18 presets after a hand-calibrated 0.38
+  passed 4 palettes and failed `Industrie & BTP`); a permanent low card shadow so cards separate
+  from the page even when a client picks near-identical surface/background (one shipped palette
+  measures 1.01:1); `--aca-ease-out`/`--aca-ease-in-out`/`--aca-t-*` tokens replacing five inline
+  curves; every UI animation cut under 300 ms; `:active { scale(.97) }` press feedback; hover gated
+  behind `@media (hover: hover) and (pointer: fine)`; `:focus-visible` rings on buttons/links/nav.
+  One animation **removed**: the empty-state icon's infinite float — the only perpetual purely
+  decorative motion, which competed for attention with the two loops that do signal something.
+  One animation **added** on request, and the tension with that removal is the point: the
+  **ambient background** (`[data-testid="stAppViewContainer"]::before`, two very soft radial veils
+  drifting on a 48s loop). Admissible only because it clears three constraints inherited from
+  decisions already made — (1) it borrows `--aca-primary` and **never** `--aca-accent`, since amber
+  means "a human must decide" and using it decoratively would empty the signal exactly as the four
+  broken palettes did; (2) it is below the attention threshold — 7% alpha, huge radii, no edge, and
+  48s is what separates a *material* from a *moving object*; (3) it covers the work surface only —
+  the sidebar and header have
+  opaque backgrounds and paint over it, so the chrome stays still. Animated with `transform` alone
+  so it is GPU-composited (no layout, no repaint) — this is the one loop that never stops, and
+  animating `background-position` instead would have repainted the whole page every frame. The
+  gradient lives in the **static** block and only the `animation` line is level-gated, so
+  "animations: sobre/aucune" keeps the depth and loses only the movement, and
+  `prefers-reduced-motion` freezes the loop without erasing the background. The companion rule
+  `[data-testid="stMain"], [stSidebar], [stHeader] { position: relative; z-index: 1 }` is
+  structural, not decorative: the veil is `position: fixed` in the same stacking context, so without
+  it the wash would paint **over** the page. **Corrected after the user reported not seeing it, and
+  they were right** — the radii were in `rem`, hence frozen at 588px (14px root from `config.toml`),
+  so on a wide screen two small islands floated in a ~2900px layer with one falling outside the
+  viewport entirely: measured at 1892px, **6 of 7 background points were untouched** and only the
+  bottom-right corner carried colour. The instructive part is *why it passed verification*: the
+  earlier "varies by only 5/255" measurement was taken at 1440px on a strip that happened to sit
+  near the one visible blob — a true number, sampled at the only flattering place, supporting the
+  opposite of the right conclusion. Fixed by sizing in `vmax` (a background decoration scales with
+  the **window**, never with the text size), cutting the overflow 25% → 10% (a 2.5% drift needs no
+  more, and the excess was pushing the blobs out of frame), and raising the alpha 7% → 14% — a
+  judgement fix as much as a code one, since "below the attention threshold" was my criterion while
+  the request was *a background animation you can see*, and an effect nobody can perceive is not
+  subtle, it is absent. `--aca-veil-1`/`--aca-veil-2` are lower in dark mode (9%/6%), because on a
+  light page the veil darkens and thus *raises* text contrast, while on a dark page it lightens and
+  lowers it. After the fix, same viewport: 6 of 7 points carry the wash, 22 luminance levels corner
+  to corner. A test locks the lesson (radii must stay in viewport units, never `rem`).
+  **§26 — the ambient background now carries the landing page's motif** (`_ambient_texture()`,
+  `_dither_tile()`, `_scatter_cells()`). The app and `static/landing.html` were selling the same
+  product in two unrelated visual languages — typographic block fields there, smooth radial veils
+  here — and someone moving from the sales page to the tool should recognise the same product. A
+  second `::after` layer on `stAppViewContainer` tiles a **generated SVG data-URI of scattered
+  blocks** in `--aca-primary`, masked by the *same* radial positions/radii as the §21 veils so the
+  pixels exist only where colour already is, and driven by the *same* `aca-ambient` keyframe so the
+  two layers drift together (two background layers sliding relative to each other stop reading as
+  one material). Deliberately **not** the landing page's engine: there the blocks are real text
+  regenerated per frame by a canvas, and `branding.py` emits CSS only — a constraint not worth
+  lifting for decoration. The stated cost of that: the mask makes blocks **fade** toward the edges
+  where a true dither would **thin** them; at 5% alpha on a 27%-covered tile the difference is
+  imperceptible, but it is an approximation, not the same thing. Three details that are decisions:
+  the tile is chosen by a **coordinate hash, not a Bayer matrix** — Bayer thresholded at one level
+  has no varying density to break it up, so its rows come out 4/2/4/0 and the result is a weave
+  with visible tile seams (tried, rendered, rejected), while a static texture has no reason to be
+  ordered since there is no frame-to-frame sparkle to avoid; **every row and column is guaranteed
+  ≥2 cells**, because a 30% draw leaves a row of 16 empty about once in 300 and an empty row in a
+  tile repeating every 96px is a horizontal seam the eye follows; and the **same** URI is tiled
+  twice at 96px/138px with coprime offsets, so the combined period is far past any screen. `#` is
+  URL-encoded — left raw in a `url()` it reads as a fragment and the whole tile vanishes with no
+  error, no failing test and nothing to see on re-reading. §21's three constraints are inherited
+  unchanged (primary never accent; below the attention threshold; work surface only), and as with
+  the gradient the **texture is static and only the drift is level-gated**, so "animations: aucune"
+  keeps the material. Covered by 7 tests, one of which is general rather than about this feature:
+  `test_les_commentaires_css_sont_tous_refermes` counts and balances comment delimiters across the
+  whole emitted sheet, after a stray `*/` closed a comment early **twice in one session** — once
+  silently reverting the footer rules, once silently killing the ambient drift on *both* layers.
+  Motion note worth keeping: entrance animations were *suspected* of replaying on every Streamlit
+  rerun (which would have meant deleting them outright); measuring `getAnimations()` before and
+  after a widget-triggered rerun showed them unchanged at `finished` — React reconciles the nodes,
+  so they play once per mount. The hypothesis was wrong and the animations were kept.
+- `signal_separation(primary, accent)` (§21) — the guard behind the pass's one genuine *design*
+  defect rather than a rendering one. Since §19 the accent has exactly one job — *a human must
+  decide here* (`.aca-signoff`, the alert pill, the decision rail's terminus) — but all 18 `PRESETS`
+  predate that rule and still treat accent as "the second brand colour": 4 of them gave it the same
+  hue family as the primary, erasing the product's central affordance (the test instance ran an
+  all-blue palette with **not one pixel** of the reserved colour). Deliberately **not**
+  `contrast_ratio`: WCAG measures luminance, so it ranks these backwards — the default petrol/amber
+  pair scores a poor 1.66:1 while dark-blue/light-blue scores well and still reads as "blue". It is
+  a distance in the **a\*b\* chroma plane of CIELAB with L\* ignored on purpose** (identical → 0,
+  dark/light blue → 0.08, petrol/amber → 0.74); an earlier hue+saturation version was wrong in both
+  directions and the 18-preset ranking exposed it immediately. Wired into `accessibility_report()`
+  (warns, never refuses — it is the client's brand) and locked by a test parametrized over every
+  preset. `Accessibilité renforcée` was fixed **despite passing** the metric: it paired blue with
+  violet, the classic deuteranopia confusion, and a metric that models normal colour vision is the
+  wrong authority on a palette whose name promises accessibility. Stated invariant, corrected from
+  §19's wording: what matters is that the accent is **reserved and unmistakable**, not that it is
+  warm — hence `Corail`, whose brand colour is already warm, gets a *cool* reserved colour.
+- [i18n.py](aca/core/i18n.py) — §18 tangent, on explicit user request ("ajouter l'option de
+  switcher si français ou anglais la langue"): a **FR/EN language switcher for the UI**, scoped
+  deliberately to primary chrome only (navigation, page headers/captions, main buttons/labels, key
+  messages) — the user's own choice when asked, over translating every string in the project.
+  Admin-only curation screens (knowledge-base rows, account management fields, branding token
+  labels), the activity journal's detail columns, PDF export text and console logs stay French-only
+  by design, not oversight. **A hand-written dict, not a library** (Babel/gettext): the translated
+  surface is a few dozen static entries, no plurals, no localized dates — pulling in a whole i18n
+  dependency for that would repeat the exact mistake this project avoids elsewhere (`totp.py`/
+  `slack_verify.py`, stdlib-only by principle). Keys are named by screen zone (`nav.*`/`auth.*`/
+  `dashboard.*`…) rather than by the French text itself, since the text is not a stable identifier —
+  correcting a French label must never break the English lookup. `translate(key, lang, **kwargs)`
+  never raises: an unknown key returns itself (a visible-but-harmless `"missing.key"` on screen,
+  never a crashed page) and an unknown language falls back to `DEFAULT_LANGUAGE` ("fr"); `**kwargs`
+  feeds `str.format()` for the handful of parameterized strings (`"{d} jours"`), with a malformed/
+  missing argument caught rather than propagated. No Streamlit import (same posture as `session.py`/
+  `branding.py`/`ui_kit.py`) — the session-scoped current-language read/write lives in
+  `aca/ui/shared.py`'s `current_language()`/`t()`/`language_switcher()` instead (below), so `i18n.py`
+  itself is fully unit-testable offline. Language choice is **session-scoped**
+  (`st.session_state["_lang"]`), not persisted per-user or per-tenant — a deliberately small scope
+  for a feature added as a tangent to a different request, matching how much was actually asked for.
+  Covered by [test_i18n.py](tests/test_i18n.py) (11 tests: never-raises on an unknown key/language,
+  every declared key genuinely carries both languages non-empty, placeholder formatting in both
+  languages, and a sample-key check that FR and EN actually differ — so a future key added with the
+  same string copy-pasted into both languages doesn't silently defeat the switcher).
+- [ui_kit.py](aca/core/ui_kit.py) — §18: **the design system's vocabulary**, the piece §17's
+  white-label theming didn't provide — every screen built its own section titles, cards and empty
+  states ad hoc, so two blocks playing the same role never looked alike. Pure functions (`section()`,
+  `stat()`/`stat_row()`, `chip()`/`chip_row()`, `empty_state()`, `key_hints()`) rendering HTML strings,
+  no Streamlit import (same posture as `branding.py`/`session.py`), every interpolated value passed
+  through `html.escape` — an email body or LLM output flowing through these is by definition
+  untrusted content (cf. `prompt_guard.py`). **Signature component: `decision_rail()`** — a numbered
+  vertical timeline of received→classified→enriched→drafted→**your decision**, where the numbering is
+  honest (it's a real sequence) and the human decision is visually the terminus of the machine's work,
+  not a bolted-on checkbox; a `STEP_ALERT` state exists for steps that completed fine but demand a
+  wary read (a flagged clause, a detected injection attempt) — conflating it with failure would read
+  as a crash, conflating it with success would bury the warning. A second, equally deliberate
+  component: `timeline()` for a lead's chronological history (`{"when", "who", "what", "detail",
+  "tone"}`) and `diff()` (stdlib `difflib`, bounded at `max_lines` — a three-hundred-line diff is
+  scrolled past, not read) for the before/after of a human-edited draft; both consumed by
+  `app_pages/1_inbox.py`'s "Historique de ce lead" expander. Styles live in `branding.py`'s `_UI_KIT`
+  CSS block, so the application has exactly one place its stylesheet comes from.
 - [tenant.py](aca/core/tenant.py) — `current_org_id()`: the single source of tenant identity for the
   multi-tenant foundation (§12 item 3, audited §14.3) — reads `ACA_ORG_ID` (default `"default"`)
   dynamically (never frozen at import, same reasoning as `DATABASE_URL` in `vector_store.py`). One
@@ -231,6 +644,30 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   is the one endpoint where a click triggers a CRM write **without** `require_api_key` (Slack won't
   send our header), so this signature is its only gate — it **fails closed** (rejects) if
   `SLACK_SIGNING_SECRET` is unset, unlike the rest of the API whose key is optional.
+- [totp.py](aca/core/totp.py) — §18: second-factor TOTP (RFC 6238), the last weak link in an
+  otherwise solid authentication chain — `user_store.py` already did the hard part (salted PBKDF2,
+  constant-time compare, a dummy hash on unknown accounts, progressive lockout) for a single factor,
+  guarding an `admin` account capable of creating other admins, redirecting sales alerts, and curating
+  the knowledge base the AI will cite to prospects. **Stdlib-only, deliberately**: `cryptography` is
+  present in the venv but only as a *transitive* dependency (via `google-auth`) — importing it directly
+  would replay the exact §15.3.8 mistake ("`requirements.txt` is pinned" was false assurance, since
+  indirect dependencies weren't in it). ~140 lines of `hmac`/`hashlib`/`struct`/`base64` is cheap
+  enough not to justify a new dependency. Same posture as `slack_verify.py`. `generate_secret()`,
+  `code_at()`/`current_code()` (RFC 4226 HOTP core, verified against the official RFC 4226 Appendix D
+  test vectors in `tests/test_totp.py`), `verify()` (constant-time `hmac.compare_digest`, ±1 window
+  drift tolerance, loops through **all** windows even after a match — stopping early would leak which
+  window matched, hence the verifier's clock offset, by timing), `provisioning_uri()` (`otpauth://`,
+  rendered as an actual scannable QR by `aca/ui/shared.py::_totp_qr_png()` — see that entry — rather
+  than shown as raw text, `issuer` = the client's `BRAND_NAME`, never "ACA" hard-coded — the one
+  place §17's white label touches security), `grouped_secret()` (groups of 4, the manual-entry
+  fallback for a phone that can't scan), `seconds_remaining()`
+  (shown next to the code field — the leading cause of a second factor's *felt* failure is a code that
+  expired mid-typing). TOTP is scoped to `admin` only (`user_store.TOTP_REQUIRED_ROLES`) — imposing it
+  on an operator validating twenty leads a day would be paid back in workarounds (a shared secret, one
+  authenticator app for the whole team) that weaken security rather than strengthen it. No self-service
+  recovery — only a CLI escape hatch (`user_store`'s `totp-off`) — since a recovery flow is precisely
+  where a second factor gets weakened, and doing it properly needs a trusted channel (verified email,
+  identified support) this deployment shape doesn't have.
 - [poller.py](aca/core/poller.py) — standalone background intake: run separately (`python -m aca.core.poller`, own
   process/terminal — not started by Streamlit), polls `gmail_reader.list_unread_emails()` every
   `POLL_INTERVAL_SECONDS` (default 60), and for each email not already in `queue_store` runs it
@@ -239,7 +676,10 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   and logs the classification event via `analytics_store.record_classification()` (dashboard data —
   captured as soon as the graph pauses, independent of whether a human ever opens it in the UI).
   Also attaches a `UsageMetadataCallbackHandler` to the `invoke()` config and logs the aggregated
-  token count via `analytics_store.record_tokens()` (§13, same pattern as `ui.py`).
+  token count via `analytics_store.record_tokens()` (§13, same pattern as `ui.py`). §18: also logs
+  `ACTION_ANALYSIS_STARTED` to `activity_log` with `source=SOURCE_POLLER` — the same gesture as the
+  manual form in `app_pages/1_inbox.py`, only the source differs, so `activity_log`'s "who did what"
+  is complete for auto-intake too, not just human-triggered analyses.
 - [queue_store.py](aca/storage/queue_store.py) — tiny local SQLite registry (`data/queue.sqlite`, not the Google
   Sheet) tracking which Gmail messages `poller.py` has already queued (emails stay `UNREAD` until
   validated, so without this they'd be reprocessed every poll cycle) and which are still pending
@@ -281,7 +721,9 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   rounds per lead (§11.6 item 5, default 3), the wording varying slightly after the first round;
   both thresholds read the "Réglages" panel override first, `.env`/default otherwise (same pattern
   as `app._calendly_url()`). Run via `python -m aca.core.relance` (standalone, meant to be
-  scheduled — e.g. daily — independent of `poller.py`).
+  scheduled — e.g. daily — independent of `poller.py`). §18: each follow-up drafted logs
+  `ACTION_FOLLOWUP_DRAFTED` to `activity_log` (`source=SOURCE_CLI`) — before this, a relance ran
+  invisibly to the activity journal, indistinguishable from nothing happening at all.
 - [user_store.py](aca/storage/user_store.py) — §15.1.6: named accounts, hashed passwords and roles
   (`data/users.sqlite`, `ACA_USERS_DB`). Replaces the "one shared password, nobody identified"
   model: PBKDF2-HMAC-SHA256 with a per-user salt and the cost stored **inside** the encoded hash
@@ -294,7 +736,39 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   to the old `ACA_UI_PASSWORD` gate**, so existing deployments don't break. Accounts are *disabled*,
   never deleted (the audit log references the username). CLI:
   `python -m aca.storage.user_store create <name> --role admin|operator` (also `list`, `passwd`,
-  `role`, `disable`, `enable`).
+  `role`, `disable`, `enable`). §18 adds two things: **`ROLE_VIEWER`** (`view_dashboard`/
+  `view_history` only — deliberately excludes `reject_lead`, since rejecting removes an analysis
+  from everyone's queue, a real mutation, not consultation; fills a real gap — a director or the
+  client themself wanting to see the dashboard/history without CRM-write rights used to have to be
+  handed `operator`), and the **TOTP columns/functions** (`totp_secret` nullable column via an
+  idempotent `ALTER TABLE`, `totp_required()`/`set_totp_secret()`/`get_totp_secret()`/`has_totp()`/
+  `verify_totp()`, `totp` field on `list_users()` — never the secret itself; see `totp.py` above and
+  `aca/ui/shared.py::_handle_totp_step` for the login-time wiring). CLI gains `totp-off <username>`
+  (deliberately CLI-only, no UI button — "a `disable 2FA` button in the UI would be exactly the
+  backdoor 2FA exists to close"). §24 adds `auth_state_fingerprint(username)` — a truncated hash of
+  (`password_hash`, `totp_secret`) consumed by `device_trust_store` so that changing either one
+  revokes every remembered browser automatically; it returns neither value, only their digest, since
+  it travels to another store, and `""` for an unknown account (matching no record, hence "no
+  trust" — the right default).
+- [device_trust_store.py](aca/storage/device_trust_store.py) — §24: browsers allowed to skip the
+  second factor (`data/device_trust.sqlite`, `ACA_DEVICE_TRUST_DB`). A separate registry from its
+  neighbours, and the distinction is the reason it exists (the same reasoning that separated
+  `task_store` from `followup_store`/`schedule_store` at §19): `user_store` holds **one row per
+  person** and nothing that expires; `session.py` governs how long an **already-open** session
+  lives; this holds **one row per browser** — dated, expiring, individually revocable — answering
+  neither "who are you" nor "is your session still alive" but "must this machine be asked for the
+  code". Three lifecycles, three purges. `verify()` requires **four** conditions, all necessary: the
+  token hash exists **for that account** (a token issued to A is worthless for B), the auth
+  fingerprint still matches, the browser is the same, and the deadline has not passed — judged here,
+  never from the cookie. None of the four fails loudly: a refusal merely re-asks for the code, and
+  **no failure counter is touched**, because an expired cookie is not an intrusion attempt and
+  conflating the two would lock out legitimate people. Expired rows are dropped opportunistically on
+  read (the table is tiny and a stale row has no value — the *usage* trace lives in `activity_log`),
+  and `purge_expired()` is wired into `retention.py`. `list_devices()` returns only an 8-character
+  extract of the hash: the list must help someone recognise their own machine, not hand over
+  anything replayable. Timestamps stored twice for the same reason as `schedule_store` — epoch REAL
+  for the expiry arithmetic, ISO text so a human opening the file can see why a device stopped being
+  trusted.
 - [audit_log.py](aca/storage/audit_log.py) — traceability (`data/audit.sqlite`, local, not the Google Sheet):
   `log_validation(thread_id, validated_by, classification, sender)` called from `ui.py`'s "Valider"
   handler and `aca/api.py`'s `_do_validate`. Since §15.1.6, `validated_by` comes from the
@@ -310,6 +784,64 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   write to the file can recompute everything; real immutability would need append-only storage or
   external anchoring. Pre-migration rows have no digest and are counted as "legacy, unchained",
   never reported as tampering. `python -m aca.storage.audit_log` runs the check (exit 1 on a break).
+- [tamper_chain.py](aca/storage/tamper_chain.py) — §17: `digest()` / `chain_hash()`, the hash-chaining
+  mechanism extracted from `audit_log.py` once a **second** journal needed the identical guarantee.
+  Copying fifteen lines of crypto into another module guarantees that one day one of the two gets
+  hardened and the other doesn't — the HMAC key read dynamically here and frozen at import there, a
+  field separator changed on one side only. One implementation, two callers. Pure/stdlib, and the
+  field ordering is the callers' contract (changing it would make every already-written digest look
+  forged).
+- [activity_log.py](aca/storage/activity_log.py) — §17: **the audit trail that answers "who did what,
+  when, from which machine"** (`data/activity.sqlite`, `ACA_ACTIVITY_DB`). `audit_log.py` records
+  exactly *one* event type — a lead validation — so the `operator` role introduced in §15.1.6 existed
+  with **none of its actions traced**: not logins, not *failed* logins (the §14 progressive lockout
+  blocked brute force **silently**, so an attack could never be noticed, dated or attributed), not
+  rejections (indistinguishable from a lead never handled), not settings changes (which redirect
+  where sales alerts go), not knowledge curation (which decides what the Stratège will assert to
+  prospects), not account management. 25 declared actions named `object.action` like `webhook.py`'s
+  events, `ACTION_LABELS` (French, because a journal a manager can't read isn't consulted, hence
+  isn't a control — a test fails if a new action lacks its label), `SENSITIVE_ACTIONS`,
+  `outcome` (success/denied/failure) and `source` (streamlit/api/slack/cli/poller). Read side:
+  `list_recent()` (SQL-side filters), `actors_summary()` (per-person rollup), `actor_profile()` (one
+  operator's actions **and the machines they used** — the literal answer to "from what PC"),
+  `verify_chain()`, `purge_older_than()` (wired into `retention.py`; an IP is personal data, so this
+  journal cannot grow forever — the purge deliberately breaks the chain at the cut point, which is a
+  legitimate deletion, not tampering, and is documented as such so a post-purge integrity warning
+  isn't mistaken for an incident). **"From which machine", honestly**: a web app cannot identify a
+  machine, and claiming otherwise in an audit log would be worse than writing nothing — what is
+  stored is the server-seen IP (the proxy's unless `X-Forwarded-For` is propagated, and validated via
+  `normalise_ip()` since that header is client-controlled hence forgeable), the user-agent
+  (declarative, so forgeable, capped at 400 chars), a `device_id` = truncated hash of (IP, UA) that
+  *groups* one workstation's actions without planting a tracking cookie, and `server_host` — which in
+  the Solo deployment (`run_solo.py` on a rep's laptop) **is** the PC. **`log()` never raises** (same
+  contract as `webhook.emit()`): it sits in the path of a CRM write, so a locked journal must not fail
+  a legitimate validation — it returns `ok=False` and prints instead. Two real defects that
+  verification caught rather than review: serialisation of `details` originally happened *outside* the
+  `try`, so `log()` **could** raise in violation of its own contract; and `st.context.ip_address` is
+  not guaranteed to be a string, so the value reached SQLite (`Error binding parameter 13`), `log()`
+  swallowed the exception per that same contract, and the audit line **vanished silently** — a
+  security journal you believe is complete and isn't is more dangerous than none, so values are now
+  normalised at the store boundary and a regression test locks it. **§18 additions**:
+  `lead_timeline(thread_id)` — chronological (ascending) view of one lead's history, reusing the
+  existing `target_id` column, consumed by `app_pages/1_inbox.py`'s "Historique de ce lead" (the
+  best value/effort ratio of the whole suggestions doc — the data already existed, only the view
+  was missing); `known_devices()`/`is_new_device()` — unusual-device detection as a **set
+  comparison**, deliberately not machine learning ("a model that 'learns' three salespeople's habits
+  would mostly produce inexplicable false positives"), `before_id` answers "was this device known
+  **at the time** of this action" (without it, the action being examined would count as its own
+  history), an empty `device_id` (API/machine calls) is never flagged as new; two-speed
+  `purge_older_than(days, sensitive_days=None)` — ordinary activity purges at `days`,
+  `SENSITIVE_ACTIONS` at `sensitive_days` if given, as **two separate `DELETE` statements** (not one
+  `CASE`) specifically so a SQL parenthesisation bug can't swap which duration applies to which
+  action class — wired into `retention.py` via the new `ACTIVITY_SENSITIVE_RETENTION_DAYS`
+  (default: twice `ACTIVITY_RETENTION_DAYS`); `csv_export(rows)`; `rows_for_period(year, month)` +
+  `archive_period(directory, year, month)` — writes a monthly CSV **and its `.sha256` fingerprint**
+  (via `tamper_chain.digest()`, HMAC'd if `ACA_AUDIT_HMAC_KEY` is set), **idempotent** (an existing
+  archive is never overwritten, so a re-run of the scheduled job can't silently replace a genuine
+  archive with an amputated one after a retention purge already ran) — answers the actual question a
+  SOC 2 audit asks ("show me week 28"), which a purge-only retention policy can't. New action
+  constants `ACTION_DATA_PURGED`/`ACTION_FOLLOWUP_DRAFTED`/`ACTION_JOB_RAN` back the machine-action
+  logging now wired into `poller.py`/`relance.py`/`retention.py`/`scheduler.py` (see their entries).
 - [analytics_store.py](aca/storage/analytics_store.py) — local SQLite event log (`data/analytics.sqlite`, P2 §11.4
   item 17) powering the "Tableau de bord" tab in `ui.py`. Unlike the Sheets `Leads` tab (only
   validated `DEMANDE_DEMO`/`DEVIS`) or `audit_log.py` (only validation events), this captures
@@ -327,7 +859,26 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   `record_tokens(thread_id, input_tokens, output_tokens)` (no-op if both zero; new `token_usage`
   table, fed by `sum_usage()` in `app.py`/`aca/api.py`) / `token_stats(days)` — the free "first
   step" of usage tracking anticipated in §12 item 4, now consumed by `aca/integrations/billing.py`
-  (below) for the paid step that follows it.
+  (below) for the paid step that follows it. §18 adds `get_draft_edit(thread_id)` — the read side
+  §22 adds four read-side aggregations, none of which needs new data — every column had been
+  written since the beginning and simply never displayed: `bucket_response_times(rows)` (pure, so
+  the one business judgement here — "past 24 h you have lost the prospect" — is testable without a
+  DB; **empty buckets are kept**, since a missing "over 24 h" bar reads as *no data* when it
+  actually means *no delay*, the opposite and the best news on the page — `RESPONSE_BUCKETS` is
+  ordinal, hence `sort=False` and a single hue rather than a categorical palette);
+  `by_source()` — the **adoption** measure, and the starkest built-but-never-shown gap: `source` is
+  recorded on every analysis and appeared nowhere, so nothing in the product could tell you whether
+  the automatic intake was working or whether people were still retyping emails by hand;
+  `hourly_volume()` — always returns all 24 hours *including zeros*, because the troughs are the
+  information, and it exists to make §19's intake-window setting a measured choice instead of a
+  guess; `top_senders()` — deliberately small `limit`, since exporting an address book is the
+  parametrable report's job (§20), not this block's.
+  `get_draft_edit()` is the read side
+  `record_edit()` never had: the most recent (original, edited) pair for a thread (no uniqueness
+  constraint on `thread_id`, so "most recent" is deliberately what validation actually sent), feeding
+  `ui_kit.diff()` in the lead timeline — §17 only ever logged character-count deltas ("340 → 412"),
+  which say nothing about *what* changed; the full text already lived in this table, only the read
+  was missing.
 - [retention.py](aca/core/retention.py) — GDPR/PII retention sweep (`RETENTION_DAYS`, default 365): purges
   `Leads` rows, their corresponding `data/checkpoints.sqlite` threads (`checkpointer.delete_thread`,
   removes the raw email body from graph state), and old validated `data/queue.sqlite` entries older
@@ -342,7 +893,13 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   registries — so in practice it didn't happen. Wanted side effect: `relance.py` stops chasing
   someone who just asked to be forgotten. The **audit log is deliberately kept** (legitimate
   interest, art. 17.3(e); deleting a row would also break the §15.2.7 chain and look like
-  tampering) — a documented decision, not an oversight.
+  tampering) — a documented decision, not an oversight. §18: `purge_old_activity()` now passes
+  `sensitive_days=ACTIVITY_SENSITIVE_RETENTION_DAYS` (default: twice `ACTIVITY_RETENTION_DAYS`) into
+  `activity_log.purge_older_than()` — the two-speed retention capability existed in `activity_log.py`
+  but was never actually invoked by the real scheduled job, exactly the "built but not wired" gap
+  this project's own §16.0 pass had already found once for scheduling itself; also logs
+  `ACTION_DATA_PURGED` to `activity_log` for both the periodic sweep and `purge_subject()`
+  (`SOURCE_CLI`), so a purge is now itself a traced event, not an invisible one.
 - [notify.py](aca/integrations/notify.py) — `send(message, webhook_url=None, email_to=None, subject=None)`: Slack
   webhook (`SLACK_WEBHOOK_URL`, or `webhook_url` override) then Gmail send-to-self (`NOTIFY_EMAIL`,
   or `email_to` override) as a graceful-degradation chain, same pattern as `enrichment.py`/`veille.py`.
@@ -358,6 +915,26 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   to a buttonless e-mail if Slack is absent. (Live approval requires a Slack **app** with
   interactivity enabled pointing at `/slack/interactions` — the incoming webhook alone posts the
   message but can't receive clicks; see `SLACK_SIGNING_SECRET` below.)
+- [webhook.py](aca/integrations/webhook.py) — §16.1.2: **outbound** events, the piece that makes the
+  n8n port idiomatic. Before it, the API only offered routes to *poll* (`GET /threads/pending`), so
+  an n8n workflow would have run a **Schedule** node polling in a loop — i.e. reimplementing
+  `poller.py` inside n8n, exactly what the port is meant to replace. ACA now **pushes** 5 events
+  (`analysis.paused`, `analysis.clarification`, `analysis.routed`, `lead.validated`,
+  `lead.rejected`, named `object.action` so an n8n filter can route on them), the workflow becomes
+  event-driven, and latency drops from "up to one poll interval" to immediate. Envelope is
+  `{event, org_id, timestamp, data}` — `org_id` included so one n8n endpoint serves several tenants
+  without a per-client URL, and `data` comes from `app.snapshot_from_state()`, **shared with**
+  `api._snapshot()` so a REST client and a webhook subscriber see the identical lead (asserted by
+  `test_webhook_payload_matches_api_snapshot_shape`, not merely hoped for). Optional HMAC-SHA256
+  signature (`ACA_WEBHOOK_SECRET` → `X-ACA-Signature`/`X-ACA-Timestamp`, timestamp folded *into* the
+  signature as an anti-replay window — the outbound mirror of `slack_verify.py`); unlike
+  `/slack/interactions` a missing secret does **not** fail the send, since an outbound webhook
+  triggers no CRM write on our side. Same graceful-degradation contract as `notify.py`
+  (`ACA_WEBHOOK_URL` absent = silent no-op) and — critically — **never raises**: `emit()` is called
+  from graph nodes under `RETRY_POLICY`, where an exception would cause up to 3 node re-executions
+  and, for `action_node`, a double CRM write (the real 2026-07-12 HubSpot bug). Not to be confused
+  with `notify.py`, which addresses a **human** (Slack prose, Valider/Rejeter buttons); this
+  addresses a **machine**. `python -m aca.integrations.webhook` sends a test event.
 - [ingest.py](aca/ingestion/ingest.py) — knowledge ingestion: `ingest_document(source, mode)` extracts text (PDF via
   `pdf_reader`, or `.md`/`.txt`), asks Groq to split it into Q/R pairs, and writes them to the
   Knowledge_Base tab via `sheets.write_knowledge_rows`. CLI (`python -m aca.ingestion.ingest <path> [append|replace]`)
@@ -370,69 +947,163 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   (`_format_qr`), and stages it into the FAQ tab (`sheets.write_knowledge_rows(..., statut="à
   valider")`) — invisible to the RAG until approved via the Streamlit sidebar. Graceful `""` fallback
   (same pattern as `enrichment.py`) if `TAVILY_API_KEY` absent / search fails / no answer.
-- [ui.py](ui.py) — Streamlit front-end, styled with a light "Fluent" theme
-  ([.streamlit/config.toml](.streamlit/config.toml)). `_check_auth()` gates the whole app before
-  anything else renders, in **three modes** (§15.1.6): named accounts with hashed passwords and an
-  `admin`/`operator` role ([user_store.py](aca/storage/user_store.py)) when any account exists;
-  otherwise the legacy shared `ACA_UI_PASSWORD`; otherwise open (dev). Both credentialed modes keep
-  the **progressive lockout** after 5 failed attempts (§14 item US-41,
-  [auth_lockout.py](aca/core/auth_lockout.py) — exponential backoff capped at 15 min, since the
-  gate previously had no attempt limit at all) and now carry a **session with an absolute TTL and
-  an idle timeout** ([session.py](aca/core/session.py), §15.1.7 — previously `authed = True` held
-  for as long as the tab lived). `_can(permission)` gates the admin-only surfaces: the Réglages
-  form (operators see a read-only view), the knowledge-base uploader and the "FAQ en attente"
-  curation panel, and a **"Comptes et rôles"** section for creating/disabling accounts and
-  resetting passwords. `_safe_error()` replaces four `st.error(f"… : {e}")` sites that printed raw
-  exception text — which for an API error routinely carries the called URL, headers, or a key
-  fragment — with a generic message plus a server-side log (§15.3.2). Admins also get a
-  security-posture expander driven by `prod_check.check()`, shown to admins only since it
-  enumerates precisely what is *not* protected. Top of the sidebar shows the signed-in user and a
-  logout button (the "Validé par" free-text field survives only in dev/shared-secret mode, where
-  nobody is identified), then the **"File d'attente"** panel
-  (`queue_store.list_pending()`) — analyses queued by `poller.py`; clicking "Ouvrir" on an entry
-  calls `load_queued_thread()` to load its already-paused state (no re-run — the graph already ran in
-  the poller process) via the shared `_sync_result()` helper (which also logs the classification event
-  to `analytics_store.py` — idempotent, so opening an already-poller-logged thread is a no-op). Below
-  that: Gmail import (fetch unread → pick one → load into form, the manual one-at-a-time path —
-  raw `(filename, bytes)` attachment pairs are now carried through as `attachments_raw` rather than
-  pre-extracted, §11.6 — extraction happens in the graph's `ingestion_node`) or manual form entry
-  (sender/subject/body + multi-file PDF/Word/Excel upload) → generates a `thread_id` and runs the
-  graph via an `advance_graph()` helper that streams each node live in an `st.status` block (with a
-  `UsageMetadataCallbackHandler` attached to the stream `config` — §13, aggregated via
-  `aca_graph.sum_usage()` and logged with `analytics_store.record_tokens()` once the stream ends),
-  then reads `get_state(config)`. Main area is four `st.tabs`: **"Nouvel e-mail"** (the flow
-  above), **"Tableau de bord"** (KPIs + charts from `analytics_store.py`, period filter via
-  `st.segmented_control`, incl. §13's "brouillons édités" et "tokens/analyse" tiles),
-  **"Historique"** (§12 item 2 — a searchable table over `audit_log.list_recent()`, filtering
-  client-side across sender/classification/validator/thread ID), and **"Réglages"** (§12 item 7,
-  audited §14 — a form backed by
-  [config_store.py](aca/storage/config_store.py) letting a manager edit the Calendly link,
-  SUPPORT/HR routing addresses and webhooks, and the relance cadence/threshold, without touching
-  `.env`; picked up dynamically by `app.py`'s `_calendly_url()`/`_routing_destinations()` and
-  `followup_store.relance_max_rounds()`/`relance._relance_days()` on the very next run — no
-  restart needed). If a clarification `interrupt` is pending, it renders the
-  agent's question + a reply box and resumes with `Command(resume=...)` (looping until the
-  validation pause); otherwise it shows a colored category badge / returning-customer + duplicate
-  banners / a **risk-flags error banner and a knowledge-gap warning banner** (§13, `risk_flags`/
-  `knowledge_gap`) / a "Fiche prospect" card (metrics + urgency + company profile) / a "Raisonnement
-  de l'équipe" expander (`reasoning_log`, now opening with a **visual graph render** — §12 item 5,
-  `st.graphviz_chart` over a DOT string built from the real `StateGraph` topology, gold-highlighting
-  the active node live during `advance_graph()`'s stream and green for completed nodes; the same
-  static render also appears in the `SUPPORT`/`AUTRE` "Détail du routage" expander) / the
-  proposition, now rendered in an **editable
-  `st.text_area`** (§13) rather than read-only — "Valider" first calls `app.update_state(config,
-  {"draft_response": edited})` if the human changed it (so `action_node` writes the edited version
-  to Sheets/HubSpot/the Gmail draft) and `analytics_store.record_edit()`, then resumes with
-  `app.invoke(None, config)` → `action_node`, then `queue_store.mark_validated()` (no-op if the
-  thread wasn't queue-sourced), `audit_log.log_validation()`, and `analytics_store.record_validation()`.
-  `SUPPORT` renders like `AUTRE` (info box + routing-detail expander, no CRM card/validation button —
-  both are routed by `routing_node` instead). The sidebar also has a **knowledge-base uploader** (calls
-  `ingest.ingest_document`), a **"FAQ en attente" review panel** (`sheets.get_pending_knowledge_rows`)
-  with Valider/Rejeter buttons per row (`approve_knowledge_row`/`reject_knowledge_row`) for content
-  staged by `veille`, and a **"Confidentialité des données" expander** (§14 item US-42, links to
-  [docs/PRIVACY_POLICY.md](docs/PRIVACY_POLICY.md) — the GDPR privacy policy that was previously
-  entirely missing, only the technical `retention.py` purge existed). `SPAM` shows a plain error
-  box, no validation button.
+- [ui.py](ui.py) — §18: **thin `st.navigation` router**, styled with a light "Fluent" theme
+  ([.streamlit/config.toml](.streamlit/config.toml)). Before §18 this was a single ~1700-line file
+  mixing session/audit logic with every tab's body; nothing enforced that two tabs stayed consistent
+  about "who is signed in" since each read `st.session_state` directly. Now `ui.py` only does what
+  genuinely needs to run on *every* page: resolve `BRAND`, `st.set_page_config()` (must stay the
+  script's first Streamlit call), inject `branding.css()`, call `prod_check.enforce()` then
+  `aca.ui.shared.check_auth(BRAND)` (`st.stop()` if it returns `False`), render the admin-only
+  security-posture expander and the brand hero banner (status pills: signed-in user/role,
+  pending-queue count, **new-since-login count** — see below, demo-mode warning), the session
+  defaults for the manual-entry form, the **sidebar** (signed-in user/logout, "File d'attente" with
+  its "Ouvrir" button, Gmail import, §23's "Présentation" block linking to
+  [static/landing.html](static/landing.html) — placed *before* the admin-only curation block on
+  purpose, since an ungated item rendered after a gated one lands in a visibly different place for
+  an operator than for an admin — the admin-only knowledge-base uploader + "FAQ en attente" review
+  panel, the "Confidentialité des données" expander), builds the page list — `1_inbox.py`
+  (default), `2_dashboard.py`, `3_history.py`, `4_activity.py` (only appended if
+  `_can(PERM_MANAGE_USERS)` — an operator's `st.navigation()` call never even declares this route, so
+  it isn't just hidden from the menu, it isn't reachable at all, same effective gate as the old
+  `if tab_activity is not None:`), `5_settings.py` — via `st.Page(...)`/`st.navigation(pages,
+  position="top")` ("top" rather than "sidebar": with only 3-5 pages and an already-busy custom
+  sidebar, a horizontal bar avoids the two competing for the same rail), then `pg.run()`, then the
+  brand footer. Two sidebar buttons ("Ouvrir" on a queued item, "Charger cet e-mail" from Gmail) call
+  `st.switch_page("app_pages/1_inbox.py")` instead of a plain `st.rerun()` — under the old
+  `st.tabs()`, *every* tab's body executed on *every* rerun, so a loaded result was visible
+  regardless of which tab was visually active; `st.navigation` only executes the **selected** page's
+  script, so without the explicit switch a result loaded from the sidebar would stay invisible until
+  the person clicked "Nouvel e-mail" themselves. Also §18 (recap #5.5 "in-app notifications"): tracks
+  `_seen_pending_count` (`setdefault`, so it's fixed once per authenticated session — "new since you
+  signed in") against the live pending count, shows a "N nouvelle(s) depuis votre connexion" alert
+  pill plus a sidebar "Marquer comme vu" button that resets the baseline. **§18 tangent**: renders
+  `aca.ui.shared.language_switcher()` in the sidebar **before** `prod_check.enforce()`/`check_auth()`
+  — an earlier draft placed it after the auth gate, which is exactly the reachability bug found while
+  verifying: `check_auth()` returns `False` on the login screen and `ui.py` calls `st.stop()`
+  immediately after, so anything placed later in the script never renders pre-login, leaving a person
+  stuck on a French login screen with no way to switch before signing in.
+- [aca/ui/shared.py](aca/ui/shared.py) — §18: the extraction that made the page split possible.
+  `st.session_state` is shared by every page of one `st.navigation` session, so these functions need
+  no adaptation to be called from `ui.py` **and** any `app_pages/*.py`; every page imports the ones
+  it needs aliased back to their original underscore names (`audit as _audit`, `can as _can`, …) so
+  no call site anywhere had to change during the split — the mechanical, low-risk way to move code
+  that already worked. `client_context()`/`audit()`/`audit_denied()`/`safe_error()` are the §17
+  activity-logging helpers, unchanged in behaviour. `check_auth(brand)` is `ui.py`'s old
+  `_check_auth()`, now taking `brand` as a parameter (resolved once in `ui.py`, not a second time
+  here) and, new in §18, routing a password-verified `admin` account through
+  `_handle_totp_step(username, role, brand, now)` before opening the session when
+  `user_store.totp_required(role)` — a pending username/role lives in
+  `st.session_state["_totp_pending_username"/"_totp_pending_role"]` across reruns (Streamlit has no
+  other way to "remember" being mid-flow between two form submissions). Two distinct branches, never
+  conflated: an already-enrolled account (`has_totp()`) sees a plain 6-digit field, `verify_totp()`
+  failure re-uses `_register_failure()` — the **same** progressive-lockout counter as a wrong
+  password, since a second factor with unlimited guesses isn't one; an account required to have TOTP
+  but not yet enrolled is forced through enrollment first — `generate_secret()` lives only in
+  `st.session_state["_totp_enroll_secret"]` until a *first correct code* confirms it, then
+  `user_store.set_totp_secret()` persists it — a secret generated but never confirmed must not guard
+  the account, in case the browser tab is closed mid-setup. Enrollment renders the secret as an
+  **actual scannable QR** (`_totp_qr_png()`, via `segno` — pinned, pure Python, zero transitive
+  dependencies of its own, encodes and rasterises PNG bytes without needing Pillow — present in the
+  venv only as a transitive dependency of Streamlit itself, the same trap already flagged once for
+  `cryptography`) rather than raw `otpauth://` text, with the grouped secret tucked into a collapsed
+  "Impossible de scanner ?" fallback — retyping a 32-character base32 string by hand is exactly the
+  friction that makes people abandon a second factor. Deliberately kept out of `totp.py`, whose whole
+  point is staying stdlib-only for the actual crypto; rendering an image is the UI layer's concern.
+  `_warn_before_expiry()` (§18 recap #6, see `session.py`). **§18 tangent**: `current_language()`
+  (reads `st.session_state["_lang"]`, default `i18n.DEFAULT_LANGUAGE`), `t(key, **kwargs)` (thin
+  wrapper over `i18n.translate()` bound to the current language — the only i18n entry point every
+  page/`ui.py` actually calls), and `language_switcher()` (`st.segmented_control` over
+  `i18n.LANGUAGES`, labelled via `i18n.LANGUAGE_LABELS`; a changed selection sets `_lang` and
+  `st.rerun()`s — Streamlit has no other way to make every already-rendered widget on the page pick
+  up the new language mid-run). `_warn_before_expiry()`/TOTP/auth screens above are themselves
+  translated via `t()`, so the login flow — the one screen every role sees before anything else —
+  isn't French-only for an English-speaking evaluator. `advance_graph()`/`sync_result()`/
+  `load_queued_thread()`/`build_graph_dot()`/
+  `completed_graph_nodes()`/`NODE_STEPS`/`CATEGORY_STYLE`/`GRAPH_FIXED_NODES` are the old
+  graph-interaction helpers, needed both by `app_pages/1_inbox.py` (launching/resuming the graph) and
+  by `ui.py`'s own sidebar "Ouvrir" button (`load_queued_thread`) — living here rather than in the
+  inbox page specifically so the router doesn't have to import from a page.
+- [app_pages/1_inbox.py](app_pages/1_inbox.py) — §18: the "Nouvel e-mail" flow, the largest and
+  riskiest single piece of the page split (re-verified end-to-end via `AppTest` — full demo-mode
+  analysis through classification/extraction/agents/draft, then both validate and reject paths —
+  before and after the extraction, output compared). Demo-mode example picker (§16.3); the manual
+  form (sender/subject/body + multi-file upload, `attachments_raw` carried raw into the graph's
+  `ingestion_node`, §11.6); `advance_graph()` on launch, streaming each node live; on a pending
+  clarification `interrupt`, the question + reply box, looping via `Command(resume=...)` until the
+  validation pause; the classification-specific rendering (`SPAM` plain error, `SUPPORT`/`AUTRE`
+  routing-detail expander, else the full "Fiche prospect" card, risk-flags/knowledge-gap/
+  injection-flags banners, the "Raisonnement de l'équipe d'agents" expander with the live graph
+  render); §18 additions inside the qualifying-lead branch: an **"Historique de ce lead"** expander
+  (recap #5) — `activity_log.lead_timeline(thread_id)` mapped into `ui_kit.timeline()` events (tone
+  by action/outcome, an unusual-device note via `is_new_device(actor, device_id, before_id=row["id"])`
+  on each row) plus, if `analytics_store.get_draft_edit()` returns one, `ui_kit.diff()` of the
+  before/after draft; a **"Télécharger en PDF"** button (recap #8) — `pdf_export.build_proposal_pdf()`
+  called on every rerun while a result is shown (cheap, no LLM/network call), the click itself logged
+  as `ACTION_DATA_EXPORTED` (a PDF carries the prospect's name/contact, the same "export = personal
+  data leaving the app" reasoning as the activity journal's CSV button). The editable proposition
+  `st.text_area`, the validation/rejection handlers (`app.update_state`/`app.invoke(None, …)`,
+  `audit_log.log_validation()`, `analytics_store.record_validation()`, `followup_store.track()`) are
+  unchanged from §17, moved verbatim.
+- [app_pages/2_dashboard.py](app_pages/2_dashboard.py) — §18: KPIs/charts from `analytics_store.py`
+  (period filter via `st.segmented_control`, brand-derived `color=` on all three charts), moved
+  verbatim from the old "Tableau de bord" tab. Adds an empty-state demo link (recap #5.6): when
+  `total == 0` and `demo.is_enabled()`, a "Charger un exemple de démonstration" button
+  `st.switch_page`s to the inbox — an empty dashboard used to just explain *why* it was empty; in
+  demo mode it now also says what to do about it. **§22 — it showed a *state* and never a *change*.**
+  Five counters and three charts over "the last N days" answered none of the three questions the
+  page is actually opened for (*is it better than before?*, *are we replying fast enough?*, *is the
+  automatic intake doing anything?*) — while the data for all three was already being recorded, the
+  same built-but-never-read gap as `get_draft_edit` (§18) and `list_events` (§20). Now: **deltas on
+  every KPI**, reusing `reporting.previous_period()` rather than reimplementing it (the screen and
+  the monthly PDF must never disagree on the same period) and `reporting._kpi`'s `better` direction
+  via a declared `_DELTA_COLOR` map — a rising median response time reads as a *degradation*, and
+  the draft-edit rate stays **grey**, because a high rate means improvable drafts while a zero rate
+  may mean validating without reading, so the data cannot justify a colour. A missing previous value
+  renders **nothing**, never "+0", which would claim stability where there is no basis for comparison.
+  Four new distributions (see `analytics_store` §22 below), an `st.fragment` so changing the period
+  reruns only the dashboard rather than the router's whole sidebar, and horizontal bars wherever
+  labels are long (`DEMANDE_DEMO`, `proposition rédigée`) since Vega rotates them 90° otherwise.
+  Three alignment fixes: the token counter **leaves the hero row** (an ops metric, and at five items
+  the row fell to "4 + 1"); the KPI sparkline is **removed** (it existed for one metric of five, made
+  that card taller than its neighbours, and plotted the same series as the chart directly below);
+  and the row itself is de-raggedised in CSS — see `branding.py`. **Deliberately no global category
+  filter**: it could not apply to the funnel, the delays or the tokens without rewriting five
+  queries, so half the screen would not move and the reader would no longer know what they are
+  looking at. A filter that lies about its scope is worse than none.
+- [app_pages/3_history.py](app_pages/3_history.py) — §18: the searchable `audit_log.list_recent()`
+  table (§12 item 2), moved verbatim from the old "Historique" tab.
+- [app_pages/4_activity.py](app_pages/4_activity.py) — §18: the admin-only activity journal (§17),
+  moved verbatim from the old fifth tab — same gate as before (not reachable at all for a non-admin,
+  see `ui.py` above), same reasoning for keeping it admin-only (exposing failed logins, IPs and
+  colleagues' workstations to an operator would make mutual surveillance an open facility).
+- [app_pages/5_settings.py](app_pages/5_settings.py) — §18: the "Réglages" form
+  ([config_store.py](aca/storage/config_store.py)), the "Apparence et identité visuelle" branding
+  panel, and the "Comptes et rôles" account-management panel, moved verbatim from the old fourth tab
+  — unlike Journal d'activité, this page is **always** in the navigation (an operator sees a
+  read-only settings view; `_can()` checks gate what's editable within the page itself, same as
+  before the split).
+- [app_pages/6_reviews.py](app_pages/6_reviews.py) — §20: the review-request surface, serving **two
+  roles on one page** in the order that matches reality — what you *received* first (it is a queue,
+  and it blocks a colleague), then what you send, then what you already sent. Two separate pages
+  would have forced an admin — who both receives and sends — to switch screens for one subject. The
+  picker is an `st.dataframe(selection_mode="multi-row")` over the pending queue (or the last 30
+  days, so "I have a doubt about what I did yesterday" stays possible), so "several at once" is a
+  real multi-select rather than a repeated single action. Sending is gated on
+  `PERM_VALIDATE_LEAD`/`PERM_REJECT_LEAD`: a `viewer` consults, and letting a read-only role hand
+  work to an admin would exceed what "read-only" announces. Choosing `@admins` when **no** admin
+  account exists is refused loudly rather than written to a table nobody would ever read (the real
+  shared-secret-mode case).
+- [app_pages/7_reports.py](app_pages/7_reports.py) — §20: the report builder — period (last month /
+  this month / 7-30-90 days / exact dates), sections grouped by family with each one's description
+  shown as help, the email table's **columns** and filters (that is where "category and sender
+  only" comes from), a free title and context note printed on the cover, comparison on/off, and
+  reusable presets. The "to" date has **one day added** before it reaches the engine: the engine's
+  upper bound is exclusive, but a person choosing "up to the 15th" means the 15th included — without
+  this, that whole day would silently vanish from the report. An on-screen preview renders every
+  block before download, so an empty section is discovered here (and the period widened) rather than
+  inside the PDF. **Two access gates for one reason**: the `activity`/`actors` sections reproduce the
+  Journal d'activité, admin-only since §17 — and so does the monthly archive list, which contains
+  them. A report serving that content without the same gate would be a plain bypass of the rule.
 - [gmail_reader.py](aca/integrations/gmail_reader.py) — Gmail API integration (OAuth "installed app" flow):
   `get_gmail_service()` (auths, caches token in `credentials/gmail_token.json`), `list_unread_emails()`,
   `get_email()` (body + **all** PDF/Word/Excel attachments — `_extract_attachments()` walks every
@@ -535,6 +1206,56 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   `ingest.py`/the Knowledge_Base uploader (single PDF, unchanged). Internally also exposes
   `extract_raw_text_from_pdf()` (no truncation) + the `MAX_CHARS` constant, reused by
   `attachment_reader.py` below so multi-file truncation happens once, on the combined text.
+- [pdf_export.py](aca/integrations/pdf_export.py) — §18 (recap #8): PyMuPDF's *write* side — the
+  content (`draft_response`) and the brand (§17) both already existed, but a commercial who wanted to
+  send the proposal some way other than the Gmail draft had to copy-paste it into Word and reformat
+  by hand; it's also the most direct demo argument ("here's the document your client receives, in
+  your colours"). **No new dependency** — `pymupdf` is already pinned for *reading* attachments
+  (`pdf_reader.py`); this reuses its `insert_htmlbox()` (a bounded HTML/CSS subset, so line-wrapping
+  isn't computed by hand — the source of truncated text the moment a company name runs long).
+  `build_proposal_pdf(draft, extracted_info, classification, sender, tokens=None)` renders a coloured
+  header band in `BRAND_PRIMARY` with the logo (bitmap only — `insert_image` can't place a vector
+  image, so SVG is silently skipped, same "omit, don't fail" choice as elsewhere), a fiche-prospect
+  table, the draft (newlines converted to `<p>` tags, since `insert_htmlbox` ignores raw `\n`), and a
+  footer stating the proposal was reviewed by a human before sending — **not decorative**: the
+  product's whole premise is a human validation gate, and an exported document that doesn't say so
+  would misrepresent that to whoever reads it later. **Never raises** (same contract as
+  `notify.py`/`hubspot.py`) — a broken download button must not take down the validation screen, the
+  application's vital function. `proposal_filename()` sanitises the LLM-extracted company name
+  (Unicode-normalised, non-alphanumeric stripped) before it lands in a `Content-Disposition` header —
+  the name comes from an inbound e-mail, hence an untrusted source. Verified via a real round-trip in
+  `tests/test_pdf_export.py`: build → reopen with `fitz` → extract text → assert the company name,
+  contact, draft content and the human-review footer are genuinely present (not a blank/broken
+  document), plus header-injection/path-traversal characters (`\r`, `\n`, `/`, `"`) neutralised in the
+  filename.
+- [report_pdf.py](aca/integrations/report_pdf.py) — §20: the **themed, multi-page renderer** for
+  `reporting.collect()`'s output. **No new dependency, deliberately**: charts are drawn with
+  PyMuPDF primitives (already pinned for reading attachments and writing proposals). Pulling in
+  matplotlib for four bar charts would have added tens of megabytes, a font to embed and a second
+  rendering engine to the Docker image — to produce raster images that would have needed
+  re-theming by hand anyway, since the palette comes from the client; vector rectangles are
+  crisper in print, weigh kilobytes and take the brand colour for free. **Always on-brand, never
+  illegible**: a client's dark theme is right on screen and disastrous on a document meant to be
+  printed and forwarded, so the paper is forced light and the client's ink colour is kept only if
+  its contrast holds (WCAG AA 4.5); the accent colour is always honoured. Same never-raises
+  contract as `pdf_export.py`/`notify.py` (returns `None`) — it is called by a nightly job as well
+  as by a button. `write_pdf()` is **idempotent by default** (an existing report is never
+  overwritten, exactly like `activity_log.archive_period`: a re-run after a retention purge would
+  otherwise replace a complete report with an amputated one under the same name). Two real defects
+  found by *looking at the rendered document*, not by re-reading the code: (1) every French
+  paragraph overran the right margin, because `fitz.get_text_length()` badly under-measures
+  accented characters ("ééééééééée" measured 22.8pt against 45.6pt for "eeeeeeeeee") — fixed by
+  measuring through `fitz.Font(...).text_length()`; (2) `…` and `—` rendered as stray dots in every
+  truncated cell and every empty value, because a PDF's Base-14 fonts are written with a Latin-1
+  encoding — the glyphs exist in the font but the document cannot address them, while accented
+  letters *are* in Latin-1 and rendered fine, which is what made it easy to miss. Fixed at the
+  **drawing boundary** (a single `_put`) rather than at the twenty-three call sites, the same
+  reasoning as `console.py` for console encoding; the trailing
+  `encode('latin-1', 'replace')` is not belt-and-braces, since an inbound email subject can contain
+  any Unicode at all. A third defect was found by a test rather than review: a typo in a `BRAND_*`
+  hex made `_Palette` raise, so `build_report_pdf` returned `None` per its own contract and **the
+  nightly report silently stopped being produced** — a colour is decoration and must not decide
+  whether the document exists (now falls back per token).
 - [attachment_reader.py](aca/ingestion/attachment_reader.py) — `extract_text_from_attachments(attachments)`: the
   multi-format email-attachment path (P2 §11.4 item 16) — a real RFP arrives with several PDF/Word/
   Excel documents, not one PDF. Dispatches by extension (`.pdf` → `pdf_reader.extract_raw_text_from_pdf`,
@@ -559,6 +1280,229 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   `thread_id` inside LangGraph's own queries) are reported as expected rather than flagged — a
   noisy report stops being read. Run live 2026-07-26: **5 tables, 0 without a policy, connecting as
   the restricted `aca_app`**. Absent `DATABASE_URL` = says so and exits 0.
+- [run_solo.py](scripts/run_solo.py) — §16.0: one-command launcher for the **Solo** tier (no n8n) —
+  starts `uvicorn aca.api:api`, `streamlit run ui.py`, `python -m aca.core.poller` and
+  `python -m aca.core.scheduler` together, streaming each child's output with a prefix, and stops
+  them all cleanly on Ctrl+C. Without it you needed four terminals and four commands to remember,
+  which in practice is enough for the poller and scheduler to **never** be started — hence for the
+  product to *look* manual when it isn't. Deliberately imports no `aca.*` and no third-party
+  package: it lives outside the package and runs as a direct script (which doesn't put the repo
+  root on `sys.path`, same constraint as `setup_faq.py`); children are spawned with `cwd` = repo
+  root so their own `aca.*` imports resolve. Flags: `--only api,ui`, `--without ui`, `--api-port`.
+- [export_graph.py](scripts/export_graph.py) / [export_openapi.py](scripts/export_openapi.py) —
+  §16.1.5/§16.1.6: regenerate `docs/assets/graph.dot` + `graph.json` (from the **compiled** graph
+  via `graph_topology`, plus `architecture.svg` only if a `dot` binary exists — Graphviz is not a
+  project dependency, the UI renders DOT browser-side via viz.js) and `docs/openapi.json`. Both are
+  idempotent and are re-run in CI to prove the committed artifacts haven't drifted from the code.
+  `openapi.json` is committed on purpose: a schema generated on demand can't be imported by someone
+  who hasn't yet got the project running.
+- [Dockerfile](Dockerfile) / [docker-compose.yml](docker-compose.yml) — §16.1.5: one image for all
+  four services, and two compose profiles — `solo` (api + ui + poller + scheduler, 4 services) and
+  `enterprise` (the same **plus n8n**, 5). Validated by counting the services each profile resolves
+  to; the image itself has never been built (Docker isn't installed on this machine).
+- [n8n/](n8n/) — §16.1.5: `aca_workflow.json` (importable workflow) + `README.md` (setup, the 5
+  outbound events, envelope shape, HMAC verification, useful endpoints). Never exercised against a
+  real n8n instance — none exists for this project; n8n would simply be an HTTP client of `api.py`.
+- [.github/workflows/ci.yml](.github/workflows/ci.yml) — §16.4, closes §15.4.7 (there was no
+  `.github/` at all). Three jobs: the test suite on Python 3.11 (the README's stated floor) and 3.14
+  (the actual dev version), `pip-audit`, and a check that the derived artifacts above haven't
+  drifted. Possible at all only because the suite is **fully offline** — `conftest.py` blanks every
+  key before any `aca.*` import and redirects all 8 SQLite paths to a temp dir — so it runs on a
+  public runner with **no secrets**. Won't execute until the first push to a remote.
+- [static/landing.html](static/landing.html) — §16.5, rebuilt §23, turned into an **English
+  marketing surface at §23.1**, made commercially operable at **§23.2**. Carries the same "verified
+  live vs. not" section as the README — putting that on the sales page rather than burying it is a
+  choice. Printable to PDF via a `@media print` block. Not hosted anywhere (same reason as
+  §15.1.9's TLS).
+  - **§23.2 — `CONFIG`, the one seam.** A single object at the top of the `<script>` holds every
+    commercial URL (`calendly`, `contact`, `demo`, `pay.discovery|build|care`). Nothing here is read
+    from the environment and nothing can be: this is a static file served as-is, so `.env.example`'s
+    §7 block is an operator's *aide-mémoire*, explicitly not configuration. Each field empty
+    degrades to something honest rather than to a dead control — the project's "absent = feature
+    skipped" contract, restated as "never absent = a link to nowhere".
+  - **§23.2 — the calendar was fiction, and could not have been anything else.** It had no
+    availability data, no `fetch`, no backend, and offered every future weekday including full ones;
+    its own footnote admitted it booked nothing. "A booked day turns grey" is therefore not a
+    rendering problem but a *source of truth* problem, and the fix is to cede the card to **Calendly**,
+    which already knows the diary. Two branches: `CONFIG.calendly` set ⇒ a themed `<iframe>`
+    (`hide_event_type_details`/`background_color`/`primary_color`, plus `utm_content=<tier>` and
+    name/email prefill) injected by `IntersectionObserver` at `rootMargin:400px`, so a visitor who
+    never reaches the section never contacts Calendly; empty ⇒ the designed picker stays, untouched.
+    Deliberately a **plain iframe, never `assets.calendly.com/…/widget.js`** — the page loads zero
+    remote scripts and that property outweighs auto-resizing (the price is a fixed frame height, set
+    in CSS at two breakpoints). The offline picker is **kept, not deleted**: it is what lets the file
+    still work as a self-contained document, which was the entire reason it has no dependencies. The
+    head comment declaring "no remote script, no remote image" was **amended rather than left
+    standing** — a file that documents its own trade-offs must not silently acquire a new one.
+  - **§23.2 — three tiers that finally do three things.** All three CTAs were `<a href="#book">`, so
+    a $1,000 click and an $18,500 click were indistinguishable at runtime and the chosen tier reached
+    nothing. Now `data-tier`/`data-cta`, three distinct labels, and a `.tier__when` line stating when
+    money actually moves: discovery **paid online up front** (Stripe's own post-payment redirect
+    pointed at `CONFIG.calendly` makes pay → book one chain with no server on our side), build
+    **quoted after the scoping call** (`pay.build` left empty on purpose), care **monthly, starting
+    after handover**. The choice survives the jump to `#book` in three places — a visible chip, the
+    Calendly `utm_content`, and the mail body — because a distinction the reader cannot see the page
+    register is decorative. `.tier__when` is deliberately **not** in `--signal`: amber means "a human
+    must decide" and appears three times on this page; spending it on a caption would empty it.
+    Stripe itself is a **seam, not an implementation** — no Checkout Session endpoint, no
+    `POST /stripe/webhook`, no order store; when built, mirror `/slack/interactions` (outside
+    `require_api_key`, signature-verified over the raw body, failing closed without the secret).
+    Not to be confused with [billing.py](aca/integrations/billing.py), which meters tokens and
+    collects nothing.
+  - **§23.2 — security: 12 flat rows → 5 collapsible groups**, reusing the FAQ's mechanics wholesale
+    (`data-open`, `grid-template-rows:0fr→1fr`, the `.faq__sign` glyph), so its reduced-motion
+    escape hatch and print override are inherited rather than reimplemented. Five groups and not the
+    planned four because the grouping is **contiguous** on the existing 01→12 order: no item had to
+    move, hence none of the twelve long bilingual strings had to be retyped and silently corrupted.
+    Panels are **independent**, unlike the FAQ's one-at-a-time — someone comparing two controls has a
+    real reason to hold both open. All twelve stay in the DOM when collapsed, so `Ctrl+F`, indexing
+    and print still find them, and the print block forces the groups open.
+  - **§23.2 — the section the page was missing, and the FAQ it contradicted.** Three tiers were sold
+    and nothing said what arrives after paying, so a new "05 — How you get access" (FAQ → 06,
+    Contact → 07) walks demo → pay-or-scope → provisioning **on the client's infrastructure** →
+    branding. Delivery model settled explicitly as **hybrid**: the demo is hosted by us and holds no
+    real data, production lives with the client. That made the FAQ's "nothing is hosted on our side,
+    because there is no 'our side'" half-false, so both affected answers were rewritten instead of
+    left contradicting what the page now sells. Two ducked questions added (what am I paying for and
+    when; who owns the keys and pays for the tokens), plus `og:`/`twitter:` share meta and an
+    `Organization` JSON-LD — deliberately **no** `FAQPage` block (its answers must match the rendered
+    text word for word, i.e. a second copy of eight bilingual answers in the same file, the exact
+    divergence risk that made French an inline attribute here) and **no** `Offer`/price block (the
+    three figures are still placeholders, and a placeholder in a search index outlives the page).
+  - **§23.2 — four defects found by rendering, none visible on re-reading.** (1) **The contact form
+    went nowhere**: `mailto:?subject=…` carried *no recipient*, so every submission opened a mail
+    client with an empty `To:` — the page's only conversion path, broken from the start and silent,
+    because nothing raises when you do that and the form appeared to work. (2) **`[hidden]` hid
+    nothing**: `.chip{display:inline-block}` and `.btn{display:inline-flex}` are author rules of the
+    same specificity as the UA's `[hidden]{display:none}`, and author wins — so an empty pill sat on
+    the page permanently and *both demo buttons showed with no demo configured*, precisely what the
+    attribute was there to prevent; fixed globally with `[hidden]{display:none !important}`. (3) **An
+    open accordion read "|"**: rotating the glyph 90° swaps which bar is horizontal, so the *wrong*
+    one was being faded — a pre-existing FAQ defect, inherited by the new groups and fixed for both.
+    (4) A chosen time survived a date change, focus was destroyed on every calendar selection, and
+    month nav had no lower bound. Verified on **both** branches in a real browser (the `mailto:`
+    string captured via a probe copy, since Chromium refuses to let a test redefine
+    `window.location.href`). **Not** verified, and stated as such: no full day has been *seen* to
+    grey out — that is Calendly's rendering and no account exists for this project; our half (ceding
+    the card, injecting at the right moment with the right parameters) is what was checked. No Stripe
+    link has been created or tested, the three prices remain placeholders, and nothing was opened on
+    a real phone.
+  - **§26 — every illustration rebuilt in typographic blocks, and one real photograph.** The
+    reference page's art direction was **measured in a browser, not inferred from a screenshot**,
+    and the finding is that all of its illustrations are a single technique with no canvas, no SVG
+    and no image behind any of them: a `<div>` of monospace text using **only three Unicode shade
+    glyphs** (`░ ▒ ▓`, U+2591-93) at 10px / `line-height:1em` / `letter-spacing:0` /
+    `rgb(176,176,176)`, **drawn twice** — a sharp copy over a `blur(11px)` copy. The blur is not a
+    finish, it *is* the effect. Six instances confirmed one by one (mass 47×170; icons
+    39×64/51×83/63×104/60×98 in `#00a2ff`/`#ff4ffc`/`#47e6c3`/`#ffbd2e`; footer hand 69×170); the
+    only image the whole site downloads is the hand photo. This page's renderer therefore moved off
+    the punctuation ramp `" .:-=+*#%@"` — honest ASCII art and the wrong medium, since punctuation
+    has internal shape so the field reads as *writing*, whereas shade blocks fill their em box and
+    tile into continuous tone. `--font-block` is a **separate stack from `--font-mono`**: Fragment
+    Mono has no shade glyphs, so they would resolve through per-glyph fallback at a different advance
+    width and every row would shear (a check asserts one distinct row width per field).
+    **The two ASCII hands are gone, and could not have been fixed.** Three successive redraws all
+    resolved to ovals for a structural reason, not a drawing one: at this resolution the gap between
+    two fingers is under one cell and the dither merges it. The section now opposes a mass
+    **synthesised every frame** to an **actual photograph** — the contrast runs through the media
+    rather than only through the caption. Three defects only rendering showed: (1) three of the four
+    icons came out as featureless slabs, because a sprite pixel was 5.3 screen px on the old
+    upscaled canvas and is ~1 cell through a 27-row grid, which the 0.9px pre-blur then closed —
+    hence the stated rule *no feature or gap under 2 sprite pixels, outline rather than fill*, a
+    40-row grid, and a staggered pipeline (three equal nodes joined at one height make a bar however
+    wide the notches). **Resizing these safely means scaling width and type size together** — the
+    column count is width ÷ (font-size × advance) and the row count follows from it, so shrinking
+    the width alone halves the rows and destroys the icons all over again; holding the ratio at
+    40px of width per 1px of type keeps the ~73×40 grid at any size, which is how they went from
+    280px/7px to **200px/5px** on the follow-up "make them smaller" without losing a feature;
+    (2) the mass rendered as a solid silhouette until the dither amplitude became
+    a per-field `grain` (0.22 for icons, **0.55** for the mass) — same code, same shape, and that one
+    number is the difference between a slab and a cloud; (3) a stray `*/` closed a CSS comment six
+    lines early and left prose in the stylesheet, which the browser silently dropped — the same class
+    of failure as §17's swallowed audit line and §20's vanished monthly report, now covered by a
+    computed-style assertion. **`static/aca-hand.png`** (1040×585, 163 KB) is **local, not remote**,
+    and the header comment's older "no image at all" claim was amended rather than left standing;
+    stored **greyscale + alpha** because the page renders it desaturated anyway (colour was 487 KB,
+    and palette-quantising to 69 KB banded the forearm visibly, while an 8-bit luminance ramp cannot
+    band), and desaturated *in the file* so it survives where CSS filters do not. Its **provenance is
+    stated**: a stock cut-out from the Framer template this page's art direction follows — fine for a
+    prototype, to be replaced or licensed before any commercial publication. The footer hand is
+    **precomputed and shipped as literal text**, because reading an image back off a canvas is
+    blocked under `file://` and would have silently deleted that artwork in exactly the offline
+    self-contained case this page exists to survive. Deliberately **not** reused: the reference's
+    three stock portraits — this page's "testimonials" section says outright there are no customers
+    yet and cites §16/§17/§21 findings instead, and stock model photos there would turn an honest
+    section into a fabricated one. Also fixed in passing, found by looking at an anchor-jumped
+    section on mobile: no `scroll-margin-top` existed, so every in-page link (including "Why us?",
+    which targets this very section) put its heading under the 70px sticky nav.
+  - **§23.1 — one file, two languages.** English is the default and lives in the markup; French
+    rides along per element in `data-fr`, and the toggle stashes the English original in `data-en`
+    on first switch so it stays reversible indefinitely (verification drove two full round trips,
+    since a toggle that destroys the original on the first switch looks fine exactly once).
+    Deliberately **not** a second translated file — that copy would have diverged at the first
+    content edit, the same reasoning that moved this page out of `docs/`. With JS off the page is
+    complete English, never blank.
+  - **§23.1 — every illustration is drawn at runtime, so the page still fetches no image.** Two
+    ASCII fields (a four-pointed AI sparkle in the hero; a diffuse machine mass, the glyph, and a
+    human hand reaching toward it in "The Human-AI Intersection") are rasterised on an offscreen
+    canvas and mapped to characters through a *fixed* 4×4 ordered-dither matrix — fixed, not
+    random, so texture drifts with the shape instead of sparkling frame to frame. The four
+    capability icons are 28×28 canvases upscaled with `image-rendering: pixelated`, which is what
+    yields the chunky sprite look; a vector would render smooth and a bitmap would be an asset to
+    download. One shared 16 fps loop drives both fields and **stops** off-screen and on tab-hide.
+  - **§23.1 — the aspect trap, and three defects only rendering revealed.** A monospace cell is
+    ~1.5× taller than wide and the field is far wider than tall, so mapping a unit square onto the
+    grid stretches a circle ~3×; the character box is therefore *measured on the live page* (the
+    fallback mono font has a different advance width from Fragment Mono) and shapes are drawn
+    through a helper that pre-divides x by that ratio. Then, all found by looking rather than
+    re-reading: the star's Bézier control points at 0.17 made the sides nearly straight, so it
+    rendered as a **lozenge with no points**; the glow behind it was *larger* than the star and its
+    falloff filled the concave notches, so the shape was drawn correctly and could not be seen; and
+    a four-fingered open hand collapsed into an amorphous blob because the gaps between fingers
+    fall below one character cell — replaced by a pointing hand (fist, one thick index, thumb) on a
+    taller field, which survives the downsampling and says "reaching toward" more plainly anyway.
+    A fourth, in the pixel set: the pipeline icon joined four corner nodes all the way round and
+    read as a *frame*, not a flow; it is now a left-to-right chain with one branch.
+  - **§23.1 — pricing, calendar and contact, each honest about what it does.** Three service tiers
+    carry the reference template's structure; **the figures are placeholders**, flagged in the file
+    header and marked `data-placeholder-price`, because they come from no costing exercise for this
+    project. The dark month calendar is real (Monday-first, locale-aware, past days and weekends
+    unselectable — offering a slot that cannot exist is the kind of small lie that costs trust on a
+    page whose whole argument is that it does not overclaim), and the contact form builds a
+    `mailto:` carrying the chosen slot rather than POSTing to a backend that does not exist.
+  - Four things about the §23 base are decisions rather than details:
+  - **It lives in `static/`, not `docs/`** — Streamlit exposes that folder on `/app/static/`
+    (`server.enableStaticServing`, added to `.streamlit/config.toml` and preserved by
+    `branding.merge_config_toml()`), which is what lets `ui.py`'s sidebar "Page de présentation"
+    button reach it. One file, one URL: a copy in `docs/` **and** one in `static/` would have
+    diverged at the first content edit. `ui.py` checks the file exists **and** that static serving
+    is on, saying which is missing rather than rendering a link that 404s.
+  - **§16.5's "no remote resource" rule is deliberately relaxed.** That rule was right (a pitch page
+    depending on a CDN doesn't open on a train or behind a corporate proxy — exactly where it gets
+    shown), but the requested art direction rests on three specific typefaces (Instrument Serif /
+    Figtree / Fragment Mono). The trade is bounded and stated in the file header: the `<link>` is an
+    enhancement, never a dependency — every family is backed by a full system stack and the page
+    stays fully readable and correctly set offline; no remote script or stylesheet at all, all
+    CSS/JS inline.
+  - **Structure and motion copy the requested template; the accent colour does not.** Near-white
+    `#fdfdfd` canvas, two vertical rules framing a 1176px column, bracketed `[nav links]`,
+    dashed-border cards, black schematic tags on leader lines, printer crop marks, and a blur+rise
+    reveal on scroll — all measured off the live reference page (computed styles, not eyeballed
+    from a screenshot); the rebuilt frame lands at 1176px/x=132 against the original's 1177px/x=131.
+    The accent is ACA's own petrol/amber, and amber keeps its §19 meaning ("a human must decide
+    here"), so it appears exactly three times on the whole page. Hero motion is a deterministic
+    ASCII field (no `Math.random`, which would make characters flicker between frames instead of
+    drift) whose disordered inflow converges to a single mark; it is the page's only continuous
+    animation and it **stops** off-screen and on tab-hide.
+  - **Four defects found by rendering it rather than re-reading it**, none of which raises an error:
+    the convergence mark fell *between* rows (even row count) **and** inside the right edge-fade, so
+    the one meaningful part of the animation was never drawn; an SVG `fill=` presentation attribute
+    lost to a CSS rule, painting the "ACA" label black-on-black; the mobile grid override dropped
+    `minmax(0,1fr)` to a bare `1fr`, letting the terminal block force 472px of content into a 390px
+    viewport; and the footer's relative `../README.md` links would have 404'd once served (now
+    rendered as paths, not links). A fifth was a placement bug in `ui.py` rather than the page: the
+    button sat after the admin-only knowledge-base block, so it appeared in a different place
+    depending on the signed-in role.
 - [DEPLOYMENT_HARDENING.md](docs/DEPLOYMENT_HARDENING.md) — §15.1.8/§15.1.9: the operator runbook
   for a first public deployment — Caddy/Nginx TLS configs (incl. the Streamlit WebSocket headers
   whose absence leaves the UI stuck on "Connecting…"), security headers, loopback-only binding,
@@ -595,11 +1539,34 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   this Slack path (one source of truth for the CRM-write + post-validation bookkeeping). Slack's
   3-second response budget is usually met by `action_node` at prototype volume; a production
   high-load version would ack immediately then update via `response_url` (noted as a known limit,
-  not built). Covered by [test_api.py](tests/test_api.py) (22 tests) via
-  `fastapi.testclient.TestClient` with the same fake-LLM pattern as `test_graph_integration.py` —
-  the Slack tests build genuinely HMAC-signed requests and cover approve/reject/bad-signature/
-  unconfigured. Not exercised against a real n8n instance or a real Slack app (neither exists for
-  this project; both would simply be HTTP clients of this API).
+  not built). **n8n enablement (§16.1, 2026-07-26)** — the API existed but n8n could not have driven
+  it properly; five obstacles, two of them blocking: (1) **§16.1.1 attachments** — `POST /threads`
+  hard-coded `attachments_raw: []`, which made multimodal analysis (the project's *first* innovation
+  pillar) unreachable from the API, hence from n8n, even though `ingestion_node` had handled it all
+  along; base64 `attachments` are now accepted and bounded (10 files, 20 MB decoded total), rejected
+  with a 422 **before** anything is decoded into memory and before the LLM, same principle as
+  §15.1.4's payload bounds. (2) **§16.1.2 outbound webhooks** — see
+  [webhook.py](aca/integrations/webhook.py); `_emit_if_clarification()` sends
+  `analysis.clarification` from `_run_analysis` rather than from `clarification_node`, because
+  `interrupt()` **replays the node from its start** on resume, so an in-node send would fire twice
+  for one question; it is the only branch where the graph stops without reaching
+  `notification_node`, so without it an `?mode=async` caller went silent on an ambiguous email.
+  (3) **§16.1.3 `GET /health`** — deliberately outside `require_api_key` (an orchestrator must be
+  able to probe without holding the key that writes to the CRM), strictly boolean (never a secret
+  value — a test locks this) and making **no external call** (probed every 10s by Docker, it must
+  neither burn quota nor fail because an optional third party is down). (4) **§16.1.4 idempotence +
+  async** — n8n's HTTP node retries by default, and without a guard a mere network retry re-ran a
+  full analysis (two 70B calls, Tavily/Gemini quota) **and re-notified** the team; a known
+  `thread_id` now returns the existing snapshot with `already_exists: true` (the API-side counterpart
+  of the idempotence `poller.py` already gets by marking "en_cours" before `invoke()`), and
+  `?mode=async` returns 202 immediately, signalling completion via the webhook — sync stays the
+  default so no existing client changes. (5) **§16.1.5** — `docs/openapi.json` is exported and
+  committed. Covered by [test_api.py](tests/test_api.py) (36 tests) and
+  [test_api_n8n.py](tests/test_api_n8n.py) (§16.1) via `fastapi.testclient.TestClient` with the same
+  fake-LLM pattern as `test_graph_integration.py` — the Slack tests build genuinely HMAC-signed
+  requests and cover approve/reject/bad-signature/unconfigured. Not exercised against a real n8n
+  instance or a real Slack app (neither exists for this project; both would simply be HTTP clients
+  of this API).
 - [dashboard/](dashboard/) — the dedicated Next.js client dashboard (§12 item 8), **built
   2026-07-21 at the user's explicit request** — previously deliberately deferred as a product/
   hosting decision, not a code gap. Next.js 16 (App Router, TypeScript, Tailwind v4). **Product
@@ -636,7 +1603,7 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   96% (48/50) pre-migration — both prior errors were on deliberately ambiguous cases. Run via
   `python -m aca.eval.eval_classifier`; re-run once real emails are available to track accuracy
   under real conditions instead of the synthetic set.
-- [tests/](tests/) — automated pytest suite (**261 tests**, offline, ~12s — see Known gaps for full
+- [tests/](tests/) — automated pytest suite (**773 tests**, offline, ~40s — see Known gaps for full
   coverage list): [conftest.py](tests/conftest.py) (env isolation + `FakeLLM`/`ExplodingLLM`, now
   also blanking `ACA_ORG_ID`/`STRIPE_API_KEY`, redirecting `ACA_CONFIG_DB`/`ACA_USERS_DB`, and
   neutralising every §15 security switch — `ACA_ENV=development`, empty `ACA_API_KEY`/
@@ -666,7 +1633,87 @@ START → classifier (8B) → memory_lookup → risk_scan (RegEx) → extractor 
   detection with a zero-false-positive set of realistic sales emails, and `prod_check`'s
   development-vs-production behaviour). `test_storage.py` also covers §15.2.7's audit chain
   (detecting an edited row, a *deleted* row, HMAC keying, per-tenant chains, legacy rows) and
-  §15.2.4's per-subject erasure. **261 tests total**, offline, ~12s. Run via
+  §15.2.4's per-subject erasure. **§16 adds five files**:
+  [test_scheduler.py](tests/test_scheduler.py) (18 tests — due-date arithmetic on an injected
+  `now`, `0` disabling a job, a **failed** run still being recorded so a dead service isn't
+  hammered every tick, `--prime` idempotence),
+  [test_demo_mode.py](tests/test_demo_mode.py) (30 tests — incl. the whole graph running end-to-end
+  with **no API key at all**, and `guard_write()` raising rather than degrading),
+  [test_api_n8n.py](tests/test_api_n8n.py) (§16.1 — attachments incl. invalid base64 and the size
+  cap rejected *before* the LLM, `/health` leaking no secret and making no external call, retry
+  idempotence, `?mode=async`, and each of the 5 webhook events fired at the right moment),
+  [test_webhook.py](tests/test_webhook.py) (the two properties that matter most first: **never
+  raises** — network error, HTTP error, unserialisable payload — and no-op without config; plus
+  HMAC verifiability by the receiver and signature-over-the-exact-bytes-sent), and
+  [test_graph_topology.py](tests/test_graph_topology.py) (topology genuinely derived from the
+  compiled graph, every node labelled). **§17 adds two files**:
+  [test_branding.py](tests/test_branding.py) (46 tests — resolution priority, so a client's chosen
+  colour is never silently overridden by a preset or by dark mode; an invalid hex never reaching the
+  injected stylesheet; `prefers-reduced-motion` present at *every* animation level, since an OS
+  accessibility setting must never be contradicted by an app setting; `merge_config_toml` preserving
+  `[server]`/`[browser]` and being **idempotent** — that last one found a real bug where re-applying
+  left an empty `[theme]` section, and the test's own first version was wrong too, counting the
+  string "[theme]" that also appears in the generated header comment) and
+  [test_activity_log.py](tests/test_activity_log.py) (now 58 tests — the two properties that matter
+  most first: `log()` **never raises** even with an unreachable DB or unserialisable details, and the
+  chain detects an edited row, a *deleted* middle row and a tampered `details`; plus IP normalisation
+  against a forged `X-Forwarded-For`, per-tenant chains, the device/user-agent parsing, the
+  regression test for the silently-lost audit line, and — added §18 — `lead_timeline` ordering,
+  `is_new_device`/`known_devices`, the two-speed `purge_older_than`, `csv_export`, and
+  `rows_for_period`/`archive_period` incl. its idempotence). **§18 adds four files and extends
+  three**: [test_ui_kit.py](tests/test_ui_kit.py) (24 tests — HTML escaping first, since email
+  bodies/LLM output flow through every one of these builders; the `tone`/`state` → CSS-class mapping;
+  defined behaviour on the empty cases), [test_totp.py](tests/test_totp.py) (19 tests — `code_at`
+  checked against the **official RFC 4226 Appendix D test vectors**, not just the module's own
+  assumptions; `verify()` never raising on malformed input, the one property that matters most for
+  code guarding an admin account; the drift window bounded on both sides),
+  [test_pdf_export.py](tests/test_pdf_export.py) (14 tests — a genuine round-trip: build a PDF,
+  reopen it with `fitz`, extract the text, assert the company/contact/draft/human-review-footer are
+  actually present, not merely "no exception"; filename sanitisation against path-traversal and
+  header-injection payloads), and [test_retention.py](tests/test_retention.py) (3 tests, deliberately
+  narrow — only the §18 two-speed wiring `retention.py` → `activity_log.purge_older_than`, since the
+  rest of `retention.py` has no offline path — Google Sheets can't be simulated — and stays verified
+  live, per the note in Known gaps). `test_security.py` gains `ROLE_VIEWER`'s permission boundary
+  (read-only, explicitly excluding `reject_lead`), the full TOTP round trip (`totp_required`,
+  set/get/has/`verify_totp`, tenant isolation, `list_users()` reporting the flag without ever leaking
+  the secret), and `session.seconds_until_expiry` (the stricter of the two bounds, `None` when both
+  are disabled, the absolute-TTL bound unaffected by `touch()`). `test_storage.py` gains
+  `analytics_store.get_draft_edit` (most-recent-edit semantics, no cross-thread bleed).
+  [test_ui_shared.py](tests/test_ui_shared.py) (2 tests — `_totp_qr_png()` returns real PNG bytes,
+  distinct secrets produce distinct images) is the one addition after the pass's own initial count:
+  the enrollment secret ended up rendered as an actual scannable QR rather than raw `otpauth://`
+  text, on user follow-up request. **550 tests total**, offline, ~19s. **§18 tangent adds one more
+  file**: [test_i18n.py](tests/test_i18n.py) (11 tests — `translate()` never raising on an unknown
+  key/language, every declared key genuinely non-empty in both languages, `{placeholder}` formatting,
+  and a sample-key check that FR and EN actually differ, so a future key copy-pasted identically into
+  both languages can't silently defeat the switcher). **§20 adds three files**:
+  [test_review_store.py](tests/test_review_store.py) (21 tests — ordered by what the registry
+  actually carries, namely *work one person handed to another*: a request reaches its recipient and
+  nobody else, in both failing directions; a batch is genuinely a batch; an already-decided request
+  can't be decided twice, since two admins can open the same queue at once; "seen" never silently
+  becomes "resolved"; tenant isolation; and the purge spares *pending* requests at any age),
+  [test_reporting.py](tests/test_reporting.py) (27 tests — a report is read by someone without
+  access to the raw data who will make decisions on it, so **a wrong figure is worse than a missing
+  section**: exclusive upper bounds proved by an event sitting exactly on a month boundary being
+  counted once and only once; the comparison window being same-length rather than "previous month";
+  a failing section degrading to a text block instead of taking the report down *and* instead of
+  staying silent; every section carrying its context; and no deltas at all when comparison is off,
+  rather than "0 %" everywhere), and
+  [test_report_pdf.py](tests/test_report_pdf.py) (25 tests — a genuine round trip: build, reopen
+  with `fitz`, extract the text and assert the content is really there, since "no exception" is
+  also true of a blank page; never-raises on absurd input; the Latin-1 substitutions incl. an
+  unmanageable Unicode subject; accent-aware measurement; and idempotent disk writes).
+  `test_scheduler.py` gains 4 tests for the monthly `report` job (a file is really produced, an
+  existing one is never overwritten, a render failure is raised rather than swallowed — otherwise
+  the scheduler would record "ok" and not retry for a month — and a failed notification does not
+  turn a produced report into a failure). **§21 adds 65 tests to
+  [test_branding.py](tests/test_branding.py)** (90 → 120 there, incl. 4 parametrized over all 18
+  shipped presets), deliberately asserting the **emitted stylesheet** rather than the intent — every
+  defect that pass found had survived several reviews precisely because a dead CSS rule raises no
+  exception, breaks no test and is invisible on re-reading: the display serif never reaching a real
+  heading, the header silently reverted to transparent, `--aca-header-h` stated in `rem` under a
+  14 px root, the accent collapsing into the primary on 4 palettes, and duplicate colours in the
+  categorical chart palette. **773 tests total**, offline, ~40s. Run via
   `python -m pytest tests/` (pytest pinned in requirements.txt).
 
 ## Stack
@@ -681,7 +1728,8 @@ Streamlit (Fluent theme via [.streamlit/config.toml](.streamlit/config.toml)) ·
 PyMuPDF (PDF) · `python-docx` (Word) · `openpyxl` (Excel) · `python-dotenv` · `fastapi` + `uvicorn`
 ([api.py](aca/api.py), n8n port §12 item 6) · `stripe` ([billing.py](aca/integrations/billing.py),
 §12 item 4, inert without `STRIPE_API_KEY`) · `prometheus-client` (`/metrics` on `api.py`, §12 item
-9). Pinned in [requirements.txt](requirements.txt).
+9) · `segno` (§18, TOTP enrollment QR code — pure Python, zero transitive dependencies of its own,
+[aca/ui/shared.py](aca/ui/shared.py)). Pinned in [requirements.txt](requirements.txt).
 
 Required env vars (`.env`, gitignored): `GOOGLE_SERVICE_ACCOUNT_FILE`, `GOOGLE_SHEETS_ID`, a Groq API
 key for `langchain_groq`, `GOOGLE_API_KEY` (Gemini, for `search_knowledge_base_semantic`; RAG silently
@@ -744,7 +1792,48 @@ see [tenant.py](aca/core/tenant.py)), `ACA_CONFIG_DB` (default `data/config.sqli
 [billing.py](aca/integrations/billing.py); absent = token stats still computed locally, no Stripe
 call, graceful no-op like everything else — ⚠️ not live-verified, no Stripe test account exists for
 this project), and `RELANCE_MAX_ROUNDS` (default `3`, overridable via the settings panel — cf.
-[followup_store.py](aca/storage/followup_store.py)'s multi-round cadence, §11.6 item 5).
+[followup_store.py](aca/storage/followup_store.py)'s multi-round cadence, §11.6 item 5). §16 adds:
+`ACA_DEMO_MODE` (§16.3 — set to `1`/`true`/`yes`/`oui` to run the whole graph with **no API key**,
+simulated LLM and CRM writes hard-blocked; absent = normal operation, and it is read dynamically so
+it can never freeze on at import), `ACA_SCHEDULE_DB` (default `data/schedule.sqlite`) plus the
+per-job cadences `ACA_SCHEDULE_MAINTENANCE_HOURS` / `ACA_SCHEDULE_RELANCE_HOURS` /
+`ACA_SCHEDULE_RETENTION_HOURS` / `ACA_SCHEDULE_BILLING_HOURS` (defaults `1` / `24` / `168` / `720`;
+`0` or negative **disables** that job — same "absent/zero = feature skipped" contract as everything
+else) and `ACA_SCHEDULE_TICK_SECONDS` (default `60` — how often the loop *looks* for a due job, not
+how often jobs run), and `ACA_WEBHOOK_URL` / `ACA_WEBHOOK_SECRET` (§16.1.2 — outbound events to
+n8n; URL absent = silent no-op, secret absent = unsigned but still sent, unlike
+`SLACK_SIGNING_SECRET` which fails closed, since an outbound webhook triggers no CRM write on our
+side). §17 adds: `ACA_ACTIVITY_DB` (default `data/activity.sqlite` — the activity journal,
+[activity_log.py](aca/storage/activity_log.py)), `ACTIVITY_RETENTION_DAYS` (defaults to
+`RETENTION_DAYS`; separate because the two answer opposite needs — a lead is kept for the commercial
+relationship, an access trace is kept to investigate afterwards — and because this journal holds IP
+addresses, i.e. personal data, whereas `audit.sqlite` is deliberately never purged), and the
+optional `BRAND_*` white-label tokens (`BRAND_NAME`, `BRAND_TAGLINE`, `BRAND_COMPANY`,
+`BRAND_PRESET`, `BRAND_PRIMARY`, `BRAND_ACCENT`, `BRAND_BACKGROUND`, `BRAND_SURFACE`,
+`BRAND_SIDEBAR`, `BRAND_TEXT`, `BRAND_BORDER`, `BRAND_SUCCESS`, `BRAND_WARNING`, `BRAND_DANGER`,
+`BRAND_INFO`, `BRAND_FONT`, `BRAND_RADIUS`, `BRAND_DENSITY`, `BRAND_MODE`, `BRAND_ANIMATIONS`,
+`BRAND_HERO` — all absent = the default ACA palette, unchanged appearance). Those exist only to ship
+an instance *already* in a client's colours without touching the UI; a value set from the "Réglages →
+Apparence" panel is stored per tenant and **wins** over the env var. `BRAND_LOGO` is deliberately
+**not** settable from `.env`: it is uploaded through the UI and stored encoded, because a file path
+breaks the moment the app moves machine or runs in a container with an ephemeral filesystem. §18
+adds: `ACTIVITY_SENSITIVE_RETENTION_DAYS` (default: twice `ACTIVITY_RETENTION_DAYS` — the two-speed
+retention wired into `retention.py`, keeping `activity_log.SENSITIVE_ACTIONS` — failed logins,
+lockouts, role/settings changes — longer than routine usage noise), `ACA_ARCHIVE_DIR` (default
+`data/archives` — where `scheduler.py`'s monthly `archive` job writes the signed CSV exports of the
+activity journal), and `ACA_SCHEDULE_ARCHIVE_HOURS` (default `720`, same convention as the other four
+`ACA_SCHEDULE_*_HOURS` — controls how often the scheduler *checks* for a due archive, not which month
+gets archived, which `_last_completed_month()` always computes as the previous calendar month).
+§20 adds: `ACA_REVIEW_DB` (default `data/reviews.sqlite` — review requests,
+[review_store.py](aca/storage/review_store.py); distinct from `ACA_TASK_DB` because a task is
+*dated* and self-executing while a review request is *addressed* and waits on a person),
+`ACA_REPORT_DIR` (default `data/reports` — where the scheduler writes the monthly PDF reports) and
+`ACA_SCHEDULE_REPORT_HOURS` (default `720`, same convention as `ACA_SCHEDULE_ARCHIVE_HOURS`:
+it sets how often the scheduler *checks*, never which month is covered — that is always the last
+completed calendar month via `reporting.last_completed_month()`; `0` disables the automatic report
+while the "Rapports" page stays usable on demand).
+All 83 variables are documented one by one in [.env.example](.env.example) (§16.2.2), which
+is the file to read first — this section is the reference, that one is the checklist.
 
 `credentials/` (gitignored) holds `service_account.json` (Sheets) and `gmail_credentials.json` (Gmail
 OAuth client secret, "installed app" type). `gmail_token.json` is created there on first Gmail auth.
@@ -913,6 +2002,349 @@ afterward.
   not applied* (nothing is hosted), the secrets vault is an hosting decision (no code change will
   be needed — every module reads `os.getenv()` dynamically), local-store RLS is a product call, and
   DPA/DPIA documents belong to the using company.
+- ✅ **Fixed (2026-07-26, same day)** — §16 "Solo tier, workable n8n port, first impression". Started
+  from a narrow user question ("can I use pgvector alongside Google Sheets, and which flow suits my
+  n8n workflow?") which was answered by auditing the code rather than from memory — and the audit
+  found something else, which is the real result of the pass: **the product was already autonomous
+  but didn't look it, and n8n could not have driven it properly.** Two problems long conflated into
+  one ("you need n8n for this to be automatic"), both false for opposite reasons. Delivered: a
+  scheduler + its store (§16.0 — the one genuine gap), `run_solo.py`, API attachments/webhooks/
+  `/health`/idempotence/async (§16.1), `graph_topology.py` (§16.1.6), Docker + compose profiles +
+  n8n workflow + committed `openapi.json` (§16.1.5), README/`.env.example`/`.gitignore` (§16.2),
+  `ACA_DEMO_MODE` (§16.3), CI (§16.4, closing §15.4.7), and the one-pager + these docs (§16.5).
+  Suite: 261 → **352 tests**. Six things the pass *found* rather than merely built: (1) **nothing
+  scheduled `relance.py`/`retention.py`** — both documented "schedule this periodically", no
+  scheduling mechanism anywhere, on a machine without `cron`, so the GDPR purge in practice never
+  ran; (2) **the graph diagram shown in the UI was wrong** — `ui.py`'s hand-copied edge list was
+  missing `supervisor → routing`, the drift §12bis had predicted, invisible because nothing compared
+  the two lists; (3) **multimodal analysis was unreachable from the API** (`attachments_raw` wired to
+  `[]`) — the project's first innovation pillar, invisible from its own HTTP interface; (4) the
+  webhook payload **lagged the REST snapshot by one `reasoning_log` line**, since
+  `notification_node` emitted before LangGraph merged the entry the node was about to return —
+  fixed at source, not in the test; (5) **`analysis.clarification` was declared, documented in
+  `n8n/README.md`, and never emitted** — the only branch where the graph stops without signalling
+  anything, so an `?mode=async` caller stayed silent forever on an ambiguous email; (6) a
+  `.gitignore` trap where the new `.env.*` rule would have excluded the `.env.example` written the
+  same day. Still open after this pass, none of it missing code: the n8n workflow was never imported
+  (no instance exists), the webhooks never received by a real n8n, the Docker image never built
+  (Docker isn't installed here — only `compose config` was validated per profile), CI won't run
+  until the first push to a remote, and the one-pager isn't hosted (same reason as TLS). A
+  correction to my own plan, recorded for honesty: it claimed `ui.py` had a duplicated `st.title`;
+  on inspection those are two mutually exclusive screens (auth gate vs. app), so nothing was touched.
+- ✅ **Fixed (2026-07-30)** — §17 "white-label branding, animations, attributable activity journal".
+  Started from a three-part request (make Streamlit prettier with lots of animations; make colours
+  and the logo **parametrable** so the receiving company can match its own spec; build an audit
+  profile for the `operator` role so an admin sees who changed what, from which PC, when). As in
+  previous passes, auditing the code first found more than the request implied. Delivered:
+  [tamper_chain.py](aca/storage/tamper_chain.py), [activity_log.py](aca/storage/activity_log.py),
+  [branding.py](aca/core/branding.py), the admin "Journal d'activité" tab and "Apparence" panel,
+  activity logging on 18 UI handlers plus `api._do_validate`/`_do_reject`/`update_settings` (so a
+  Slack or n8n validation is no longer invisible to the journal an admin reads in Streamlit), GDPR
+  purge wiring, and `docs/AMELIORATIONS_SUGGEREES.md`. Suite: 352 → **451 tests**. Four things the
+  pass *found* rather than merely built: (1) **the `operator` role existed since §15.1.6 with none of
+  its actions traced** — `audit_log.py` records one event type, so logins, rejections, settings
+  changes, knowledge curation and account management left no trace at all, and "what did this person
+  do this week" had no answer in the product; (2) **the anti-brute-force lockout blocked silently** —
+  `auth_lockout.py` (§14) stopped a bot without recording the attempt, so an attack could never be
+  noticed, dated or attributed; a security control that leaves no trace protects the moment and
+  teaches nothing; (3) **an audit entry was lost in silence** — the first real end-to-end UI run
+  showed zero journal rows because `st.context.ip_address` isn't guaranteed to be a string, the value
+  reached SQLite (`Error binding parameter 13`), and `log()`'s deliberate "never raises" contract
+  swallowed it: the protection mechanism was precisely what hid the loss, and a security journal you
+  believe is complete and isn't is more dangerous than none; (4) `log()` **could** raise in violation
+  of that same contract, because `details` serialisation sat outside the `try`. Also caught by tests:
+  `merge_config_toml` wasn't idempotent (re-applying left an empty `[theme]` section) — and the
+  first version of that test was itself wrong, counting a `[theme]` string that also appears in the
+  generated header comment, so comparing the whole file is the correct check. Verified live: full
+  suite offline; headless `AppTest` render of the whole app (no exception, 5 tabs, 11 colour pickers,
+  branding panel and integrity check present); an end-to-end analysis then rejection through the UI,
+  both appearing in the journal with workstation/server/outcome and an intact hash chain; and a
+  client palette (violet/coral, Poppins, 0px radius, compact, animations off) applied from
+  `config_store` and re-read in the rendered HTML — all tokens present, `@keyframes` absent,
+  `prefers-reduced-motion` still emitted. Still open, none of it missing code: the journal has never
+  run on a real multi-workstation deployment (none exists — the observed IP is the loopback), nothing
+  alerts in real time on a logged incident (recommended as the top item of
+  `docs/AMELIORATIONS_SUGGEREES.md`), and SSO/SCIM plus a custom domain remain documented
+  recommendations rather than built features.
+- ✅ **Fixed (2026-07-30, same day)** — §18 "everything in `docs/AMELIORATIONS_SUGGEREES.md` except
+  hosting and Slack incident alerts", plus a deliberate frontend-design pass
+  (`/example-skills:frontend-design`) requested alongside it. The recap table's 8 buildable items
+  (viewer role and favicon were already done — see the §17 entry above) are now all delivered:
+  machine-action logging (`poller.py`/`relance.py`/`retention.py`/`scheduler.py` now write to
+  `activity_log` with `SOURCE_POLLER`/`SOURCE_CLI`, closing the exact gap §17's own audit had flagged
+  — constants declared, used by nobody), a monthly signed archive export (`scheduler.py`'s new
+  `archive` job → `activity_log.archive_period()`), a per-lead chronological timeline + readable diff
+  (`ui_kit.timeline()`/`diff()`, `activity_log.lead_timeline()`, the new
+  `analytics_store.get_draft_edit()`), a session-expiry warning toast, a branded PDF export of the
+  proposal (`pdf_export.py`, no new dependency), and TOTP on `admin` accounts (`totp.py`,
+  stdlib-only, plus the enrollment/verification UI in `aca/ui/shared.py`) — the security audit's own
+  "last weak link" finally closed. Also delivered from §5 of the doc: an in-app "N new since your
+  login" indicator and demo-mode empty-state links. **The single largest piece of the pass, not
+  separately numbered in the doc**: `ui.py` (previously a single ~1700-line file) split into a thin
+  `st.navigation` router (`ui.py`) + shared session/auth/graph helpers (`aca/ui/shared.py`) + five
+  page scripts (`app_pages/1_inbox.py` … `5_settings.py`) — undertaken because every new §18 surface
+  (the lead timeline, the PDF button, the TOTP UI) needed *somewhere sane to live*, and a single
+  monolith was already the file this session's own plan flagged as needing the most care not to
+  regress. Two things the split's own verification found and fixed before they became live bugs: (1)
+  `st.navigation` executes only the **selected** page per rerun, unlike the old `st.tabs()` where
+  *every* tab's body ran on *every* rerun — the sidebar's "Ouvrir"/"Charger cet e-mail" buttons had to
+  gain an explicit `st.switch_page("app_pages/1_inbox.py")`, or a result loaded from the sidebar would
+  stay invisible until the person clicked the inbox tab themselves; (2) the session-expiry toast's
+  first draft checked remaining time **after** `session.touch()`, which resets the idle clock to full
+  on every call — the idle-based warning would have been permanently unreachable in practice, caught
+  by writing the toast test before assuming the ordering was fine. A third, unplanned fix while
+  finishing the pass: `activity_log.py`'s two-speed retention (`purge_older_than(sensitive_days=…)`)
+  already existed from §17 but was never actually invoked by `retention.py`'s real periodic job —
+  built, tested, never wired, the identical shape of gap §16.0 found for scheduling itself; now closed
+  via `ACTIVITY_SENSITIVE_RETENTION_DAYS`. Suite: 451 → **550 tests** (`test_ui_kit.py`,
+  `test_totp.py` — checked against the official RFC 4226 test vectors, `test_pdf_export.py` — a real
+  build→reopen→extract round trip, `test_retention.py`, and extensions to `test_security.py`/
+  `test_activity_log.py`/`test_storage.py`). Verified live: the full offline suite; a headless
+  `AppTest` sweep across all three roles (`admin` through TOTP enrollment, `operator`, `viewer`) and
+  every page each can reach, with zero exceptions; a full demo-mode analysis through
+  classification/extraction/agents/draft/validate/reject on the restructured inbox page, byte-for-byte
+  behaviourally equivalent to the pre-split flow. A discovery specific to this session's tooling, kept
+  here since it will recur: Streamlit 1.59's `AppTest` classifies **any** `st.expander(..., icon=...)`
+  as its internal `Status` wrapper rather than `Expander` (the dispatch keys off `proto.icon` being
+  non-empty), which affects every icon-bearing expander already in this codebase, not just the new
+  ones — `at.expander` silently returns none of them; `at.status` is the correct accessor. Not done,
+  by explicit exclusion: hosting/TLS/custom domain and real-time Slack incident alerting (both need
+  real infrastructure this project doesn't have, same reasoning as everything else marked
+  "not live-verified"). Deliberately deferred from §5 of the doc as higher-effort/higher-risk relative
+  to the rest of the pass, and explicitly flagged as such rather than silently dropped: keyboard
+  shortcuts (needs `st.components.v2`), batch validation (the doc itself cautions it needs care not to
+  dilute the human-validation guarantee), a real mobile-device pass (nothing to test against here),
+  and a global cross-page search.
+- ✅ **Fixed (2026-07-31, same day)** — a §18 tangent, three follow-up requests on the just-finished
+  restructure rather than a new roadmap item: (1) "how is this used exactly" → explained the TOTP
+  enrollment screen; (2) "make it a QR code" → the enrollment secret, previously shown as raw
+  `otpauth://` text, now renders as an actual scannable image (`_totp_qr_png()`, see
+  `aca/ui/shared.py` above); (3) "fix this bar, make it more visible and animated" +
+  "center the tabs and add a French/English language switcher" → the top-nav/security-banner CSS
+  polish and [i18n.py](aca/core/i18n.py) described above. Asked to scope the translation effort
+  (hundreds of strings across ~15 files vs. primary chrome only), the user chose **primary chrome
+  only** — the smaller, explicitly-scoped option — which is why admin-only screens and the activity
+  journal's detail columns stay French-only by design. One real bug the pass's own verification
+  caught before it shipped: the language switcher was first placed in `ui.py`'s sidebar *after* the
+  `check_auth()`/`st.stop()` gate, so it silently never rendered on the login screen — moved to
+  before `prod_check.enforce()` (see `ui.py` above). Verified live: the full offline suite (550 →
+  **561 tests**, `test_i18n.py`); a headless `AppTest` sweep logging in as a fresh TOTP-enrolling
+  admin, switching to English mid-session, and confirming each of `2_dashboard.py`/`3_history.py`/
+  `4_activity.py`'s own translated caption text (not just the absence of an exception) actually
+  appears in the rendered page — the check that would have caught a switcher that flips the
+  selector without the page underneath actually changing language.
+- ✅ **Fixed (2026-08-03)** — §19 "header overlap, distinctive design, scheduled sends, reminders,
+  parametrable intake". Four requests in one pass. **(1) The overlap was real and measurable**:
+  Streamlit's header is `position: absolute`, `z-index: 999990`, transparent, **52.5px** tall, and
+  the branding CSS had replaced `.block-container`'s top padding with a flat `var(--aca-top)` =
+  **30.8px** — so the first ~22px of *every* page sat underneath it. Found by measuring the live
+  DOM with Playwright rather than eyeballing; fixed with `padding-top: max(var(--aca-top),
+  calc(var(--aca-header-h) + 1rem))` (a floor, so the "aérée" density can still add air but never
+  drop below the clearance) plus a real opaque background on the header, which also stops it
+  reading as a pill floating over nothing. **(2) Design.** The diagnosis wasn't the hue, it was
+  that *gradient was applied to everything* — hero, primary buttons, metric cards, nav — and an
+  effect applied everywhere ranks nothing; that, plus one uniform radius and a single type role, is
+  what reads as templated. Now: gradient survives in exactly **one** place in the whole stylesheet,
+  the decision block. Default palette moved off Fluent blue + violet (`#0078D4`/`#8764B8`) to deep
+  petrol + burnt amber on cool paper, encoding a thesis that is actually true of the product —
+  **the machine's work is cool, the human decision is warm** — with amber reserved solely for "this
+  awaits a person". Three earned type roles: a display serif for the document's voice
+  (`BRAND_FONT_DISPLAY`, Fraunces default — a token, so a client can still override), the client's
+  sans for the tool's voice, and IBM Plex Mono, **not** parametrable, for machine values, because
+  tabular figures in a queue need to align. Signature element: **`ui_kit.signoff()`**, a "Bon pour
+  accord" cartouche naming who is responsible, when, and — before the gesture — exactly what
+  validating will write. **(3) Scheduled sends + reminders** ([task_store.py](aca/storage/task_store.py),
+  `gmail_reader.send_draft`, a new `tasks` scheduler job): the honest reading is that scheduling is
+  not autonomous action — the human read and approved the draft, they merely chose a later moment,
+  and what goes out is the Gmail draft itself, so editing or deleting it in Gmail still wins.
+  Reminders are deliberately independent of validation ("I'll deal with it Tuesday" is an intention
+  that exists whether you validate, reject, or defer). **(4) Intake**
+  ([intake_window.py](aca/core/intake_window.py)): the sidebar had explained the *mechanism*
+  ("traités par le poller en arrière-plan (`poller.py`)" — a filename nobody in a sales team can
+  place) and nothing was adjustable; now it says what it does in one sentence, shows a live
+  readout, and a settings panel controls on/off, days, hours and frequency, re-read every cycle
+  with no restart. Suite: 561 → **606 tests**. Two things verification caught rather than review:
+  the reminder's three fields each triggered a rerun, so pressing Enter in the note collapsed the
+  expander before the button could be clicked (now an `st.form`, which is what those three fields
+  always were — one intention); and an existing test's promise that `BRAND_FONT="Système"` emits
+  **no** CDN call, which the new display/mono `@import`s had quietly broken — the fix suppresses
+  all three imports, since that setting is a promise about the network, not about a font. Not
+  verified live, and stated plainly: the scheduled send has never fired against a real Gmail
+  account (the branch is exercised through `AppTest` with a seeded `gmail_message_id`, and
+  `send_draft` is covered only by its graceful-degradation contract), because demo mode produces
+  manual entries with no Gmail thread — the same limit as every other Gmail-dependent path here.
+- ✅ **Fixed (2026-08-04)** — §20 "handing a lead to a colleague, and telling the month's story".
+  Three requests in one pass: (1) let an **operator hand the admin specific emails** to re-read,
+  several in one gesture, visible to the admin on login; (2) a **monthly PDF** of what happened,
+  from emails to statistics, with graphs, **comparing against the previous month**; (3) that PDF
+  made **as parametrable as possible** ("classification and email names only", a chosen date range,
+  anything), always with context and always themed. Delivered:
+  [review_store.py](aca/storage/review_store.py) + [app_pages/6_reviews.py](app_pages/6_reviews.py),
+  [reporting.py](aca/core/reporting.py) + [report_pdf.py](aca/integrations/report_pdf.py) +
+  [app_pages/7_reports.py](app_pages/7_reports.py), a `report` scheduler job, period-windowed reads
+  and a row-level `list_events()` in `analytics_store`, `action_counts`/`actors_between` in
+  `activity_log`, GDPR purge wiring, and ~100 i18n keys. Suite: 620 → **697 tests**. **The pass's
+  own finding, stated as such**: request (1) was not a missing *screen* but a missing **gesture** —
+  an operator facing a lead beyond their authority could validate (CRM write), reject (removes it
+  from everyone's queue), or go tell someone outside the product, where the information stops being
+  traceable; "I'm not deciding this" had no representation anywhere in the data model. Four defects
+  found by verification rather than review: (a) **every French paragraph overran the right margin**
+  in the PDF — `fitz.get_text_length()` under-measures accented characters so badly that
+  "ééééééééée" measures 22.8pt against 45.6pt for "eeeeeeeeee", and the wrap calculation believed it
+  was inside the margin; caught by rendering the pages to images and looking at them, invisible in
+  the code; (b) **`…` and `—` rendered as stray dots** in every truncated cell and empty value,
+  because a PDF's Base-14 fonts are addressed through Latin-1 — while accented letters *are* in
+  Latin-1 and rendered correctly, which is exactly what made it easy to miss; (c) a typo in a
+  `BRAND_*` hex made `_Palette` raise, so `build_report_pdf` returned `None` per its own
+  never-raises contract and **the nightly report silently stopped being produced** — the protective
+  contract was again what hid the loss, the same shape as §17's swallowed audit line; (d) in the
+  end-to-end harness itself, a fake session dated 1970 made the app show the login screen — a
+  session TTL that *works* passing for a missing feature (fixed in the harness, not the product).
+  Verified live: the full offline suite; both new pages rendered headless for all three roles; a
+  real operator→admin round trip (a batch of 2 handed over, visible to the admin with its note and
+  subjects, absent from the sender's own inbox but present in their sent list); the admin-only gate
+  on archived monthly reports; and `ui.py`'s hero pill + sidebar panel + toast, with **one** toast
+  for a two-email batch. Still open, and stated plainly: the monthly report has **never run over
+  twelve months of real data** (verified on synthetic data and through the scheduled job in tests);
+  its "your report is ready" notification reaches nobody when neither Slack nor `NOTIFY_EMAIL` is
+  configured (the file is still there, but nothing goes to fetch it); and the PDF is **not
+  attached** to that notification, since `notify.py` carries text only and adding attachment support
+  exceeded the request.
+- ✅ **Fixed (2026-08-05)** — §21 "design pass". Request: improve the Streamlit design "to the top",
+  each element with a purpose, "neat and fluid", using the animation/design skills. The pass's own
+  finding is that it was mostly **not** a decoration job: the rule adopted at the outset — *judge
+  nothing from the source, measure everything on the rendered page* (app run in a sandbox with
+  copied DBs, demo mode, no API key, driven through a real browser) — turned up **five rules that
+  were written and never rendered**, each invisible to code review because dead CSS raises no
+  exception and breaks no test: (1) no page heading was ever in the display serif (specificity lost
+  to Streamlit's own emotion class — so a third of §19's typographic thesis had never been seen by
+  anyone); (2) §19's opaque header had been silently reverted by a stale `background: transparent`
+  130 lines lower (measured `rgba(0,0,0,0)`: content scrolled under a hairline with nothing behind
+  it); (3) `--aca-header-h` claimed to be the header height and was 49px against a real 52.5px,
+  because `3.5rem` assumed a 16px root while `config.toml` sets `baseFontSize = 14`; (4) the active
+  nav item was unbranded grey while hover carried the brand colour, lift and shadow — the hierarchy
+  inverted on a seven-entry bar; (5) two dashboard chart categories drew in the identical colour,
+  because the categorical palette concatenated six semantic tokens that are legitimately allowed to
+  be equal (`BRAND_INFO == BRAND_PRIMARY`, `BRAND_WARNING == BRAND_ACCENT` in the defaults). Beyond
+  rendering, one genuine **design** defect: `BRAND_ACCENT` was given a single exclusive meaning at
+  §19 ("a human must decide here") but none of the 18 shipped presets were revisited, so 4 gave it
+  the primary's own hue family — the test instance ran an all-blue palette with not one pixel of the
+  reserved colour. Fixed via a new `signal_separation()` (CIELAB a\*b\* distance, L\* ignored —
+  WCAG contrast ranks these backwards), 5 corrected preset accents, and a warning in
+  `accessibility_report()`. Also: muted text raised to clear AA, permanent low card shadow, easing
+  tokens, all UI motion under 300 ms, press feedback, pointer-gated hover, `:focus-visible` rings,
+  one perpetual decorative animation removed, and `.streamlit/config.toml` regenerated from the
+  token defaults (it was still the pre-§19 Fluent blue, so a fresh clone rendered half in the
+  intended palette and half in an abandoned one). A follow-up request added an **ambient background
+  wash** — accepted only under the three constraints described in the `branding.py` entry above,
+  since it arrived immediately after *removing* a perpetual decorative animation for competing with
+  the loops that carry meaning. Suite: 697 → **767 tests**. A methodological note
+  worth keeping, since it cuts the other way: the pass *suspected* entrance animations replayed on
+  every Streamlit rerun, which would have justified deleting them; measuring `getAnimations()`
+  before and after a widget-triggered rerun showed them unchanged at `finished` — React reconciles
+  the nodes — so **the hypothesis was wrong and the animations were kept**, merely shortened. Still
+  open, stated plainly: nothing was checked on a real phone or tablet (only a resized desktop
+  browser); dark mode and the 18 presets are verified by computation only, none opened by eye; the
+  `data-testid`/emotion selectors remain Streamlit 1.59 implementation details, so a version bump
+  can make the page **less pretty, never broken**; and this deployment's own colours are stored as
+  *explicit* overrides, which by the project's long-standing rule are never overridden by a preset
+  — so the corrected palettes do **not** change this instance, though the Apparence panel now warns
+  that its accent scores 0.08.
+- ✅ **Fixed (2026-08-06)** — §22 "dashboard: prettier, more interactive, more statistics". The
+  pass's finding is that the page showed a **state** and never a **change**, and that every datum
+  needed to fix that was already being recorded — the fourth instance of this project's recurring
+  built-but-never-read gap (`get_draft_edit` §18, `list_events` §20, and the response-time
+  distribution whose own comment described the intended "< 1h vs > 24h" reading while only a raw
+  minutes table was ever rendered). Delivered: four read-side aggregations in `analytics_store`
+  (`bucket_response_times`/`by_source`/`hourly_volume`/`top_senders`), period-over-period deltas on
+  every KPI reusing `reporting.previous_period()` and its `better` direction metadata, an
+  `st.fragment` scoping period changes to the dashboard, horizontal bars where labels are long,
+  humanised source labels (`gmail_import` → "Import Gmail (à la demande)"), and ~20 i18n keys.
+  Suite: 767 → **773 tests**. Three things found rather than built: (1) the KPI row silently went
+  **ragged on some data** — Streamlit sets `align-items: start`, so a metric with no delta to show
+  is 22px shorter than its neighbours, and the fix needed two attempts because a flex item with a
+  *definite* height ignores `stretch` (measured: the row did switch to `stretch` while the cards
+  stayed 144/144/122/144); (2) §21's press-feedback and focus rules covered only
+  `.stButton`/`.stFormSubmitButton`/`.stDownloadButton`, so `st.segmented_control`/`st.pills`
+  (`stButtonGroup`) — i.e. the dashboard's two main controls — were the app's only clickable
+  elements with no press signal, and Streamlit animates `all` on them; (3) the `source` column had
+  been written on every analysis since the beginning and displayed nowhere, leaving the adoption
+  question (automation vs. retyping by hand) unanswerable inside the product. **The font was
+  offered and deliberately not changed**: the three-role system was decided at §19 and *repaired*
+  at §21, where the display serif turned out never to have reached a single page heading — churning
+  it now would undo the work that made it visible. Still open: the new distributions have never run
+  at volume (the demo DB holds ~20 analyses over 11 days — enough to validate chart shape, not
+  legibility with hundreds of correspondents), and nothing was checked on a phone.
+- ✅ **Fixed (2026-08-08)** — §28 "acami: the agency brand, its legal pages and its marketing
+  surface". The pass began from a classification question — *is this a SaaS or an AI agency?* — and
+  the answer is the finding: **agency** (zero licence fee, deployment on client infrastructure,
+  client-owned keys, price quoted after a call). That exposed the real defect: **the marketing site
+  branded itself as the product, not the business.** `<title>` was "ACA — Agentic Commercial
+  Assistant" and the Organization JSON-LD named ACA, so the page argued "buy this software" while
+  the copy beneath it argued "hire us to install it". Settled with the user as a three-layer
+  architecture: **acami** the commercial entity (always lowercase — that is what separates the
+  ownable, trademarkable name from the two acronyms), **ACAM** the multi-agent engine, **ACA** the
+  installed framework. Delivered: a generated logo system
+  ([scripts/build_brand_assets.py](scripts/build_brand_assets.py) → 4 SVG + 3 PNG, byte-identical
+  across runs so CI can detect drift exactly as it does for `export_graph.py`);
+  [docs/BRAND.md](docs/BRAND.md), [docs/BRAND_GUIDELINES.md](docs/BRAND_GUIDELINES.md),
+  [docs/MARKETING.md](docs/MARKETING.md), [docs/AGENCY_VS_SAAS.md](docs/AGENCY_VS_SAAS.md); an
+  `AGENCY_*` token layer in [branding.py](aca/core/branding.py) (`resolve_agency`,
+  `agency_mark_html`, `star_path`) wired into `ui.py`'s footer, `aca/ui/shared.py`'s login screen
+  and a new `5_settings.py` panel — kept in a table **separate** from `BRAND_*` precisely so a
+  client re-theming the app cannot erase the maker's mark by accident; and a substantially completed
+  [legal.html](static/legal.html). Suite 805 → **829 passing** (+19 §28 tests, +5 parametrized),
+  zero new failures.
+  **Six things the pass found rather than built**, five of them this project's recurring shape —
+  silent failures no amount of re-reading would catch: (1) **`acami-mark.svg` was not well-formed
+  XML** — two consecutive hyphens inside an XML comment (`--ink-accent`) make the file invalid; a
+  browser renders it anyway, which is exactly what lets the fault survive, and the first attempt at
+  the fix *reintroduced it* by quoting the character pair; (2) **a hand-written Bézier control point
+  was wrong** (84.32 for 86.32) — a wrong curve raises nothing, breaks no test and is barely
+  visible, so the geometry now computes all eight control points from three numbers and the SVGs
+  became generated artifacts; (3) **the landing page contradicted itself about its own prices** —
+  two comments claimed the figures "have been removed rather than guessed at" and "are still
+  placeholders" while the cards rendered 0 / 1 490 / 8 900 / 290 EUR; (4) **switching the legal page
+  to French deleted every `[TO COMPLETE]` marker** — they sat inside elements whose `data-fr` string
+  did not contain them, so French would have dropped the real company name once filled in, leaving a
+  privacy policy naming no controller at all (now one `ENTITY` seam, both languages carrying the
+  span, verified 9-of-9 paired); (5) **the privacy policy confused controller roles** — written as
+  though the deploying client were the controller, on a page served by acami, while claiming "no
+  tracking cookies… solely from the email you send us" two paragraphs below a table listing the
+  Cal.com iframe and Web3Forms; (6) **international transfers were absent entirely** —
+  Groq/HubSpot/Web3Forms are US and acami operates from Tunisia, a non-adequacy country, which made
+  this the policy's most serious legal gap. Also added to the legal pages: cookie/iframe honesty,
+  breach notification, children's data, a DPA offer, AI-output ownership (the client's), EU AI Act
+  positioning (limited-risk under art. 50, explicitly not Annex III), deposit and refund terms,
+  end-of-engagement data return, a monthly-care SLA table, and AUP enforcement steps.
+  **A separate finding, not this pass's work**: `tests/test_branding.py` carries **117 uncommitted
+  lines** from an earlier, unfinished **§27 "readable borders"** pass — tests for
+  `readable_border_on()`, `BORDER_MIN_CONTRAST`, an `--aca-border-soft`/`--aca-border` split, a
+  Streamlit 1.59 card-selector fix and a DOMPurify guard, **none of which is implemented**. Those 29
+  failures pre-date this session (confirmed against HEAD) and this pass deliberately did not absorb
+  them: finishing it means changing `BRAND_BORDER` on all 19 shipped palettes, a design decision of
+  its own. §28 was renumbered from §27 to avoid colliding with it.
+  **The pSEO layer was also delivered**: [scripts/build_seo_pages.py](scripts/build_seo_pages.py)
+  generates `static/fr/index.html` (a genuinely French-rendered landing page — see below), 10
+  pSEO pages (4 integrations, 3 comparisons, 3 glossary entries, each in both languages = 20 files)
+  from [static/seo/pages.json](static/seo/pages.json), plus `robots.txt`/`sitemap.xml`. The French
+  page is the one place this pass touched the flagship `landing.html`'s *rendering*, so it was
+  built deliberately conservatively: a stdlib-only `html.parser.HTMLParser` locates the exact byte
+  offsets of every top-level `[data-fr]` element (mirroring the page's own toggle script, including
+  its rule that a `[data-fr]` element nested inside another one is inert) and splices in the French
+  text — never reconstructing the document from a parsed tree. `lxml` was available and deliberately
+  **not used**: it is present only as a transitive dependency of `python-docx`, and importing it
+  directly would replay the exact trap `totp.py` documents for `cryptography`. Verified rather than
+  assumed: the `<style>` and `<script>` blocks are asserted byte-identical between the English and
+  French files, the 235-entry diff touches only text content plus `lang`/`title`/meta/`aria-pressed`,
+  and the generator is idempotent (24 output files, byte-identical across two runs). **Still open,
+  stated plainly**: none of this can rank without a domain, and none exists — canonical URLs,
+  `sitemap.xml` and `robots.txt` all point at the reserved placeholder `acami.example`; the
+  wordmark's original typeface remains unknown; no trademark search (INPI / INNORPI) has been run;
+  the pricing-card reorder for anchoring was identified and deliberately left alone; and no browser
+  was available this session, so every page was verified by parsing (XML/JS/JSON-LD/HTML balance)
+  and PyMuPDF rasterisation rather than against a live DOM.
+
 
 ## Status vs. the 8-week roadmap
 

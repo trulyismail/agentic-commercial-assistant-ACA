@@ -1,0 +1,912 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>acami — Contact, privacy and terms</title>
+<meta name="description" content="Contact acami, and read the privacy policy, terms and acceptable use policy covering the ACA framework we install.">
+<meta name="color-scheme" content="light">
+
+<!--
+  ACA support pages (§26.5) — Contact, Privacy, Terms, Acceptable Use.
+
+  ── ONE FILE, FOUR SECTIONS, and that is a decision ─────────────────────────────────────────────
+  The footer lists four entries and the reference site gives each its own page. Four separate files
+  would each need this stylesheet, and four copies of a stylesheet diverge at the first edit — the
+  same reasoning that keeps French as a `data-fr` attribute in `landing.html` rather than a second
+  translated file. They are four anchored sections here, so `legal.html#privacy` behaves like a page
+  for anyone arriving at it: its own heading, its own entry in the side nav, its own URL.
+
+  ── THREE NAMES, AND THEY ARE NOT INTERCHANGEABLE ───────────────────────────────────────────────
+  acami  the agency — the party you contract with, and the controller for THIS website.
+  ACAM   the multi-agent engine.
+  ACA    the framework installed on a client's own infrastructure.
+  The privacy policy's section 1 turns on that distinction: acami is the controller for the contact
+  form and the booking calendar, while a client deploying ACA is the controller for their own
+  prospects' email. An earlier version said "the company deploying ACA, hereafter we" and left the
+  reader to work out which of the two was speaking on a page served by the other one.
+
+  ── WHAT IS REAL AND WHAT IS NOT ────────────────────────────────────────────────────────────────
+  The privacy section is derived from `docs/PRIVACY_POLICY.md`, written against the actual code: the
+  processor list, the 365-day retention and the "no fully automated decision" claim all describe
+  what the system really does.
+
+  The terms and acceptable-use sections are DRAFTS. They describe this product honestly, but no
+  lawyer has reviewed them and nothing here is legal advice.
+
+  ── THE ENTITY SEAM ─────────────────────────────────────────────────────────────────────────────
+  Every value that cannot be supplied without a human legal decision — operating company, postal
+  address, contact for data-subject rights, governing law — lives in ONE `ENTITY` object at the top
+  of the script, and is written into the page by `applyEntity()`. Leave a field empty and its marker
+  stays visible, in amber, naming what is missing: a blank gets fixed, an invention gets trusted.
+  Same reasoning that removed the placeholder prices from the landing page.
+
+  Those markers used to be seven separate literals in the markup, and that had a defect nobody would
+  have found by re-reading: they sat INSIDE elements whose `data-fr` string did not contain them, so
+  switching to French deleted every one — and would have deleted the real company name once filled
+  in, leaving a French privacy policy naming no controller at all. Both the English body and the
+  French string now carry the span, and `applyEntity()` runs again after every switch.
+
+  ── Remote resources ────────────────────────────────────────────────────────────────────────────
+  Three Google fonts, as an enhancement only — every family is backed by a system stack and the page
+  reads correctly offline. NO remote script, NO remote image. One outbound request exists and only
+  on submit: the contact form POSTs to `CONFIG.form`. Leave that empty and the form falls back to
+  opening the visitor's own mail client.
+-->
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Figtree:wght@400;500;600;700&family=Fragment+Mono:ital@0;1&display=swap">
+
+<style>
+/* ══ TOKENS — identical to landing.html, so the two read as one site ═════════════════════════════ */
+:root{
+  --paper:#fdfdfd; --paper-2:#f7f7f7;
+  --ink:#000; --ink-2:#545454; --ink-3:#636363; --faint:#b0b0b0;
+  --rule:#ededed; --rule-2:#e3e3e3;
+  --ink-accent:#125E6B;
+  --signal:#B4622A; --signal-soft:#fbf1e9;
+  --frame:1176px; --gutter:40px;
+  --ease-out:cubic-bezier(.23,1,.32,1);
+  --font-display:"Instrument Serif","Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Times New Roman",serif;
+  --font-sans:"Figtree","Plus Jakarta Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;
+  --font-mono:"Fragment Mono","Cascadia Code",ui-monospace,SFMono-Regular,Consolas,monospace;
+}
+*,*::before,*::after{box-sizing:border-box}
+[hidden]{display:none !important}
+html{-webkit-text-size-adjust:100%; scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){ html{scroll-behavior:auto} }
+body{margin:0; background:var(--paper); color:var(--ink); font-family:var(--font-sans);
+     font-size:16px; line-height:1.6; -webkit-font-smoothing:antialiased}
+h1,h2,h3{margin:0; font-weight:600; line-height:1.12; letter-spacing:-.03em}
+p{margin:0} ul{margin:0; padding:0; list-style:none} a{color:inherit; text-decoration:none}
+::selection{background:var(--ink); color:var(--paper)}
+
+.frame{max-width:var(--frame); margin:0 auto;
+       border-left:1px solid var(--rule); border-right:1px solid var(--rule)}
+.brk::before{content:"["; color:var(--faint); margin-right:1px}
+.brk::after {content:"]"; color:var(--faint); margin-left:1px}
+.mono{font-family:var(--font-mono); font-size:.75rem; letter-spacing:.02em; color:var(--ink-3)}
+.eyebrow{font-family:var(--font-mono); font-size:.6875rem; letter-spacing:.14em;
+         text-transform:uppercase; color:var(--faint); display:block; margin-bottom:16px}
+
+/* ══ NAV ════════════════════════════════════════════════════════════════════════════════════════ */
+.nav{position:sticky; top:0; z-index:50; background:rgba(253,253,253,.88);
+     -webkit-backdrop-filter:saturate(180%) blur(14px); backdrop-filter:saturate(180%) blur(14px);
+     border-bottom:1px solid var(--rule)}
+.nav__inner{max-width:var(--frame); margin:0 auto; height:70px; padding:0 var(--gutter);
+            border-left:1px solid var(--rule); border-right:1px solid var(--rule);
+            display:flex; align-items:center; justify-content:space-between; gap:18px}
+.logo{display:inline-flex; align-items:center; gap:9px; font-weight:600; letter-spacing:-.02em}
+.logo img{height:20px; width:auto; display:block}
+.nav__right{display:flex; align-items:center; gap:20px}
+.nav__right a{font-size:.875rem; color:var(--ink-2)}
+@media (hover:hover) and (pointer:fine){ .nav__right a:hover{color:var(--ink)} }
+.lang{display:inline-flex; gap:2px; font-family:var(--font-mono); font-size:.6875rem}
+.lang button{background:none; border:0; padding:6px 8px; cursor:pointer; color:var(--faint);
+             font:inherit; border-radius:6px}
+.lang button[aria-pressed="true"]{color:var(--ink); background:var(--paper-2)}
+.lang button:focus-visible{outline:2px solid var(--ink-accent); outline-offset:2px}
+
+/* ══ LAYOUT ═════════════════════════════════════════════════════════════════════════════════════ */
+.head{padding:74px var(--gutter) 42px; border-bottom:1px solid var(--rule)}
+.h-page{font-size:clamp(2.4rem,5.4vw,3.6rem); letter-spacing:-.035em}
+.lede{font-size:1.0625rem; color:var(--ink-2); max-width:60ch; margin-top:18px}
+.wrap{display:grid; grid-template-columns:minmax(0,220px) minmax(0,1fr)}
+/* The side nav is what makes four sections behave like four pages: you always see where you are
+   and what else exists — the one thing separate pages give you for free. */
+.side{padding:42px 20px 42px var(--gutter); border-right:1px solid var(--rule)}
+.side ul{position:sticky; top:100px; display:flex; flex-direction:column; gap:12px}
+.side a{font-size:.875rem; color:var(--ink-3)}
+.side a.is-here{color:var(--ink); font-weight:600}
+@media (hover:hover) and (pointer:fine){ .side a:hover{color:var(--ink)} }
+.body{padding:42px var(--gutter) 70px; min-width:0}
+.sec{padding-block:34px; border-bottom:1px dashed var(--rule-2); scroll-margin-top:92px}
+.sec:last-child{border-bottom:0}
+.h-sec{font-size:clamp(1.5rem,3vw,2rem); letter-spacing:-.03em; margin-bottom:6px}
+.sec h3{font-size:1rem; margin:26px 0 8px; letter-spacing:-.015em}
+.sec p{margin-top:12px; color:var(--ink-2); max-width:72ch}
+.sec li{margin-top:9px; color:var(--ink-2); padding-left:18px; position:relative; max-width:72ch}
+.sec li::before{content:""; position:absolute; left:2px; top:.62em; width:5px; height:5px;
+                border-radius:1px; background:var(--faint)}
+.sec table{border-collapse:collapse; margin-top:16px; width:100%; font-size:.9375rem}
+.sec th,.sec td{border:1px solid var(--rule-2); padding:9px 11px; text-align:left;
+                vertical-align:top; color:var(--ink-2)}
+.sec th{background:var(--paper-2); color:var(--ink); font-weight:600; font-size:.875rem}
+.tbl{overflow-x:auto}
+/* Anything a human legal decision must supply. Deliberately loud: a blank that looks like a blank
+   gets filled in, an invented company name gets trusted and shipped. */
+.todo{background:var(--signal-soft); color:var(--signal); font-family:var(--font-mono);
+      font-size:.75rem; padding:1px 6px; border-radius:4px; white-space:nowrap}
+.note{margin-top:20px; padding:14px 16px; border:1px dashed var(--rule-2); border-radius:12px;
+      background:var(--paper-2); font-size:.875rem; color:var(--ink-3)}
+
+/* ══ CONTACT FORM ═══════════════════════════════════════════════════════════════════════════════ */
+.form{margin-top:24px; max-width:520px}
+.field{display:block; margin-bottom:14px}
+.field span{display:block; font-family:var(--font-mono); font-size:.6875rem; letter-spacing:.12em;
+            text-transform:uppercase; color:var(--faint); margin-bottom:6px}
+.field input,.field textarea{width:100%; padding:12px 14px; border:1px solid var(--rule-2);
+  border-radius:10px; background:var(--paper); color:var(--ink); font:inherit; font-size:.9375rem}
+.field textarea{resize:vertical; min-height:110px}
+.field input:focus-visible,.field textarea:focus-visible{outline:2px solid var(--ink-accent);
+  outline-offset:1px; border-color:transparent}
+.btn{display:inline-flex; align-items:center; justify-content:center; width:100%;
+     padding:14px 22px; border:0; border-radius:999px; background:var(--ink); color:var(--paper);
+     font:inherit; font-weight:600; font-size:.9375rem; cursor:pointer;
+     transition:transform .12s var(--ease-out)}
+.btn:active{transform:scale(.985)}
+.btn:disabled{opacity:.55; cursor:default}
+.btn:focus-visible{outline:2px solid var(--ink-accent); outline-offset:3px}
+
+/* ══ FOOTER ═════════════════════════════════════════════════════════════════════════════════════ */
+.foot{padding:54px var(--gutter) 32px; border-top:1px solid var(--rule);
+      display:grid; grid-template-columns:2fr 1fr 1fr; gap:34px}
+.foot h4{font-size:.875rem; font-weight:600; margin-bottom:15px}
+.foot li{margin-bottom:9px}
+.foot a{font-size:.875rem; color:var(--ink-3)}
+@media (hover:hover) and (pointer:fine){ .foot a:hover{color:var(--ink)} }
+.foot__bar{padding:18px var(--gutter); border-top:1px solid var(--rule);
+           display:flex; justify-content:space-between; gap:18px; flex-wrap:wrap;
+           font-size:.8125rem; color:var(--ink-3)}
+
+@media (max-width:860px){
+  :root{--gutter:24px}
+  .wrap{grid-template-columns:minmax(0,1fr)}
+  .side{border-right:0; border-bottom:1px solid var(--rule); padding:22px var(--gutter)}
+  .side ul{position:static; flex-direction:row; flex-wrap:wrap; gap:8px 18px}
+  .foot{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+  .foot > :first-child{grid-column:1/-1}
+}
+@media (pointer:coarse){
+  .nav__right a,.side a,.foot a{display:inline-block; padding-block:9px}
+  .lang button{min-height:44px; min-width:38px}
+}
+@media print{
+  .nav,.side,.form,.lang{display:none}
+  .frame{max-width:none; border:0}
+  .wrap{grid-template-columns:minmax(0,1fr)}
+  .sec{break-inside:avoid}
+  body{font-size:10.5pt}
+}
+</style>
+</head>
+
+<body>
+
+<nav class="nav">
+  <div class="nav__inner">
+    <a class="logo" href="landing.html"><img src="brand/acami.svg" alt="acami"></a>
+    <div class="nav__right">
+      <a class="brk" href="landing.html" data-fr="Retour au site">Back to site</a>
+      <div class="lang" role="group" aria-label="Language">
+        <button type="button" data-lang="en" aria-pressed="true">EN</button>
+        <button type="button" data-lang="fr" aria-pressed="false">FR</button>
+      </div>
+    </div>
+  </div>
+</nav>
+
+<main class="frame">
+
+  <header class="head">
+    <span class="eyebrow">Support</span>
+    <h1 class="h-page" data-fr="Contact, confidentialité et conditions.">Contact, privacy and terms.</h1>
+    <p class="lede" data-fr="Comment nous joindre, ce que nous faisons de vos données, et les règles qui encadrent l'utilisation d'ACA. Écrit pour être lu, pas pour être survolé.">
+      How to reach us, what we do with your data, and the rules governing the use of ACA. Written to
+      be read, not skimmed.
+    </p>
+  </header>
+
+  <div class="wrap">
+    <aside class="side">
+      <ul>
+        <li><a class="brk" href="#contact" data-fr="Contact">Contact</a></li>
+        <li><a class="brk" href="#privacy" data-fr="Confidentialité">Privacy Policy</a></li>
+        <li><a class="brk" href="#terms" data-fr="Conditions générales">Terms &amp; Conditions</a></li>
+        <li><a class="brk" href="#acceptable-use" data-fr="Usage acceptable">Acceptable Use</a></li>
+      </ul>
+    </aside>
+
+    <div class="body">
+
+      <!-- ══ CONTACT ══════════════════════════════════════════════════════════════════════════ -->
+      <section class="sec" id="contact">
+        <span class="eyebrow">01 — Contact</span>
+        <h2 class="h-sec" data-fr="Nous écrire.">Write to us.</h2>
+        <p data-fr="Pour une question, un cahier des charges ou une demande de prix. Si vous préférez parler à quelqu'un, le calendrier de la page d'accueil réserve un créneau de 30 minutes directement.">
+          For a question, a specification document or a pricing request. If you would rather talk to
+          someone, the calendar on the home page books a 30-minute slot directly.
+        </p>
+
+        <form class="form" id="contact-form" novalidate>
+          <label class="field"><span data-fr="Nom">Name</span>
+            <input type="text" name="name" autocomplete="name" required></label>
+          <label class="field"><span data-fr="E-mail professionnel">Work email</span>
+            <input type="email" name="email" autocomplete="email" required></label>
+          <label class="field"><span data-fr="Société">Company</span>
+            <input type="text" name="company" autocomplete="organization"></label>
+          <label class="field"><span data-fr="Votre message">Your message</span>
+            <textarea name="message" rows="5" required></textarea></label>
+          <button class="btn" type="submit" data-fr="Envoyer">Send</button>
+          <p class="mono" id="form-foot-live" style="margin-top:12px" hidden
+             data-fr="Envoi direct : votre message nous parvient immédiatement, sans passer par votre messagerie.">
+            Sent directly: your message reaches us immediately, without going through your mail app.
+          </p>
+          <p class="mono" id="form-foot-static" style="margin-top:12px"
+             data-fr="Ouvre votre client e-mail avec le message pré-rempli.">
+            Opens your mail client with the message prefilled.
+          </p>
+          <p class="mono" id="form-status" role="status" aria-live="polite" style="margin-top:10px" hidden></p>
+        </form>
+      </section>
+
+      <!-- ══ PRIVACY ══════════════════════════════════════════════════════════════════════════
+           Derived from docs/PRIVACY_POLICY.md, written against the real code. The processor table,
+           the 365-day retention and the "no fully automated decision" statement all describe what
+           the system actually does, not what would sound reassuring. -->
+      <section class="sec" id="privacy">
+        <span class="eyebrow">02 — Privacy Policy</span>
+        <h2 class="h-sec" data-fr="Politique de confidentialité.">Privacy Policy.</h2>
+        <p class="mono" data-fr="Dernière mise à jour : 2026-08-07">Last updated: 2026-08-07</p>
+
+        <h3 data-fr="1. Qui est responsable du traitement">1. Who is the data controller</h3>
+        <p data-fr="Deux traitements distincts sont décrits sur cette page, et ils n'ont pas le même responsable. Les confondre serait commode et faux.">
+          Two distinct kinds of processing are described on this page, and they do not have the same
+          controller. Conflating them would be convenient and wrong.
+        </p>
+        <div class="tbl"><table>
+          <tr><th data-fr="Traitement">Processing</th><th data-fr="Responsable">Controller</th><th data-fr="Ce que cela couvre">What it covers</th></tr>
+          <tr>
+            <td data-fr="Ce site">This website</td>
+            <td data-fr="acami"><b>acami</b></td>
+            <td data-fr="Le formulaire de contact ci-dessus et la prise de rendez-vous depuis la page d'accueil. Si vous nous écrivez ou réservez un créneau, c'est acami qui est responsable de ces données.">The contact form above, and booking a slot from the home page. If you write to us or book a call, acami is the controller for that data.</td>
+          </tr>
+          <tr>
+            <td data-fr="Un déploiement d'ACA">An ACA deployment</td>
+            <td data-fr="L'entreprise cliente"><b>The client company</b></td>
+            <td data-fr="Les e-mails commerciaux que ses prospects lui envoient. acami installe le système sur l'infrastructure du client et n'a aucun accès permanent aux données qui y transitent : le client reste responsable de traitement, acami n'intervient qu'en sous-traitant, et seulement pendant la prestation.">The sales email its own prospects send it. acami installs the system on the client's infrastructure and holds no standing access to the data flowing through it: the client remains the controller, and acami acts only as a processor, only for the duration of the engagement.</td>
+          </tr>
+        </table></div>
+        <p data-fr="Sauf mention contraire, ce qui suit décrit le second cas — celui qui traite des e-mails. Vos droits, la sécurité et les délais valent pour les deux. Raison sociale d'acami : <span class='todo' data-entity='legal'></span>">
+          Unless stated otherwise, what follows describes the second case — the one that processes
+          email. Your rights, the security measures and the deadlines apply to both. acami's
+          registered entity: <span class="todo" data-entity="legal"></span>
+        </p>
+        <p data-fr="Adresse postale : <span class='todo' data-entity='address'></span>">
+          Postal address: <span class="todo" data-entity="address"></span>
+        </p>
+        <p data-fr="Contact pour cette politique et pour l'exercice de vos droits : <span class='todo' data-entity='email'></span>">
+          Contact for this policy and for exercising your rights:
+          <span class="todo" data-entity="email"></span>
+        </p>
+
+        <h3 data-fr="2. Quelles données sont collectées">2. What data is collected</h3>
+        <p data-fr="ACA traite les données contenues dans les e-mails que vous nous envoyez, ainsi que les documents que vous y joignez :">
+          ACA processes the data contained in the emails you send us, and in the documents you attach
+          to them:
+        </p>
+        <div class="tbl"><table>
+          <tr><th data-fr="Donnée">Data</th><th data-fr="Exemple">Example</th><th data-fr="Origine">Source</th></tr>
+          <tr><td data-fr="Adresse e-mail de l'expéditeur">Sender email address</td><td>contact@company.com</td><td data-fr="En-tête de l'e-mail reçu">Header of the received email</td></tr>
+          <tr><td data-fr="Contenu de l'e-mail">Email content (subject and body)</td><td data-fr="Votre demande de devis, démonstration ou support">Your quote, demo or support request</td><td data-fr="Corps de l'e-mail">Body of the email</td></tr>
+          <tr><td data-fr="Pièces jointes">Attachments</td><td data-fr="PDF, Word, Excel">PDF, Word, Excel</td><td data-fr="Pièces jointes de l'e-mail">Attachments on the email</td></tr>
+          <tr><td data-fr="Informations extraites">Extracted information</td><td data-fr="Entreprise, contact, urgence, besoin">Company, contact, urgency, stated need</td><td data-fr="Analyse automatique du contenu ci-dessus par un modèle de langage">Automated analysis of the above by a language model</td></tr>
+          <tr><td data-fr="Historique commercial">Prior exchanges</td><td data-fr="Échanges précédents avec la même adresse">Previous exchanges with the same address</td><td data-fr="Notre propre CRM">Our own CRM</td></tr>
+        </table></div>
+        <p data-fr="Rien n'est collecté par un autre moyen pour cet usage : aucun cookie de suivi, aucune mesure d'audience, aucun fichier acheté à un tiers. Tout provient de l'e-mail que vous nous envoyez.">
+          Nothing is collected by any other means for this purpose: no tracking cookies, no web
+          analytics, no purchased third-party lists. Everything comes from the email you send us.
+        </p>
+
+        <h3 data-fr="2 bis. Ce site, et ce qu'il charge">2b. This website, and what it loads</h3>
+        <p data-fr="La phrase ci-dessus vaut pour le traitement des e-mails. Ce site-ci, lui, charge deux services tiers, et il vaut mieux le dire que le laisser découvrir :">
+          The statement above concerns the processing of email. This website itself loads two
+          third-party services, and it is better to say so than to let you find out:
+        </p>
+        <ul>
+          <li data-fr="<b>Cal.com</b> — le calendrier de réservation, chargé dans un cadre isolé et <em>seulement</em> lorsque vous approchez de cette section. Un visiteur qui n'y descend jamais ne contacte jamais Cal.com. Ce cadre peut déposer ses propres cookies, sur lesquels nous n'avons pas la main.">
+            <b>Cal.com</b> — the booking calendar, loaded in an isolated frame and <em>only</em> as
+            you approach that section. A visitor who never scrolls there never contacts Cal.com.
+            That frame may set its own cookies, over which we have no control.</li>
+          <li data-fr="<b>Web3Forms</b> — l'acheminement du formulaire de contact. Contacté uniquement à l'envoi, jamais au chargement de la page.">
+            <b>Web3Forms</b> — contact-form delivery. Contacted only on submit, never on page load.</li>
+          <li data-fr="<b>Google Fonts</b> — trois familles de caractères. C'est une amélioration, pas une dépendance : sans elles la page reste lisible et correctement composée.">
+            <b>Google Fonts</b> — three typefaces. An enhancement, not a dependency: without them the
+            page stays readable and correctly set.</li>
+        </ul>
+        <p data-fr="Nous ne déposons nous-mêmes aucun cookie de suivi et n'utilisons aucun outil de mesure d'audience. La seule valeur que ce site écrit dans votre navigateur est votre choix de langue, conservé localement, et qui ne quitte jamais votre machine.">
+          We set no tracking cookie of our own and use no analytics tool. The only value this site
+          writes to your browser is your language choice, kept locally, which never leaves your
+          machine.
+        </p>
+
+        <h3 data-fr="3. Pourquoi, et sur quelle base légale">3. Why, and on what legal basis</h3>
+        <ul>
+          <li data-fr="Finalité : qualifier votre demande commerciale et préparer une réponse personnalisée."><b>Purpose:</b> to qualify your commercial enquiry and prepare a personalised reply.</li>
+          <li data-fr="Base légale : mesures précontractuelles prises à votre demande, et notre intérêt légitime à traiter efficacement les demandes reçues (art. 6.1.b et 6.1.f du RGPD)."><b>Legal basis:</b> pre-contractual steps taken at your request, and our legitimate interest in handling enquiries efficiently (GDPR art. 6.1(b) and 6.1(f)).</li>
+          <li data-fr="Aucune décision entièrement automatisée : une personne relit et valide systématiquement toute proposition avant tout enregistrement dans le CRM ou toute préparation de réponse (art. 22 du RGPD). Le système rédige et attend ; il n'agit jamais seul."><b>No fully automated decision-making:</b> a person reads and approves every proposal before anything is written to the CRM or any reply is drafted (GDPR art. 22). The system drafts and waits; it never acts alone.</li>
+        </ul>
+
+        <h3 data-fr="4. Qui y a accès (sous-traitants)">4. Who has access (processors)</h3>
+        <div class="tbl"><table>
+          <tr><th data-fr="Prestataire">Provider</th><th data-fr="Rôle">Role</th><th data-fr="Données transmises">Data shared</th></tr>
+          <tr><td>Groq</td><td data-fr="Modèles de langage">Language models</td><td data-fr="Contenu de l'e-mail et des pièces jointes">Email and attachment content</td></tr>
+          <tr><td>Google (Gemini)</td><td data-fr="Recherche sémantique interne">Internal semantic search</td><td data-fr="Le besoin exprimé, texte court">The stated need — a short text, not the whole email</td></tr>
+          <tr><td>Google Sheets</td><td data-fr="CRM et base de connaissances">CRM and knowledge base</td><td data-fr="Lead qualifié">Qualified lead</td></tr>
+          <tr><td>HubSpot</td><td data-fr="CRM">CRM</td><td data-fr="Lead qualifié, même périmètre">Qualified lead, same scope</td></tr>
+          <tr><td>Gmail (Google&nbsp;Workspace)</td><td data-fr="Réception, brouillons de réponse">Receiving mail, drafting replies</td><td data-fr="L'e-mail lui-même">The email itself</td></tr>
+          <tr><td data-fr="Tavily (optionnel)">Tavily <i>(optional)</i></td><td data-fr="Enrichissement, recherche de repli">Enrichment, fallback search</td><td data-fr="Nom de domaine, questions sans réponse">Sender domain, unanswered questions</td></tr>
+          <tr><td data-fr="Supabase (optionnel)">Supabase <i>(optional)</i></td><td data-fr="Stockage technique">Technical storage</td><td data-fr="Aucune donnée personnelle directe">No direct personal data</td></tr>
+          <tr><td data-fr="Slack (optionnel)">Slack <i>(optional)</i></td><td data-fr="Notification interne">Internal notification</td><td data-fr="Résumé de l'alerte">Alert summary</td></tr>
+          <tr><td>Cal.com</td><td data-fr="Réservation des rendez-vous">Appointment booking</td><td data-fr="Nom, e-mail, invités et notes que vous saisissez">Name, email, guests and notes you enter</td></tr>
+          <tr><td>Web3Forms</td><td data-fr="Acheminement du formulaire de contact">Contact form delivery</td><td data-fr="Ce que vous saisissez dans ce formulaire">What you type into that form</td></tr>
+        </table></div>
+        <p data-fr="Nous ne vendons ni ne louons vos données. Aucun de ces prestataires n'est autorisé à les réutiliser à ses propres fins.">
+          We do not sell or rent your data. None of these providers is permitted to reuse it for their
+          own purposes.
+        </p>
+
+        <h3 data-fr="4 bis. Transferts hors de l'Union européenne">4b. Transfers outside the European Union</h3>
+        <p data-fr="Cette section manquait, et c'était la lacune la plus sérieuse de cette politique : plusieurs des prestataires ci-dessus sont établis aux États-Unis, et acami opère depuis la Tunisie — un pays qui ne bénéficie pas d'une décision d'adéquation de la Commission européenne. Vos données sortent donc de l'Union, et vous avez le droit de savoir sur quelle base.">
+          This section was missing, and it was the most serious gap in this policy: several of the
+          providers above are established in the United States, and acami operates from Tunisia — a
+          country with no adequacy decision from the European Commission. Your data therefore leaves
+          the Union, and you are entitled to know on what basis.
+        </p>
+        <div class="tbl"><table>
+          <tr><th data-fr="Destination">Destination</th><th data-fr="Concerne">Concerns</th><th data-fr="Garantie invoquée">Safeguard relied on</th></tr>
+          <tr><td data-fr="États-Unis">United States</td><td>Groq, HubSpot, Web3Forms, Cal.com</td><td data-fr="Clauses contractuelles types de la Commission européenne (art. 46.2.c du RGPD), telles qu'incluses dans les conditions de chacun de ces prestataires.">European Commission Standard Contractual Clauses (GDPR art. 46.2(c)), as incorporated in each provider's own terms.</td></tr>
+          <tr><td data-fr="États-Unis / Irlande">United States / Ireland</td><td>Google (Gemini, Sheets, Gmail)</td><td data-fr="Clauses contractuelles types, et adhésion du groupe au cadre de protection des données UE–États-Unis.">Standard Contractual Clauses, and the group's certification under the EU–US Data Privacy Framework.</td></tr>
+          <tr><td data-fr="Tunisie">Tunisia</td><td data-fr="Accès d'acami pendant une prestation">acami's access during an engagement</td><td data-fr="Clauses contractuelles types annexées au contrat de prestation, plus la loi tunisienne 2004-63 relative à la protection des données à caractère personnel.">Standard Contractual Clauses annexed to the engagement contract, together with Tunisian law 2004-63 on the protection of personal data.</td></tr>
+        </table></div>
+        <p data-fr="Un client qui déploie ACA garde la main sur ce point : les clés d'API sont les siennes, et il peut choisir des prestataires établis dans l'Union — ce que la conception du produit permet, chaque intégration étant optionnelle et remplaçable.">
+          A client deploying ACA keeps control here: the API keys are theirs, and they may choose
+          providers established in the Union — which the product's design allows, every integration
+          being optional and replaceable.
+        </p>
+
+        <h3 data-fr="5. Durée de conservation">5. How long we keep it</h3>
+        <p data-fr="Vos données sont conservées 365 jours par défaut à compter de leur réception, puis purgées automatiquement du CRM, de la mémoire technique du système et des files de traitement. Les profils d'entreprise en cache et la base de connaissances interne ne contiennent pas de données personnelles et ne sont pas concernés.">
+          Your data is kept for 365 days by default from the date we receive it, then automatically
+          purged from the CRM, from the system's technical memory and from the processing queues.
+          Cached company profiles and the internal knowledge base contain no personal data and are
+          not affected.
+        </p>
+
+        <h3 data-fr="6. Vos droits">6. Your rights</h3>
+        <ul>
+          <li data-fr="Accès : savoir quelles données nous détenons sur vous."><b>Access</b> — know what data we hold about you.</li>
+          <li data-fr="Rectification : corriger une donnée inexacte."><b>Rectification</b> — correct inaccurate data.</li>
+          <li data-fr="Effacement : demander la suppression avant l'échéance normale."><b>Erasure</b> — request deletion before the normal expiry.</li>
+          <li data-fr="Portabilité : recevoir vos données dans un format structuré."><b>Portability</b> — receive your data in a structured format.</li>
+          <li data-fr="Opposition : vous opposer au traitement pour des motifs légitimes."><b>Objection</b> — object to processing on legitimate grounds.</li>
+        </ul>
+        <p data-fr="Pour exercer un droit, écrivez à <span class='todo' data-entity='email'></span>. Nous répondons sous un mois (art. 12.3 du RGPD) ; si la demande est complexe, nous vous le disons dans ce délai plutôt que de laisser passer l'échéance en silence.">
+          To exercise a right, write to <span class="todo" data-entity="email"></span>. We answer
+          within one month (GDPR art. 12.3); if a request is complex we tell you so inside that
+          month rather than letting the deadline pass in silence.
+        </p>
+        <p data-fr="L'effacement n'est pas une promesse à tenir à la main : il est implémenté. Une commande d'effacement par personne existe dans le produit (<code>retention.py --oublier</code>) et supprime les lignes du CRM, l'état interne contenant le corps de l'e-mail, les files d'attente et le suivi des relances, en renvoyant le décompte par emplacement — ce qui permet de vous répondre précisément plutôt que d'affirmer que c'est fait.">
+          Erasure is not a promise kept by hand: it is implemented. A per-person erasure command
+          exists in the product (<code>retention.py --oublier</code>) and removes the CRM rows, the
+          internal state holding the email body, the queues and the follow-up tracking, returning a
+          count per location — which is what lets us answer you precisely instead of asserting that
+          it is done.
+        </p>
+        <p data-fr="Le journal d'audit est délibérément conservé (intérêt légitime, art. 17.3.e) : il enregistre qui a validé quoi et quand, et sa suppression effacerait la trace en même temps que la donnée. C'est une décision assumée, pas un oubli.">
+          The audit log is deliberately kept (legitimate interest, art. 17.3(e)): it records who
+          approved what and when, and deleting a row would erase the trace along with the data. That
+          is a stated decision, not an oversight.
+        </p>
+        <p data-fr="Vous pouvez également saisir l'autorité de protection des données compétente : <span data-entity='authority'></span>.">
+          You may also lodge a complaint with the competent supervisory authority:
+          <span data-entity="authority"></span>.
+        </p>
+
+        <h3 data-fr="7. Sécurité">7. Security</h3>
+        <ul>
+          <li data-fr="Toute écriture dans le CRM est précédée d'une validation humaine explicite.">Every write to the CRM is preceded by an explicit human approval.</li>
+          <li data-fr="L'accès à l'outil interne est protégé par mot de passe, avec verrouillage progressif après plusieurs échecs et second facteur pour les comptes administrateurs.">Access to the internal tool is password-protected, with progressive lockout after repeated failures and a second factor for administrator accounts.</li>
+          <li data-fr="Chaque validation humaine est journalisée — qui, quoi, quand — dans un journal chaîné par empreintes.">Every human approval is logged — who, what, when — in a hash-chained journal.</li>
+          <li data-fr="Les clés d'API ne sont jamais stockées dans le code ni affichées à l'écran.">API keys are never stored in the code or shown on screen.</li>
+        </ul>
+
+        <h3 data-fr="8. En cas de violation de données">8. If there is a data breach</h3>
+        <p data-fr="Si une violation de vos données présente un risque pour vos droits, nous notifions l'autorité compétente sous 72 heures (art. 33 du RGPD) et nous vous informons directement lorsque le risque est élevé (art. 34). Nous vous dirons ce qui s'est passé, quelles données sont concernées et ce que nous avons fait — pas seulement qu'un incident a eu lieu.">
+          If a breach of your data creates a risk to your rights, we notify the competent authority
+          within 72 hours (GDPR art. 33) and inform you directly where the risk is high (art. 34).
+          We will tell you what happened, which data was involved and what we did about it — not
+          merely that an incident occurred.
+        </p>
+        <p data-fr="Sur un déploiement chez un client, c'est le client qui notifie, puisqu'il est responsable de traitement ; acami l'assiste et lui fournit sans délai ce que le journal chaîné permet d'établir.">
+          On a client deployment the client notifies, since they are the controller; acami assists
+          and supplies without delay whatever the hash-chained journal can establish.
+        </p>
+
+        <h3 data-fr="9. Mineurs">9. Children</h3>
+        <p data-fr="Ce service s'adresse à des professionnels. Il n'est pas destiné aux personnes de moins de 16 ans et nous ne collectons pas sciemment leurs données. Si vous pensez que c'est arrivé, écrivez-nous et nous effacerons.">
+          This service is aimed at professionals. It is not intended for people under 16 and we do
+          not knowingly collect their data. If you believe that has happened, write to us and we will
+          erase it.
+        </p>
+
+        <h3 data-fr="10. Accord de sous-traitance">10. Data Processing Agreement</h3>
+        <p data-fr="Pour un client qui déploie ACA, un accord de sous-traitance conforme à l'article 28 du RGPD est disponible sur demande : il fixe le périmètre, la durée, les sous-traitants ultérieurs, les mesures de sécurité et le sort des données en fin de prestation. Demandez-le avant la signature plutôt qu'après — c'est le moment où il sert à quelque chose.">
+          For a client deploying ACA, a Data Processing Agreement meeting GDPR art. 28 is available
+          on request: it sets the scope, the duration, the sub-processors, the security measures and
+          what happens to the data at the end of the engagement. Ask for it before signing rather
+          than after — that is when it is useful.
+        </p>
+
+        <h3 data-fr="11. Modifications">11. Changes</h3>
+        <p data-fr="Cette politique peut évoluer avec le système ou la réglementation. La date de dernière mise à jour figure en haut de cette section.">
+          This policy may change as the system or the regulation does. The last-updated date appears
+          at the top of this section.
+        </p>
+      </section>
+
+      <!-- ══ TERMS ════════════════════════════════════════════════════════════════════════════
+           DRAFT. Describes this product honestly; no lawyer has reviewed it. -->
+      <section class="sec" id="terms">
+        <span class="eyebrow">03 — Terms &amp; Conditions</span>
+        <h2 class="h-sec" data-fr="Conditions générales.">Terms &amp; Conditions.</h2>
+        <p class="mono" data-fr="Dernière mise à jour : 2026-08-07">Last updated: 2026-08-07</p>
+
+        <h3 data-fr="1. Objet">1. Scope</h3>
+        <p data-fr="Ces conditions encadrent la fourniture du framework ACA — installation, intégration à vos outils et, le cas échéant, maintenance — par <span class='todo' data-entity='legal'></span> au client désigné dans le devis accepté. Elles s'appliquent entre professionnels ; aucun droit de rétractation de consommateur n'est prévu.">
+          These terms govern the supply of the ACA framework — installation, integration with your
+          tools and, where applicable, maintenance — by
+          <span class="todo" data-entity="legal"></span> to the client named in the accepted
+          quotation. They apply business-to-business; no consumer right of withdrawal arises.
+        </p>
+        <p data-fr="La version applicable est celle en vigueur à la date d'acceptation du devis, et cette page en porte la date en haut de section. Une modification ultérieure ne s'applique pas rétroactivement à une prestation déjà commandée.">
+          The applicable version is the one in force on the date the quotation is accepted, and this
+          page carries that date at the top of the section. A later change does not apply
+          retroactively to work already ordered.
+        </p>
+
+        <h3 data-fr="2. Ce qui est vendu">2. What is being sold</h3>
+        <p data-fr="Ce qui est facturé est la mise en place et l'intégration, jamais une licence d'utilisation du logiciel. Le déploiement a lieu sur votre infrastructure ; les comptes de services tiers et les clés d'API restent les vôtres, et leurs coûts éventuels vous sont facturés directement par ces prestataires.">
+          What is invoiced is setup and integration, never a software licence. Deployment takes place
+          on your infrastructure; third-party accounts and API keys remain yours, and any resulting
+          costs are billed to you directly by those providers.
+        </p>
+
+        <h3 data-fr="3. Devis, paiement et résiliation">3. Quotation, payment and cancellation</h3>
+        <ul>
+          <li data-fr="Un devis est établi après un appel de cadrage. Il précise le périmètre, le prix et le délai.">A quotation is issued after a scoping call, stating scope, price and timeline.</li>
+          <li data-fr="Le devis est ferme pendant 30 jours à compter de son émission.">A quotation is firm for 30 days from issue.</li>
+          <li data-fr="Sauf mention contraire au devis, la facturation est de 50 % à la signature et 50 % à la livraison.">Unless the quotation states otherwise, invoicing is 50% on signature and 50% on delivery.</li>
+          <li data-fr="Un abonnement de maintenance est mensuel et résiliable à tout moment, avec effet à la fin de la période en cours.">A maintenance subscription is monthly and cancellable at any time, effective at the end of the current period.</li>
+          <li data-fr="Les délais de paiement et pénalités de retard applicables sont ceux du droit en vigueur : <span class='todo' data-entity='law'></span>">Payment terms and late-payment penalties are those of the applicable law: <span class="todo" data-entity="law"></span></li>
+          <li data-fr="<b>Si vous renoncez après la signature</b>, l'acompte couvre le travail déjà effectué : cadrage, accès obtenus, configuration commencée. S'il excède ce travail, la différence vous est rendue. Un acompte n'est pas une pénalité.">
+            <b>If you withdraw after signature</b>, the deposit covers work already done: scoping,
+            access obtained, configuration begun. Where it exceeds that work, the difference is
+            returned to you. A deposit is not a penalty.</li>
+          <li data-fr="<b>Si nous ne livrons pas</b> ce qui est décrit au devis, vous êtes remboursé de ce qui n'a pas été livré. Nous ne facturons pas un système qui ne tourne pas chez vous.">
+            <b>If we fail to deliver</b> what the quotation describes, you are refunded for what was
+            not delivered. We do not invoice a system that is not running on your side.</li>
+        </ul>
+
+        <h3 data-fr="4. Vos obligations">4. Your obligations</h3>
+        <ul>
+          <li data-fr="Fournir les accès nécessaires (boîte e-mail, CRM, agenda) et un interlocuteur pouvant décider.">Provide the necessary access (mailbox, CRM, calendar) and a contact empowered to make decisions.</li>
+          <li data-fr="Désigner les personnes qui valideront les analyses. Le produit repose sur cette validation ; sans elle, il ne produit rien.">Designate the people who will approve analyses. The product depends on that approval; without it, it produces nothing.</li>
+          <li data-fr="Vous assurer que le traitement des e-mails de vos prospects par ACA est conforme à vos propres obligations envers eux.">Ensure that processing your prospects' email through ACA is consistent with your own obligations towards them.</li>
+        </ul>
+
+        <h3 data-fr="5. Ce que nous ne garantissons pas">5. What we do not warrant</h3>
+        <p data-fr="ACA s'appuie sur des modèles de langage, dont les sorties sont probabilistes. Nous ne garantissons ni l'exactitude d'une classification, ni celle d'une information extraite, ni celle d'un texte rédigé. C'est précisément pourquoi rien n'atteint votre CRM ni un client sans qu'une personne l'ait relu et validé : la validation humaine n'est pas une précaution d'usage, c'est le mécanisme de correction du produit.">
+          ACA relies on language models, whose outputs are probabilistic. We do not warrant the
+          accuracy of any classification, any extracted field or any drafted text. That is precisely
+          why nothing reaches your CRM or a customer without a person having read and approved it:
+          the human approval is not a formality, it is the product's correction mechanism.
+        </p>
+        <p data-fr="Nous ne garantissons pas non plus la disponibilité des services tiers dont le produit dépend (fournisseurs de modèles, messagerie, CRM), ni le maintien de leurs offres gratuites.">
+          Nor do we warrant the availability of the third-party services the product depends on
+          (model providers, mail, CRM), or the continuation of their free tiers.
+        </p>
+
+        <h3 data-fr="6. Responsabilité">6. Liability</h3>
+        <p data-fr="Notre responsabilité est limitée au montant effectivement payé au titre de la prestation concernée. Nous ne répondons pas des dommages indirects, notamment d'une perte de chiffre d'affaires ou de clientèle. Aucune limitation ne s'applique en cas de faute lourde ou intentionnelle, ni là où la loi l'interdit.">
+          Our liability is limited to the amount actually paid for the engagement concerned. We are
+          not liable for indirect damages, including lost revenue or lost customers. No limitation
+          applies in cases of gross negligence or wilful misconduct, or where the law forbids it.
+        </p>
+
+        <h3 data-fr="7. Confidentialité et propriété">7. Confidentiality and ownership</h3>
+        <p data-fr="Les données et documents que vous nous confiez restent les vôtres et ne servent qu'à la prestation. Le code d'ACA et ses évolutions génériques restent notre propriété ; les configurations, contenus et bases de connaissances propres à votre déploiement sont les vôtres et vous sont remis à la livraison.">
+          The data and documents you entrust to us remain yours and are used only for the engagement.
+          The ACA codebase and its generic evolutions remain our property; the configuration, content
+          and knowledge base specific to your deployment are yours and are handed over on delivery.
+        </p>
+
+        <p data-fr="<b>Les textes rédigés par le système sont les vôtres.</b> Propositions, réponses, devis indicatifs : vous en détenez les droits, sans redevance et sans limite de durée, et vous pouvez les utiliser après la fin de la prestation comme pendant. Nous ne revendiquons rien sur ce que la machine écrit pour vos clients — ce serait revendiquer votre correspondance commerciale.">
+          <b>Text produced by the system is yours.</b> Proposals, replies, indicative quotes: you
+          hold the rights to them, royalty-free and without time limit, and you may use them after
+          the engagement ends as during it. We claim nothing over what the machine writes to your
+          customers — that would be claiming your commercial correspondence.
+        </p>
+        <p data-fr="Nous n'utilisons pas vos données pour entraîner un modèle. Le produit n'entraîne rien : il appelle des modèles hébergés par des tiers, sous les conditions de ces tiers, avec vos propres clés d'API. Les couples (brouillon, version corrigée) que le système enregistre restent chez vous, dans votre base, et servent uniquement à vous montrer ce qui a été modifié.">
+          We do not use your data to train a model. The product trains nothing: it calls models
+          hosted by third parties, under those parties' terms, with your own API keys. The
+          (draft, corrected version) pairs the system records stay with you, in your database, and
+          exist only to show you what was changed.
+        </p>
+
+        <h3 data-fr="8. Statut au regard du règlement européen sur l'IA">8. Standing under the EU AI Act</h3>
+        <p data-fr="ACA est un système d'IA à usage général appliqué à la rédaction assistée, sous supervision humaine permanente. Il ne relève pas des usages interdits, et pas davantage de l'annexe III des systèmes à haut risque : il n'évalue aucune personne physique, ne décide d'aucun accès à un emploi, à un crédit, à un service essentiel ou à une prestation publique.">
+          ACA is a general-purpose AI system applied to assisted drafting, under continuous human
+          supervision. It falls neither within the prohibited practices nor within Annex III's
+          high-risk systems: it evaluates no natural person and decides no access to employment,
+          credit, an essential service or a public benefit.
+        </p>
+        <p data-fr="L'obligation qui s'applique réellement est celle de transparence (art. 50) : une personne qui reçoit un texte produit avec l'aide d'une IA doit pouvoir le savoir. Vous en êtes responsable dans votre usage, puisque c'est vous qui envoyez. Le produit vous y aide plutôt qu'il ne vous en dispense — rien ne part sans qu'une personne l'ait lu, et le journal conserve qui a validé quoi.">
+          The obligation that actually applies is transparency (art. 50): a person receiving text
+          produced with AI assistance must be able to know it. You are responsible for that in your
+          use, since you are the one sending. The product helps you meet it rather than excusing you
+          from it — nothing goes out without a person having read it, and the journal records who
+          approved what.
+        </p>
+
+        <h3 data-fr="9. Suivi mensuel : ce qui est promis">9. Monthly care: what is promised</h3>
+        <p data-fr="L'option de suivi vendait une surveillance sans jamais dire sous quel délai. Voici le délai.">
+          The care option sold monitoring without ever stating a response time. Here it is.
+        </p>
+        <div class="tbl"><table>
+          <tr><th data-fr="Situation">Situation</th><th data-fr="Première réponse">First response</th><th data-fr="Ce que nous faisons">What we do</th></tr>
+          <tr><td data-fr="Le système ne traite plus les e-mails">The system has stopped processing email</td><td data-fr="1 jour ouvré">1 business day</td><td data-fr="Diagnostic et remise en service, ou solution de contournement documentée">Diagnosis and restoration, or a documented workaround</td></tr>
+          <tr><td data-fr="Dégradation (lenteur, quota, un connecteur en panne)">Degradation (slowness, quota, one connector down)</td><td data-fr="2 jours ouvrés">2 business days</td><td data-fr="Correction ou contournement au cycle de suivi suivant">Fix or workaround at the next care cycle</td></tr>
+          <tr><td data-fr="Question, ajustement, curation">Question, adjustment, curation</td><td data-fr="5 jours ouvrés">5 business days</td><td data-fr="Traité pendant le cycle mensuel">Handled during the monthly cycle</td></tr>
+        </table></div>
+        <p data-fr="Jours ouvrés, heures de bureau, hors jours fériés. Ce n'est pas une astreinte 24/7 et nous ne la vendons pas comme telle : à ce prix, ce serait une promesse intenable, et une promesse intenable coûte plus cher qu'une absence de promesse.">
+          Business days, office hours, public holidays excluded. This is not 24/7 on-call and we do
+          not sell it as such: at this price that would be an unkeepable promise, and an unkeepable
+          promise costs more than no promise at all.
+        </p>
+
+        <h3 data-fr="10. Fin de la prestation">10. End of the engagement</h3>
+        <ul>
+          <li data-fr="Le système reste chez vous et continue de fonctionner : il tourne sur votre infrastructure, avec vos clés. La fin d'un suivi n'éteint rien.">The system stays with you and keeps working: it runs on your infrastructure, with your keys. Ending a care subscription switches nothing off.</li>
+          <li data-fr="Vous recevez la configuration, la base de connaissances et les procédures d'exploitation. C'est ce qui rend le transfert réel plutôt que déclaratif.">You receive the configuration, the knowledge base and the operating procedures. That is what makes handover real rather than declarative.</li>
+          <li data-fr="Nous supprimons sous 30 jours toute copie de vos données que la prestation nous aurait amenés à détenir, et vous le confirmons par écrit.">Within 30 days we delete any copy of your data the engagement caused us to hold, and confirm it to you in writing.</li>
+          <li data-fr="Les accès qui nous avaient été ouverts sont révoqués par vous — c'est vous qui les détenez, nous ne pouvons pas le faire à votre place et nous vous le rappelons à la livraison.">Access granted to us is revoked by you — you hold it, we cannot do it for you, and we remind you of this at handover.</li>
+        </ul>
+
+        <h3 data-fr="11. Dispositions générales">11. General</h3>
+        <ul>
+          <li data-fr="<b>Sous-traitance</b> — nous pouvons faire appel à un tiers pour une partie de la prestation, en restant responsables de son travail devant vous.">
+            <b>Subcontracting</b> — we may use a third party for part of the work, remaining answerable to you for it.</li>
+          <li data-fr="<b>Force majeure</b> — un événement extérieur, imprévisible et irrésistible suspend les obligations concernées pendant sa durée. L'indisponibilité prolongée d'un fournisseur de modèles en fait partie.">
+            <b>Force majeure</b> — an external, unforeseeable and irresistible event suspends the affected obligations while it lasts. A prolonged outage at a model provider counts.</li>
+          <li data-fr="<b>Cession</b> — aucune des parties ne cède le contrat sans l'accord écrit de l'autre, sauf transmission à un successeur de l'ensemble de l'activité.">
+            <b>Assignment</b> — neither party assigns the contract without the other's written consent, except to a successor to the whole business.</li>
+          <li data-fr="<b>Survie</b> — la confidentialité, la propriété, la responsabilité et le droit applicable survivent à la fin du contrat.">
+            <b>Survival</b> — confidentiality, ownership, liability and governing law survive termination.</li>
+          <li data-fr="<b>Notifications</b> — par écrit, aux adresses figurant au devis. Un e-mail suffit et fait foi.">
+            <b>Notices</b> — in writing, to the addresses on the quotation. Email suffices and counts as proof.</li>
+          <li data-fr="<b>Nullité partielle</b> — si une clause est écartée, les autres restent en vigueur.">
+            <b>Severability</b> — if one clause is set aside, the others remain in force.</li>
+        </ul>
+
+        <h3 data-fr="12. Droit applicable">12. Governing law</h3>
+        <p data-fr="Ces conditions sont régies par le droit suivant : <span class='todo' data-entity='law'></span>. Tout litige sera d'abord traité de bonne foi entre les parties avant toute action.">
+          These terms are governed by the following law:
+          <span class="todo" data-entity="law"></span>. Any dispute will first be addressed in good
+          faith between the parties before any action is brought.
+        </p>
+
+        <p class="note" data-fr="Ces conditions décrivent fidèlement le fonctionnement du produit, mais elles n'ont pas été relues par un juriste. Faites-les vérifier dans votre juridiction avant de les opposer à un client payant.">
+          These terms describe the product accurately, but they have not been reviewed by a lawyer.
+          Have them checked in your jurisdiction before relying on them with a paying client.
+        </p>
+      </section>
+
+      <!-- ══ ACCEPTABLE USE ═══════════════════════════════════════════════════════════════════
+           DRAFT, same caveat as the terms above. -->
+      <section class="sec" id="acceptable-use">
+        <span class="eyebrow">04 — Acceptable Use</span>
+        <h2 class="h-sec" data-fr="Usage acceptable.">Acceptable Use.</h2>
+        <p class="mono" data-fr="Dernière mise à jour : 2026-08-07">Last updated: 2026-08-07</p>
+
+        <p data-fr="ACA lit des e-mails entrants et rédige des réponses. Cette capacité peut servir à bien travailler ou à nuire, et cette section dit lesquels des deux la prestation couvre.">
+          ACA reads inbound email and drafts replies. That capability can be used to work well or to
+          do harm, and this section states which of the two the engagement covers.
+        </p>
+
+        <h3 data-fr="Ce pour quoi ACA est prévu">What ACA is for</h3>
+        <ul>
+          <li data-fr="Trier, qualifier et préparer des réponses à des e-mails que des personnes vous ont volontairement adressés.">Triaging, qualifying and preparing replies to email that people have deliberately sent to you.</li>
+          <li data-fr="Rédiger des propositions qu'une personne de votre équipe relit et assume avant envoi.">Drafting proposals that someone on your team reads and takes responsibility for before sending.</li>
+        </ul>
+
+        <h3 data-fr="Ce qui est interdit">What is prohibited</h3>
+        <ul>
+          <li data-fr="Envoyer des messages non sollicités en masse, ou traiter des adresses obtenues sans base légale."><b>Bulk unsolicited messaging</b>, or processing addresses obtained without a lawful basis.</li>
+          <li data-fr="Retirer, contourner ou automatiser la validation humaine — y compris en approuvant sans lire. C'est la garantie centrale du produit et le fondement de plusieurs affirmations de la politique de confidentialité."><b>Removing, bypassing or automating the human approval step</b> — including approving without reading. It is the product's central guarantee and the basis of several statements in the privacy policy.</li>
+          <li data-fr="Faire passer un texte rédigé par le système pour l'analyse d'une personne, ou présenter une réponse générée comme un conseil professionnel qui n'a pas été vérifié."><b>Passing off generated text</b> as a person's own analysis, or presenting a generated reply as professional advice that has not been checked.</li>
+          <li data-fr="Traiter des catégories particulières de données (santé, opinions, orientation) sans les garanties spécifiques exigées par la réglementation."><b>Processing special categories of data</b> (health, opinions, orientation) without the specific safeguards the regulation requires.</li>
+          <li data-fr="Tenter d'extraire, de rétroconcevoir ou de revendre le système, ou l'utiliser pour attaquer un tiers.">Attempting to extract, reverse-engineer or resell the system, or using it to attack a third party.</li>
+          <li data-fr="Contourner les limites d'usage des fournisseurs de modèles, ou faire tourner le système à un volume qui revient à revendre l'accès à ces modèles.">
+            Circumventing model providers' usage limits, or running the system at a volume that
+            amounts to reselling access to those models.</li>
+          <li data-fr="Employer le système sur des sujets où une erreur de rédaction engage la santé, la sécurité ou les droits d'une personne — conseil médical, juridique ou financier délivré tel quel à un tiers.">
+            Using the system on subjects where a drafting error affects a person's health, safety or
+            rights — medical, legal or financial advice delivered as-is to a third party.</li>
+        </ul>
+
+        <h3 data-fr="Tests de sécurité">Security testing</h3>
+        <p data-fr="Tester la sécurité de votre propre déploiement est légitime et nous vous y encourageons : il tourne sur votre infrastructure. Prévenez-nous avant un test intrusif si un suivi est en cours, pour qu'une alerte ne parte pas dans le vide. En revanche, tester l'infrastructure d'acami ou celle d'un autre client sans autorisation écrite ne relève pas de cette permission.">
+          Testing the security of your own deployment is legitimate and we encourage it: it runs on
+          your infrastructure. Tell us before an intrusive test if a care subscription is running, so
+          an alert does not fire into the void. Testing acami's infrastructure, or another client's,
+          without written authorisation is not covered by that permission.
+        </p>
+
+        <h3 data-fr="Ce qui se passe en cas de manquement">What happens if this is breached</h3>
+        <p data-fr="Une politique d'usage qui n'énonce aucune conséquence n'est pas une règle, c'est un souhait. Par ordre :">
+          An acceptable-use policy that states no consequence is not a rule, it is a wish. In order:
+        </p>
+        <ol>
+          <li data-fr="<b>Nous vous écrivons</b> en décrivant précisément ce que nous avons constaté et ce qu'il faut corriger. La plupart des manquements sont des malentendus et s'arrêtent là.">
+            <b>We write to you</b>, describing precisely what we observed and what needs to change.
+            Most breaches are misunderstandings and stop here.</li>
+          <li data-fr="<b>Nous suspendons le suivi</b> si le manquement continue. Le système, lui, reste chez vous et continue de fonctionner : nous ne coupons pas un outil qui vous appartient — nous cessons d'y contribuer.">
+            <b>We suspend the care subscription</b> if it continues. The system itself stays with you
+            and keeps running: we do not switch off a tool that belongs to you — we stop
+            contributing to it.</li>
+          <li data-fr="<b>Nous mettons fin à la relation</b> pour un manquement grave ou répété, en particulier le contournement de la validation humaine, qui est la garantie sur laquelle repose tout le reste de ces pages.">
+            <b>We end the relationship</b> for a serious or repeated breach — in particular
+            bypassing human approval, which is the guarantee everything else on these pages rests on.</li>
+          <li data-fr="<b>Nous signalons</b> aux autorités compétentes lorsque la loi l'exige. Nous ne le ferons pas à la légère et nous vous en informerons, sauf si la loi nous l'interdit.">
+            <b>We report</b> to the competent authorities where the law requires it. We will not do
+            so lightly, and we will tell you, unless the law forbids us to.</li>
+        </ol>
+
+        <h3 data-fr="Signaler un abus">Reporting misuse</h3>
+        <p data-fr="Si vous pensez qu'ACA a été utilisé à votre encontre d'une des manières décrites ci-dessus, écrivez-nous via le formulaire de cette page ou à <span data-entity='email'></span>. Nous accusons réception sous un jour ouvré.">
+          If you believe ACA has been used against you in any of the ways described above, write to us
+          using the form on this page or at <span data-entity="email"></span>. We acknowledge receipt
+          within one business day.
+        </p>
+
+        <p class="note" data-fr="Ce texte est un projet et n'a pas été relu par un juriste.">
+          This text is a draft and has not been reviewed by a lawyer.
+        </p>
+      </section>
+
+    </div>
+  </div>
+</main>
+
+<footer class="frame">
+  <div class="foot">
+    <div>
+      <span class="logo"><img src="brand/acami.svg" alt="acami"></span>
+      <p style="margin-top:14px; max-width:34ch; font-size:.9375rem; color:var(--ink-2)"
+         data-fr="Agence IA. Nous installons le framework ACA, propulsé par notre moteur ACAM : il rédige et attend, il n'agit jamais seul sur votre CRM.">
+        AI agency. We install the ACA framework, powered by our ACAM engine: it drafts and waits, it
+        never acts alone on your CRM.
+      </p>
+    </div>
+    <div>
+      <h4 data-fr="Pages">Pages</h4>
+      <ul>
+        <li><a class="brk" href="landing.html#capabilities" data-fr="Capacités">Capabilities</a></li>
+        <li><a class="brk" href="landing.html#pricing" data-fr="Tarifs">Pricing</a></li>
+        <li><a class="brk" href="landing.html#book" data-fr="Réserver">Book a call</a></li>
+      </ul>
+    </div>
+    <div>
+      <h4 data-fr="Assistance">Support</h4>
+      <ul>
+        <li><a class="brk" href="#contact" data-fr="Contact">Contact</a></li>
+        <li><a class="brk" href="#privacy" data-fr="Confidentialité">Privacy Policy</a></li>
+        <li><a class="brk" href="#terms" data-fr="Conditions générales">Terms &amp; Conditions</a></li>
+        <li><a class="brk" href="#acceptable-use" data-fr="Usage acceptable">Acceptable Use</a></li>
+      </ul>
+    </div>
+  </div>
+  <div class="foot__bar">
+    <span>© acami. ACA and ACAM are its framework and engine.</span>
+    <span data-fr="Validation humaine obligatoire avant toute écriture CRM.">Human approval required before any CRM write.</span>
+  </div>
+</footer>
+
+<script>
+(function(){
+  "use strict";
+  /* Same seams and the same names as landing.html: someone configuring the site fills in one object
+     per file, not one convention per file. */
+  var CONFIG = {
+    contact: "hajriismail7@gmail.com",
+    form:    "https://api.web3forms.com/submit",
+    /* Public by Web3Forms' own statement — "This is a public key. You can use it in client side
+       code." Unlike a Cal.com API key, which must never appear in a served file. */
+    formKey: "274075d0-57a8-4474-b697-16c4473babb9"
+  };
+
+  /* ══ ENTITY ══════════════════════════════════════════════════════════════════════════════════
+     The values that cannot be invented, gathered into ONE object.
+
+     They used to be seven separate markers scattered through the privacy policy and the terms.
+     Seven places to edit is seven places to miss one, and a legal page that names the operating
+     company in six spots and forgets the seventh is worse than one that names it nowhere. Fill
+     these in once and every occurrence follows — the same seam as `CONFIG` above, and as `CONFIG`
+     in landing.html.
+
+     LEAVE A FIELD EMPTY and its marker stays visible on the page, in amber, saying what is
+     missing. That is deliberate: a blank gets fixed, whereas a plausible invention gets trusted.
+     A wrong legal entity on a contract page is a worse outcome than an obviously unfinished one.
+
+     JURISDICTION: this deployment operates from Tunisia and contracts with clients in France, so
+     both authorities are named. The GDPR applies to the personal data of people in the EU wherever
+     the processing happens (art. 3.2), which is why the policy keeps its GDPR articles AND carries
+     an international-transfer section. */
+  var ENTITY = {
+    legal:     "",   /* e.g. "acami SARL, RCS Tunis 000000000" */
+    address:   "",   /* postal address of the controller */
+    email:     "",   /* address for data-subject requests; falls back to CONFIG.contact */
+    law:       "",   /* e.g. "French law, with the courts of Paris having jurisdiction" */
+    authority: "the CNIL (France) or the INPDP (Tunisia), depending on where you reside"
+  };
+
+  /* Substitution. Runs on load AND after every language switch.
+
+     The second part is not a precaution, it fixes a real defect: `setLang` replaces the whole
+     `innerHTML` of every `[data-fr]` element, and the markers sat INSIDE such elements while the
+     French strings did not contain them. Switching to French therefore deleted every placeholder —
+     and would have deleted the real company name once filled in, leaving a French privacy policy
+     that names no controller at all. */
+  function applyEntity(){
+    [].forEach.call(document.querySelectorAll("[data-entity]"), function(el){
+      var key = el.getAttribute("data-entity");
+      var value = (key === "email" ? (ENTITY.email || CONFIG.contact) : ENTITY[key]) || "";
+      if (value){
+        el.textContent = value;
+        el.classList.remove("todo");
+      } else {
+        el.textContent = "[TO COMPLETE: " + key + "]";
+        el.classList.add("todo");
+      }
+    });
+  }
+
+  /* ══ LANGUAGE ══════════════════════════════════════════════════════════════════════════════════
+     English lives in the markup; French rides along in `data-fr`. The English original is stashed
+     into `data-en` on the first switch, so the toggle stays reversible indefinitely — a toggle that
+     destroys the original looks correct exactly once. Same mechanism as landing.html. */
+  function setLang(lang){
+    var fr = lang === "fr";
+    document.documentElement.lang = lang;
+    [].forEach.call(document.querySelectorAll("[data-fr]"), function(el){
+      if (!el.hasAttribute("data-en")) el.setAttribute("data-en", el.innerHTML);
+      el.innerHTML = fr ? el.getAttribute("data-fr") : el.getAttribute("data-en");
+    });
+    [].forEach.call(document.querySelectorAll(".lang button"), function(b){
+      b.setAttribute("aria-pressed", String(b.getAttribute("data-lang") === lang));
+    });
+    /* AFTER the innerHTML swap, never before: the swap has just recreated every `[data-entity]`
+       span from a stored string, so the values written into them a moment ago are gone. */
+    applyEntity();
+    try { localStorage.setItem("aca-lang", lang); } catch (e) {}
+  }
+  applyEntity();
+  [].forEach.call(document.querySelectorAll(".lang button"), function(b){
+    b.addEventListener("click", function(){ setLang(b.getAttribute("data-lang")); });
+  });
+
+  /* ══ SIDE NAV ══════════════════════════════════════════════════════════════════════════════════
+     What makes four sections behave like four pages. Without it a long document gives no sense of
+     position — the one thing separate pages provide for free. */
+  var links = [].slice.call(document.querySelectorAll(".side a"));
+  if ("IntersectionObserver" in window && links.length) {
+    var io = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){
+        if (!e.isIntersecting) return;
+        links.forEach(function(a){
+          a.classList.toggle("is-here", a.getAttribute("href") === "#" + e.target.id);
+        });
+      });
+    }, { rootMargin: "-92px 0px -60% 0px" });
+    [].forEach.call(document.querySelectorAll(".sec"), function(s){ io.observe(s); });
+  }
+
+  /* ══ CONTACT FORM ══════════════════════════════════════════════════════════════════════════════
+     Identical contract to landing.html: a configured endpoint really sends; no endpoint falls back
+     to `mailto:`; and a failure falls back too rather than showing an error, because a message from
+     someone who took the trouble to write must not be lost to a third party being down. */
+  var form = document.getElementById("contact-form");
+  var footLive = document.getElementById("form-foot-live");
+  var footMail = document.getElementById("form-foot-static");
+  var statusEl = document.getElementById("form-status");
+  var ENDPOINT = (CONFIG.form || "").trim();
+
+  if (ENDPOINT) {
+    if (footLive) footLive.hidden = false;
+    /* Removed, not hidden: two contradictory promises about one button would both surface in print,
+       where `display:none` no longer protects anyone. */
+    if (footMail && footMail.parentNode) footMail.parentNode.removeChild(footMail);
+  } else if (footLive && footLive.parentNode) {
+    footLive.parentNode.removeChild(footLive);
+  }
+
+  function say(text, ok){
+    if (!statusEl) return;
+    statusEl.hidden = false;
+    statusEl.textContent = text;
+    statusEl.style.color = ok ? "var(--ink-3)" : "var(--signal)";
+  }
+
+  if (form) form.addEventListener("submit", function(ev){
+    ev.preventDefault();
+    var fd = new FormData(form);
+    var fr = document.documentElement.lang === "fr";
+    var subject = fr ? "acami — message depuis la page support"
+                     : "acami — message from the support page";
+    var body = [
+      (fr ? "Nom : " : "Name: ") + (fd.get("name") || ""),
+      (fr ? "E-mail : " : "Email: ") + (fd.get("email") || ""),
+      (fr ? "Société : " : "Company: ") + (fd.get("company") || ""),
+      "",
+      (fd.get("message") || "")
+    ].join("\n");
+    var mailto = "mailto:" + CONFIG.contact + "?subject=" + encodeURIComponent(subject) +
+                 "&body=" + encodeURIComponent(body);
+
+    if (ENDPOINT) {
+      var btn = form.querySelector('button[type="submit"]');
+      if (btn) btn.disabled = true;
+      say(fr ? "Envoi en cours…" : "Sending…", true);
+      var payload = {
+        subject: subject, name: fd.get("name") || "", email: fd.get("email") || "",
+        company: fd.get("company") || "", message: fd.get("message") || ""
+      };
+      if (CONFIG.formKey) payload.access_key = CONFIG.formKey;
+      fetch(ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify(payload)
+      }).then(function(r){
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        form.reset();
+        say(fr ? "Message envoyé. Nous répondons sous un jour ouvré."
+               : "Message sent. We reply within one business day.", true);
+      }).catch(function(){
+        say(fr ? "L'envoi direct a échoué — votre messagerie prend le relais."
+               : "Direct send failed — handing over to your mail app.", false);
+        window.location.href = mailto;
+      }).then(function(){ if (btn) btn.disabled = false; });
+      return;
+    }
+    window.location.href = mailto;
+  });
+
+  var saved = null;
+  try { saved = localStorage.getItem("aca-lang"); } catch (e) {}
+  setLang(saved === "fr" ? "fr" : "en");
+})();
+</script>
+</body>
+</html>

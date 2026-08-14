@@ -30,6 +30,14 @@ SETTINGS_SCHEMA = {
     "RELANCE_DAYS": "Jours d'inactivité avant une relance",
     "RELANCE_MAX_ROUNDS": "Nombre maximum de relances par lead",
     "RETENTION_DAYS": "Jours de conservation avant purge RGPD",
+    # §19 — réception automatique. Ces clés ne sont pas seulement documentaires : `api.py` valide
+    # `POST /settings` contre ce dictionnaire (liste blanche, §15), donc une clé absente d'ici
+    # serait rejetée et le panneau de réglages ne pourrait rien enregistrer.
+    "INTAKE_ENABLED": "Réception automatique des e-mails activée (1/0)",
+    "INTAKE_DAYS": "Jours de réception (0 = lundi … 6 = dimanche, séparés par des virgules)",
+    "INTAKE_START": "Heure d'ouverture de la réception (HH:MM)",
+    "INTAKE_END": "Heure de fermeture de la réception (HH:MM)",
+    "INTAKE_INTERVAL_SECONDS": "Délai entre deux relevés de la boîte de réception (secondes)",
 }
 
 

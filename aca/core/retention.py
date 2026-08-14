@@ -18,13 +18,32 @@ import os
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-from aca.storage import followup_store, queue_store
+from aca.storage import (
+    activity_log, device_trust_store, followup_store, queue_store, review_store, task_store,
+)
 from aca.integrations import sheets
 from .app import checkpointer
 
 load_dotenv()
 
 RETENTION_DAYS = int(os.getenv("RETENTION_DAYS", "365"))
+
+# §17 — le journal d'activité conserve des adresses IP, donc des données à caractère personnel : il
+# lui faut sa propre échéance. Réglable séparément parce que les deux durées répondent à des
+# logiques opposées : un lead se garde pour la relation commerciale, une trace d'accès se garde
+# pour pouvoir enquêter après coup. Le défaut aligné sur `RETENTION_DAYS` évite d'introduire une
+# surprise ; une valeur plus courte (90 jours) reste un choix parfaitement défendable côté client.
+ACTIVITY_RETENTION_DAYS = int(os.getenv("ACTIVITY_RETENTION_DAYS", str(RETENTION_DAYS)))
+
+# §18 — rétention à deux vitesses (docs/AMELIORATIONS_SUGGEREES.md §4 item 4) : un échec de
+# connexion ou un changement de rôle vieux de plusieurs mois est précisément ce qu'une enquête
+# viendrait chercher après coup — le purger à la même échéance que le bruit d'usage courant
+# (validations, ouvertures de file) reviendrait à détruire la preuve avant qu'elle ne serve. Défaut
+# à deux fois `ACTIVITY_RETENTION_DAYS` : plus long sans être indéfini, sur le même principe que la
+# distinction déjà faite entre `RETENTION_DAYS` et `ACTIVITY_RETENTION_DAYS`.
+ACTIVITY_SENSITIVE_RETENTION_DAYS = int(
+    os.getenv("ACTIVITY_SENSITIVE_RETENTION_DAYS", str(ACTIVITY_RETENTION_DAYS * 2))
+)
 
 
 def purge_old_leads(days: int = RETENTION_DAYS) -> int:
@@ -116,12 +135,57 @@ def purge_subject(sender: str) -> dict:
         except Exception as e:
             print(f"⚠️ Échec de la suppression du thread {thread_id} : {e}")
 
-    return {
+    # §19 — annuler les tâches datées de chaque fil concerné. Un envoi programmé qui survivrait à
+    # un effacement RGPD expédierait un e-mail commercial à quelqu'un qui vient précisément de
+    # demander qu'on efface ses données : le pire moment possible pour que la machine parle encore.
+    tasks_cancelled = 0
+    reviews_cancelled = 0
+    for thread_id in threads:
+        tasks_cancelled += task_store.cancel_for_thread(
+            thread_id, "Effacement RGPD (article 17).",
+        )
+        # §20 — même raisonnement pour les demandes de relecture : elles recopient l'objet et
+        # l'adresse de l'expéditeur (exprès, pour rester lisibles après une purge). Les laisser en
+        # attente conserverait le nom de la personne précisément à l'endroit où on vient de
+        # l'effacer, et afficherait sa demande à un administrateur le lendemain.
+        reviews_cancelled += review_store.cancel_for_thread(thread_id)
+
+    result = {
         "leads": purge_leads_by_sender(sender),
         "checkpoints": checkpoints_deleted,
         "queue": queue_store.purge_sender(sender),
         "followup": followup_store.purge_sender(sender),
+        "tasks": tasks_cancelled,
+        "relectures": reviews_cancelled,
     }
+    # §18 — un effacement RGPD explicite (article 17) mérite sa propre trace, distincte de la purge
+    # d'ancienneté périodique de `run()` : c'est un événement rare et sensible qu'un administrateur
+    # doit pouvoir retrouver, avec le compte par emplacement pour répondre précisément à la personne.
+    activity_log.log(
+        activity_log.ACTION_DATA_PURGED, actor="(retention)", target_type="expéditeur",
+        target_id=sender, source=activity_log.SOURCE_CLI,
+        details={"type": "effacement_rgpd", **result},
+    )
+    return result
+
+
+def purge_old_activity(days: int = None, sensitive_days: int = None) -> int:
+    """
+    Purge le journal d'activité (§17) au-delà de `ACTIVITY_RETENTION_DAYS`.
+
+    Le journal d'audit des validations (`audit_log.py`) reste, lui, délibérément conservé (intérêt
+    légitime, art. 17.3(e) — cf. sa docstring). La distinction est assumée : `audit_log` porte peu
+    de lignes, chacune attestant d'un engagement commercial ; `activity_log` porte tout le trafic
+    d'usage, adresses IP comprises, et n'a pas la même justification de conservation illimitée.
+
+    §18 — `sensitive_days` (par défaut `ACTIVITY_SENSITIVE_RETENTION_DAYS`) applique la rétention à
+    deux vitesses d'`activity_log.purge_older_than()` : les événements de `SENSITIVE_ACTIONS`
+    (échecs de connexion, verrouillages, changements de rôle/réglages…) survivent plus longtemps que
+    le bruit d'usage courant.
+    """
+    return activity_log.purge_older_than(
+        days or ACTIVITY_RETENTION_DAYS, sensitive_days=sensitive_days or ACTIVITY_SENSITIVE_RETENTION_DAYS,
+    )
 
 
 def run() -> None:
@@ -132,6 +196,41 @@ def run() -> None:
     print(f"✅ {n_queue} entrée(s) de file d'attente supprimée(s) (queue.sqlite).")
     n_leads = purge_old_leads()
     print(f"✅ {n_leads} lead(s) supprimé(s) de l'onglet Leads.")
+    n_activity = purge_old_activity()
+    print(f"✅ {n_activity} entrée(s) de journal d'activité supprimée(s) "
+          f"(> {ACTIVITY_RETENTION_DAYS} jours, > {ACTIVITY_SENSITIVE_RETENTION_DAYS} jours pour "
+          f"les événements sensibles — la chaîne d'empreintes repart de la plus ancienne ligne "
+          f"restante, ce n'est pas une falsification).")
+    # §19 — les tâches TERMINÉES seulement : une note de rappel peut nommer un prospect, donc elle
+    # relève de la même politique de rétention que le reste. Les tâches encore en attente sont
+    # épargnées quelle que soit leur ancienneté (cf. `task_store.purge_older_than`) : une échéance
+    # lointaine reste une intention valide, et l'effacer ferait disparaître un envoi qu'une
+    # personne croit programmé.
+    n_tasks = task_store.purge_older_than(RETENTION_DAYS)
+    print(f"✅ {n_tasks} tâche(s) programmée(s) terminée(s) supprimée(s) (tasks.sqlite).")
+    # §20 — les demandes de relecture CLOSES seulement, pour la même raison que les tâches : elles
+    # recopient l'objet et l'adresse de l'expéditeur. Une demande encore en attente survit à la
+    # purge quelle que soit son ancienneté — c'est un lead que personne n'a tranché, et l'effacer
+    # ferait disparaître la trace du travail en souffrance en même temps que la donnée.
+    n_reviews = review_store.purge_older_than(RETENTION_DAYS)
+    print(f"✅ {n_reviews} demande(s) de relecture close(s) supprimée(s) (reviews.sqlite).")
+    # §24 — autorisations d'appareil périmées. Sans seuil de rétention propre : leur date
+    # d'expiration EST leur durée de vie, et une ligne dépassée ne sert plus à rien (elle est déjà
+    # refusée à la vérification). C'est donc une hygiène de fichier, pas une politique de
+    # conservation — la trace des usages passés, elle, reste dans le journal d'activité.
+    n_devices = device_trust_store.purge_expired()
+    print(f"✅ {n_devices} appareil(s) de confiance périmé(s) supprimé(s) (device_trust.sqlite).")
+    # §18 — trace machine de la purge périodique elle-même (distincte de `purge_old_activity`, qui
+    # purge le JOURNAL — ici on trace le fait que Leads/checkpoints/file ont été purgés). Un seul
+    # événement (pas un par emplacement) : c'est une seule décision de rétention exécutée d'un coup.
+    activity_log.log(
+        activity_log.ACTION_DATA_PURGED, actor="(retention)", source=activity_log.SOURCE_CLI,
+        details={
+            "type": "ancienneté", "seuil_jours": RETENTION_DAYS, "leads": n_leads,
+            "checkpoints": n_checkpoints, "file_attente": n_queue, "journal_activité": n_activity,
+            "tâches": n_tasks, "relectures": n_reviews, "appareils_de_confiance": n_devices,
+        },
+    )
 
 
 def _main() -> None:

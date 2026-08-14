@@ -1,0 +1,878 @@
+{
+  "components": {
+    "schemas": {
+      "AttachmentIn": {
+        "description": "Une pièce jointe transmise en base64 — la forme que produit nativement un nœud n8n\n(Gmail Trigger → données binaires) comme n'importe quel client HTTP.",
+        "properties": {
+          "content_b64": {
+            "minLength": 1,
+            "title": "Content B64",
+            "type": "string"
+          },
+          "filename": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Filename",
+            "type": "string"
+          }
+        },
+        "required": [
+          "filename",
+          "content_b64"
+        ],
+        "title": "AttachmentIn",
+        "type": "object"
+      },
+      "ClarificationIn": {
+        "properties": {
+          "answer": {
+            "maxLength": 10000,
+            "minLength": 1,
+            "title": "Answer",
+            "type": "string"
+          }
+        },
+        "required": [
+          "answer"
+        ],
+        "title": "ClarificationIn",
+        "type": "object"
+      },
+      "EmailIn": {
+        "properties": {
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/AttachmentIn"
+            },
+            "maxItems": 10,
+            "title": "Attachments",
+            "type": "array"
+          },
+          "body": {
+            "maxLength": 200000,
+            "title": "Body",
+            "type": "string"
+          },
+          "sender": {
+            "maxLength": 320,
+            "minLength": 1,
+            "title": "Sender",
+            "type": "string"
+          },
+          "subject": {
+            "maxLength": 998,
+            "title": "Subject",
+            "type": "string"
+          },
+          "thread_id": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9_.:-]{1,128}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Id"
+          }
+        },
+        "required": [
+          "sender",
+          "subject",
+          "body"
+        ],
+        "title": "EmailIn",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "SettingsIn": {
+        "description": "Sous-ensemble de `config_store.SETTINGS_SCHEMA` — une clé absente/vide n'est pas modifiée\n(même comportement que le formulaire « Réglages » de `ui.py` : un champ vide retombe sur la\nvaleur `.env` existante plutôt que de l'effacer). §15.1.4 : seules les clés du schéma connu\nsont acceptées — sans cette liste blanche, `POST /settings` était un magasin clé/valeur\narbitraire alimentable par l'appelant.",
+        "properties": {
+          "values": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Values",
+            "type": "object"
+          }
+        },
+        "required": [
+          "values"
+        ],
+        "title": "SettingsIn",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "ValidationIn": {
+        "properties": {
+          "edited_draft": {
+            "anyOf": [
+              {
+                "maxLength": 100000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited Draft"
+          },
+          "validated_by": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Validated By"
+          }
+        },
+        "title": "ValidationIn",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Expose le cerveau ACAM v2 en HTTP pour un futur port n8n (self-hosted, §12 item 6) et pour le dashboard Next.js (§12 item 8).",
+    "title": "ACA — API du graphe LangGraph",
+    "version": "1.1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/health": {
+      "get": {
+        "description": "Sonde de disponibilité (§16.1.3) — healthcheck Docker, branche d'erreur n8n, supervision.\n\n**N'appelle aucun service externe** : elle rapporte ce qui est *configuré*, pas ce qui répond.\nUne sonde qui interrogerait Groq, Sheets et Supabase serait lente, consommerait du quota à\nchaque passage (toutes les 10 s pour Docker) et tomberait en panne pour cause de panne d'un\ntiers optionnel — alors que tout le projet est bâti sur « service absent = fonctionnalité\nignorée ».\n\nVolontairement hors de `require_api_key` (un orchestrateur doit pouvoir sonder sans détenir la\nclé qui écrit dans le CRM) et volontairement **strictement booléenne** : jamais une valeur de\nsecret, seulement « configuré ou non ».",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Health Health Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health"
+      }
+    },
+    "/metrics": {
+      "get": {
+        "description": "Exposition Prometheus standard (§12 item 9) — `scrape_config` pointe simplement ici.\n\n§15.3.3 : `/metrics` est resté délibérément hors de `require_api_key` (un scrapeur Prometheus\nn'envoie pas d'en-tête applicatif), mais « hors de la garde » ne doit pas vouloir dire\n« public » : ces compteurs révèlent la volumétrie, le nombre de leads validés et la liste des\ntenants. `ACA_METRICS_TOKEN` ajoute donc une garde dédiée, à renseigner côté Prometheus via\n`authorization`-like `headers: {X-Metrics-Token: …}` dans le `scrape_config`. Absent = ouvert,\ncomme avant (mode développement) — mais `prod_check` le signale et le refuse en production.",
+        "operationId": "metrics_metrics_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-metrics-token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Metrics-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Metrics"
+      }
+    },
+    "/settings": {
+      "get": {
+        "description": "Réglages édités du tenant courant + le schéma (clé -> libellé humain) que `ui.py`'s onglet\n« Réglages » utilise déjà — le dashboard peut ainsi construire le même formulaire sans dupliquer\n`config_store.SETTINGS_SCHEMA` côté frontend.",
+        "operationId": "get_settings_settings_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Settings Settings Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Settings"
+      },
+      "post": {
+        "description": "Enregistre chaque réglage non vide — même contrat que le formulaire « Réglages » de `ui.py`.\n\n§15.1.4 : les clés inconnues sont refusées (422) au lieu d'être écrites. `config_store`\naccepte volontairement n'importe quelle clé texte (c'est un magasin générique), donc la liste\nblanche appartient à cette frontière-ci, la seule exposée au réseau.",
+        "operationId": "update_settings_settings_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Settings Settings Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Settings"
+      }
+    },
+    "/slack/interactions": {
+      "post": {
+        "description": "Reçoit les clics sur les boutons « Valider »/« Rejeter » d'une alerte Slack (cf.\n`notify.send_approval`) — la validation humaine se fait alors DANS Slack, sans ouvrir aucune UI.\n\nSécurité (cf. slack_verify.py) : cet endpoint n'est PAS derrière `require_api_key` (Slack\nn'envoie pas notre en-tête), il est protégé par la signature HMAC de Slack. Il échoue FERMÉ si\n`SLACK_SIGNING_SECRET` est absent — sans quoi n'importe qui pourrait forger une validation et\ndéclencher une écriture CRM.\n\nSlack attend une réponse < 3 s ; `action_node` (Sheets + HubSpot) tient généralement dans ce\nbudget au volume prototype. Une version production « à charge » accuserait réception\nimmédiatement puis mettrait à jour le message via `response_url` en tâche de fond — noté comme\nlimite connue, non nécessaire ici.",
+        "operationId": "slack_interactions_slack_interactions_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Slack Interactions Slack Interactions Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Slack Interactions"
+      }
+    },
+    "/stats": {
+      "get": {
+        "description": "Regroupe les agrégats déjà exposés séparément dans l'onglet « Tableau de bord » de `ui.py`\n(`analytics_store.py`) en une seule réponse, pour le dashboard Next.js (§12 item 8).",
+        "operationId": "get_stats_stats_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "title": "Days",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Stats Stats Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Stats"
+      }
+    },
+    "/threads": {
+      "post": {
+        "description": "Démarre une nouvelle analyse — équivalent HTTP du formulaire manuel/import Gmail de `ui.py`.\n\n§16.1.1 : les pièces jointes (PDF/Word/Excel, transmises en base64) sont désormais acceptées et\ntransmises brutes au graphe, où `ingestion_node` en extrait le texte. Auparavant ce champ était\ncodé en dur à `[]`, ce qui privait tout client de l'API — donc n8n — de l'analyse multimodale,\npourtant le pilier d'innovation n°1 du projet.\n\n§16.1.4 — **idempotence** : si un `thread_id` fourni possède déjà un état, l'analyse n'est PAS\nrejouée et l'instantané existant est renvoyé avec `already_exists: true`. Le nœud HTTP de n8n\nréessaie par défaut en cas d'échec réseau ; sans cette garde, un simple réessai relançait une\nanalyse complète (deux appels 70B, du quota Tavily/Gemini) **et renotifiait** l'équipe pour le\nmême e-mail. C'est le pendant, côté API, de l'idempotence que `poller.py` obtient déjà en\nmarquant « en_cours » avant `invoke()`.\n\n§16.1.4 — **mode asynchrone** (`?mode=async`) : renvoie `202` immédiatement et exécute le\ngraphe en tâche de fond ; la fin est signalée par le webhook `analysis.paused` (§16.1.2). Le\nmode synchrone reste le défaut (aucun client existant n'est affecté), mais il retient la requête\n30 à 90 s — deux appels 70B, Tavily, embeddings, réflexion — ce qui devient fragile dès que les\nréessais de n8n se combinent au backoff 429 du palier gratuit de Groq.",
+        "operationId": "create_thread_threads_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "default": "sync",
+              "title": "Mode",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmailIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Thread Threads Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Thread"
+      }
+    },
+    "/threads/history": {
+      "get": {
+        "description": "Derniers événements de validation du tenant courant (`audit_log.list_recent`). Même remarque\nd'ordre de déclaration que `list_pending_threads` ci-dessus.",
+        "operationId": "list_thread_history_threads_history_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {},
+                  "title": "Response List Thread History Threads History Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Thread History"
+      }
+    },
+    "/threads/pending": {
+      "get": {
+        "description": "Analyses en attente de validation humaine du tenant courant (`queue_store`, alimenté par\n`poller.py`). Déclaré AVANT `/threads/{thread_id}` ci-dessous : FastAPI résout les routes dans\nl'ordre d'enregistrement pour deux chemins de même forme (`/threads/pending` vs.\n`/threads/{thread_id}`) — sans cet ordre, `GET /threads/pending` serait intercepté par la route\ndynamique avec `thread_id=\"pending\"`.",
+        "operationId": "list_pending_threads_threads_pending_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {},
+                  "title": "Response List Pending Threads Threads Pending Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Pending Threads"
+      }
+    },
+    "/threads/{thread_id}": {
+      "get": {
+        "operationId": "get_thread_threads__thread_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Thread Threads  Thread Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Thread"
+      }
+    },
+    "/threads/{thread_id}/clarifier": {
+      "post": {
+        "description": "Répond à la question de clarification en attente (`interrupt()` dynamique).",
+        "operationId": "clarify_thread_threads__thread_id__clarifier_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClarificationIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Clarify Thread Threads  Thread Id  Clarifier Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clarify Thread"
+      }
+    },
+    "/threads/{thread_id}/rejeter": {
+      "post": {
+        "description": "Rejette une analyse en attente sans jamais écrire au CRM — `action_node` n'est jamais invoqué.\nContrepartie de `/valider` pour le dashboard (§12 item 8) : ce chemin n'existait pas avant (ni\ndans `ui.py`, ni dans le graphe), un « rejet » y équivalait jusqu'ici à simplement ne pas\ncliquer « Valider ».",
+        "operationId": "reject_thread_threads__thread_id__rejeter_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Reject Thread Threads  Thread Id  Rejeter Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reject Thread"
+      }
+    },
+    "/threads/{thread_id}/valider": {
+      "post": {
+        "description": "Résout la pause de validation humaine (`interrupt_before=[\"action\"]`) — SEUL point d'entrée de\ncette API qui déclenche l'écriture CRM (`action_node`). Édite le brouillon avant reprise si\n`edited_draft` est fourni, même logique que le bouton « Valider » de `ui.py`.",
+        "operationId": "validate_thread_threads__thread_id__valider_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValidationIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Validate Thread Threads  Thread Id  Valider Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Validate Thread"
+      }
+    }
+  }
+}

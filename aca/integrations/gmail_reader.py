@@ -191,6 +191,32 @@ def create_draft_reply(service, message_id: str, to: str, subject: str, body: st
     return draft["id"]
 
 
+def send_draft(service, draft_id: str) -> str:
+    """
+    Envoie un brouillon Gmail **déjà existant** (§19, envoi programmé). Renvoie l'ID du message
+    envoyé, ou `None` si l'envoi échoue.
+
+    C'est délibérément la seule voie d'envoi vers un prospect de tout le projet, et elle n'envoie
+    jamais un texte qu'elle compose : elle expédie un brouillon que `create_draft_reply` a créé
+    **après validation humaine**. Trois propriétés en découlent, et ce sont elles qui rendent la
+    fonctionnalité compatible avec la promesse du produit :
+
+    1. Le contenu envoyé est celui que la personne a relu — pas une regénération du modèle.
+    2. Si elle édite le brouillon dans Gmail entre-temps, sa version l'emporte.
+    3. Si elle le supprime, l'envoi échoue proprement (`None`) : supprimer le brouillon est une
+       annulation valide, et la traiter comme une erreur bruyante serait contredire l'humain.
+
+    Le scope `gmail.modify` déjà demandé couvre l'envoi (cf. `notify.py`, qui s'en sert pour les
+    alertes) — aucun nouveau consentement OAuth n'est nécessaire.
+    """
+    try:
+        sent = service.users().drafts().send(userId="me", body={"id": draft_id}).execute()
+        return sent.get("id")
+    except Exception as e:
+        print(f"⚠️ [Gmail] Envoi du brouillon {draft_id} impossible : {e}")
+        return None
+
+
 def create_forward_draft(
     service, message_id: str, to: str,
     original_sender: str, original_subject: str, original_body: str,

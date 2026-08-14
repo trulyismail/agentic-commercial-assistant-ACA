@@ -1,0 +1,111 @@
+# Intégration continue (§16.4 — solde le §15.4.7, resté « ❌ pas de pipeline » jusqu'ici).
+#
+# Trois raisons d'exister, par ordre d'importance réelle :
+#
+# 1. La suite est entièrement HORS LIGNE (conftest.py vide toutes les clés d'API avant tout import
+#    `aca.*` et redirige les 8 bases SQLite vers un répertoire temporaire). Elle peut donc tourner
+#    sur un runner public sans le moindre secret — c'est ce qui rend cette CI possible du tout.
+# 2. `pip-audit` avait trouvé 17 vulnérabilités connues, dont 11 dans deux paquets **transitifs**
+#    que le projet n'importe même pas (§15.3.8). Un scan manuel ne se refait pas ; un scan en CI si.
+# 3. Les artefacts exportés (`docs/openapi.json`, `docs/assets/graph.json`) sont dérivés du code :
+#    s'ils divergent, c'est qu'un contrat d'API ou la topologie du graphe a changé sans que la
+#    documentation suive. C'est exactement la classe de dérive qui avait laissé `ui.py` afficher un
+#    graphe amputé de l'arête `supervisor → routing` (§16.1.6).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Un nouveau push annule la vérification en cours sur la même branche.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 = plancher annoncé dans le README ; 3.14 = version de développement réelle.
+        python-version: ["3.11", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Installer les dépendances
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Suite de tests (hors ligne, aucun secret requis)
+        # `ACA_ENV=development` explicite : sur un runner, une variable héritée par mégarde ferait
+        # échouer `prod_check.enforce()` au chargement de l'API et rendrait l'échec incompréhensible.
+        env:
+          ACA_ENV: development
+        run: python -m pytest tests/ -q
+
+  audit:
+    name: Vulnérabilités des dépendances
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Installer les dépendances
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: pip-audit
+        # Couvre les dépendances TRANSITIVES, celles que « requirements.txt est épinglé » ne
+        # protégeait pas — c'est là qu'étaient 11 des 17 vulnérabilités trouvées le 2026-07-26.
+        run: pip-audit --strict
+
+  artifacts:
+    name: Artefacts dérivés à jour
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Installer les dépendances
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Régénérer les exports
+        run: |
+          python scripts/export_openapi.py
+          python scripts/export_graph.py
+
+      - name: Vérifier qu'ils n'ont pas dérivé du code
+        # Échoue si le schéma OpenAPI ou la topologie du graphe ont changé sans que les fichiers
+        # commités soient régénérés. Le message dit quoi faire, sinon l'échec est cryptique.
+        run: |
+          if ! git diff --quiet -- docs/openapi.json docs/assets/; then
+            echo "::error::Artefacts dérivés obsolètes. Lancez :"
+            echo "::error::  python scripts/export_openapi.py && python scripts/export_graph.py"
+            git diff --stat -- docs/openapi.json docs/assets/
+            exit 1
+          fi
+          echo "✅ docs/openapi.json et docs/assets/ sont à jour."

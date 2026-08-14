@@ -997,3 +997,1136 @@ exploitation, pas sécurité.
 | 15.2.3 provisioning tenant | 🟡 | « 1 déploiement = 1 tenant » reste le modèle ; l'onboarding multi-client est un sujet produit |
 | 15.2.6 DPA/DPIA | 🟡 | Documents juridiques propres à l'entreprise utilisatrice, non devinables depuis le code |
 | 15.3.1, 15.3.7, tout §15.4 | Inchangés | Hors du périmètre « sécurité » demandé pour cette passe |
+
+---
+
+## 16. Autonomie « Solo », port n8n praticable et première impression (2026-07-26)
+
+**Origine de la passe.** Une question de l'utilisateur — *« puis-je utiliser pgvector en même temps
+que Google Sheets, et quel flux est le meilleur pour mon workflow n8n ? »* — a déclenché un audit du
+code réel plutôt qu'une réponse de principe. Cet audit a trouvé autre chose que ce qu'on cherchait,
+et c'est le vrai résultat de la passe :
+
+> **Le produit était déjà autonome, mais ne le paraissait pas, et n8n ne pouvait pas s'y brancher
+> correctement.** Deux problèmes distincts, longtemps confondus en un seul (« il faut n8n pour que ce
+> soit automatique »), et tous deux faux pour des raisons opposées.
+
+Ce malentendu a une conséquence commerciale directe : présenté ainsi, ACA passait pour un outil
+« à boutons » exigeant qu'un humain lance les traitements, alors que `poller.py` exécute le graphe
+24/7 interface fermée depuis le §11.4. D'où le découpage de cette section : **§16.0** rend
+l'autonomie complète *et* visible, **§16.1** rend n8n réellement branchable, **§16.2–16.5** règlent
+tout ce qui décide de la première impression.
+
+**Positionnement retenu, et il tient en une phrase :** *n8n n'apporte pas l'automatisation — il
+apporte l'orchestration inter-systèmes.* Les deux paliers exécutent la même image et le même code
+métier ; on retire n8n en changeant un mot sur la ligne `docker compose`.
+
+| Palier | Composants | Pour qui |
+|---|---|---|
+| **Solo** | API + interface + poller + planificateur | Consultant seul, PME, démonstration. Automatisé de bout en bout, **sans n8n** |
+| **Enterprise** | idem **+ n8n** | Orchestration avec les autres outils du client (CRM, ERP, ticketing) |
+
+---
+
+### 16.0 Le palier Solo — un seul manque réel, et il était structurel
+
+L'audit a listé les cinq capacités qu'un produit « autonome » doit avoir, puis est allé vérifier
+chacune dans le code plutôt que dans la documentation. Quatre existaient. Une n'existait pas du tout.
+
+| # | Capacité autonome | État avant la passe | Traitement |
+|---|---|---|---|
+| 16.0.1 | Ingestion des e-mails | ✅ `poller.py` depuis le §11.4 | Inchangé |
+| 16.0.2 | Traitement passif 24/7 | ✅ `poller.py` | Inchangé |
+| 16.0.3 | Relances commerciales | ❌ **`relance.py` existait, rien ne l'appelait** | `scheduler.py` |
+| 16.0.4 | Purge RGPD | ❌ **`retention.py` existait, rien ne l'appelait** | `scheduler.py` |
+| 16.0.5 | Maintenance de la file | 🟡 seulement si le poller tourne | `scheduler.py` |
+
+**Le manque, dit précisément.** `relance.py`, `retention.py` et `billing.py` étaient écrits, testés,
+et chacun documenté « à planifier périodiquement (ex. une fois par jour) ». Mais **aucun
+planificateur n'existait** : pas de dépendance de planification dans `requirements.txt`, et une
+machine de développement Windows qui n'a même pas de `cron`. En pratique, la purge RGPD et les
+relances ne partaient que si un humain pensait à lancer la commande à la main — c'est-à-dire jamais.
+Une conformité RGPD qui dépend de la mémoire d'un opérateur n'est pas une conformité.
+
+**Livré :**
+
+- **[scheduler.py](../aca/core/scheduler.py)** — cadence les quatre travaux périodiques. Table
+  déclarative `JOBS` (ajouter un travail = une entrée, même esprit que `ROUTING_DESTINATIONS`),
+  intervalle réglable par variable d'environnement, `0` **désactive** le travail (dégradation
+  gracieuse habituelle). Aucune dépendance nouvelle : une boucle `time.sleep` sur des horodatages
+  persistés suffit très largement pour quatre travaux dont le plus fréquent tourne à l'heure —
+  APScheduler ou Celery auraient été une dépendance de plus pour un besoin qui ne la justifie pas,
+  contre la contrainte 0 €. `run_job()` **ne lève jamais** vers la boucle (même contrat que
+  `poller.run_forever()`).
+- **[schedule_store.py](../aca/storage/schedule_store.py)** — persiste le dernier passage de chaque
+  travail. Sans lui, tous les travaux rejoueraient à chaque redémarrage du process : une purge de
+  rétention et une rafale de brouillons de relance Gmail **à chaque `docker compose up`**. Scopé par
+  `org_id` et enveloppé de `with_sqlite_retry`, comme les autres registres locaux.
+- **`--prime`** — le détail qui n'apparaît qu'en y pensant jusqu'au bout : un travail jamais exécuté
+  étant « échu » par construction (sinon une purge n'aurait jamais lieu sur une installation neuve),
+  le tout premier démarrage déclencherait les quatre travaux d'un coup, dont `relance`, qui écrit de
+  vrais brouillons dans Gmail. Défendable, mais surprenant le jour de la mise en service — et
+  reproductible à chaque perte de `schedule.sqlite`. `--prime` décale proprement tout d'un intervalle
+  sans rien exécuter. Également `--once` (usage cron/n8n), `--job … --force`, `--status`.
+- **[scripts/run_solo.py](../scripts/run_solo.py)** — lance les quatre processus d'une commande.
+  Sans lui il fallait quatre terminaux et quatre commandes à retenir, ce qui suffit en pratique à ce
+  que le poller et le planificateur ne soient **jamais** lancés — donc à ce que le produit paraisse
+  manuel alors qu'il ne l'est pas. C'est très exactement le malentendu que ce §16.0 corrige.
+
+**18 tests** ([test_scheduler.py](../tests/test_scheduler.py)), dont l'échéance calculée sur un
+`now` injecté (fonction pure vis-à-vis du temps, donc testable sans attendre ni manipuler
+l'horloge), la désactivation par intervalle nul, l'enregistrement d'un passage **en échec** (sans
+quoi un service mort serait martelé toutes les 60 s), et l'idempotence de `--prime`.
+
+---
+
+### 16.1 Rendre le port n8n réellement praticable
+
+`aca/api.py` existait depuis le §12 item 6 et exposait déjà le graphe en HTTP. Mais brancher n8n
+dessus se serait heurté à cinq obstacles concrets, dont deux rédhibitoires.
+
+| # | Obstacle | Gravité | Correctif |
+|---|---|---|---|
+| 16.1.1 | `POST /threads` codait `attachments_raw: []` **en dur** | 🔴 rédhibitoire | Pièces jointes base64 acceptées et bornées |
+| 16.1.2 | Aucun événement sortant — n8n aurait dû **sonder** | 🔴 rédhibitoire | [webhook.py](../aca/integrations/webhook.py), 5 événements signés |
+| 16.1.3 | Pas de sonde de disponibilité | 🟠 | `GET /health` |
+| 16.1.4 | Un réessai HTTP relançait une analyse complète | 🟠 | Idempotence + `?mode=async` |
+| 16.1.5 | Rien à déployer, aucun schéma à importer | 🟠 | Docker, profils compose, `openapi.json`, workflow n8n |
+| 16.1.6 | Topologie du graphe **recopiée à la main en 3 endroits** | 🟠 | [graph_topology.py](../aca/core/graph_topology.py) |
+
+**16.1.1 — Pièces jointes.** Le champ était littéralement câblé à la liste vide, ce qui rendait
+l'**analyse multimodale — le pilier d'innovation n° 1 du projet (§2)** — inatteignable depuis
+l'API, donc depuis n8n. Le graphe savait pourtant déjà les traiter (`ingestion_node` →
+`attachment_reader`) : il ne manquait que le champ. Bornes fermes mais larges (10 fichiers, 20 Mo
+décodés au total), et surtout **refusées en 422 avant tout décodage en mémoire et avant le LLM** —
+même principe que les bornes de payload du §15.1.4.
+
+**16.1.2 — Webhooks sortants, la pièce qui change la nature du port.** Sans eux, un workflow n8n
+aurait tourné sur un nœud *Schedule* interrogeant `GET /threads/pending` en boucle : c'est-à-dire
+**réimplémenter `poller.py` à l'intérieur de n8n**, exactement ce que le port est censé remplacer.
+ACA pousse désormais 5 événements (`analysis.paused`, `analysis.clarification`, `analysis.routed`,
+`lead.validated`, `lead.rejected`), nommés `objet.action` pour qu'un filtre n8n puisse router
+dessus sans deviner. Signature HMAC-SHA256 optionnelle avec l'horodatage **dans** la signature
+(miroir sortant de `slack_verify.py`), et **ne lève jamais** — `emit()` est appelé depuis des nœuds
+sous `RETRY_POLICY`, où une exception provoquerait jusqu'à 3 réexécutions du nœud, donc pour
+`action_node` une double écriture CRM (le bug HubSpot réellement survenu le 2026-07-12).
+
+À ne pas confondre avec `notify.py`, qui s'adresse à un **humain** (prose Slack, boutons
+Valider/Rejeter) ; celui-ci s'adresse à une **machine** (enveloppe JSON structurée et signée). Les
+deux coexistent et sont complémentaires.
+
+**16.1.3 — `GET /health`.** Volontairement **hors** de `require_api_key` (un orchestrateur doit
+pouvoir sonder sans détenir la clé qui écrit dans le CRM), **strictement booléenne** (jamais une
+valeur de secret : un test le verrouille) et **sans aucun appel externe** — une sonde interrogée
+toutes les 10 s par Docker ne doit ni consommer de quota ni tomber en panne pour cause de panne d'un
+tiers optionnel, alors que tout le projet est bâti sur « service absent = fonctionnalité ignorée ».
+
+**16.1.4 — Idempotence et mode asynchrone.** Le nœud HTTP de n8n réessaie par défaut : sans garde,
+un simple réessai réseau relançait une analyse complète (deux appels 70B, du quota Tavily/Gemini) et
+**renotifiait** l'équipe pour le même e-mail. Un `thread_id` déjà connu renvoie désormais
+l'instantané existant avec `already_exists: true` — pendant, côté API, de l'idempotence que
+`poller.py` obtient déjà en marquant « en_cours » avant `invoke()`. `?mode=async` renvoie un 202
+immédiat et signale la fin par le webhook ; le mode synchrone reste le défaut (aucun client existant
+n'est affecté) mais retient la requête 30 à 90 s, ce qui devient fragile dès que les réessais de n8n
+se combinent au backoff 429 du palier gratuit de Groq.
+
+**16.1.5 — De quoi déployer et importer.** [Dockerfile](../Dockerfile) (image unique pour les
+quatre services), [docker-compose.yml](../docker-compose.yml) avec profils `solo` (4 services) et
+`enterprise` (5, n8n compris) — validé en comptant les services résolus par profil —,
+[n8n/aca_workflow.json](../n8n/aca_workflow.json) + [n8n/README.md](../n8n/README.md), et
+`docs/openapi.json` **commité** (un schéma généré à la demande ne peut pas être importé par
+quelqu'un qui n'a pas encore réussi à faire tourner le projet).
+
+**16.1.6 — Une seule source pour la topologie, et une dérive déjà réalisée.** Le §12bis signalait le
+risque : la liste des arêtes était recopiée à la main dans `app.py` (le vrai graphe), `ui.py` et
+`dashboard/lib/graph-topology.ts`. **Le risque s'était déjà matérialisé sans que personne puisse le
+voir** : `ui.py` ignorait l'arête `supervisor → routing` (le chemin FINISH du superviseur), si bien
+que le schéma affiché à l'utilisateur montrait un superviseur sans issue vers la suite du pipeline.
+La topologie est désormais **dérivée du graphe compilé** (`app.get_graph()`) : juste par
+construction, et un nœud ajouté dans `app.py` apparaît partout sans resynchronisation.
+
+---
+
+### 16.2 Hygiène du dépôt — ce qui décide de la première impression
+
+Un dépôt se juge en trente secondes, et ces trente secondes se jouent sur des fichiers qui ne
+contiennent aucune logique.
+
+- **16.2.1 — README réécrit.** Il avait environ **cinq versions de retard** : il décrivait encore un
+  graphe linéaire sans superviseur, et ignorait la sécurité du §15, les deux paliers et le mode
+  démonstration. Un README faux est pire qu'un README court — il fait douter du reste.
+- **16.2.2 — [.env.example](../.env.example)**, 54 variables documentées une par une, groupées en 9
+  sections, avec le minimum vital distingué de l'optionnel. Le projet n'en avait aucun : il fallait
+  lire `CLAUDE.md` (~700 lignes) pour découvrir quoi configurer. (Le compte annoncé était d'abord
+  « 46 » : la vérification finale, en comptant réellement les clés du fichier, en a trouvé 53 — plus
+  `ACA_DEMO_MODE`, qui manquait alors qu'il s'agit du drapeau vedette du §16.3, celui-là même que le
+  one-pager donne en exemple.)
+- **16.2.3 — Six fichiers parasites supprimés** (avec accord explicite) : trois pages HTML
+  sauvegardées depuis un navigateur et trois charges utiles de démonstration accumulées à la racine,
+  qu'aucun code ne référençait. `.gitignore` durci pour que le cas ne se reproduise pas
+  (`/*.html`, `/seed_*.json`, `data/`, `node_modules/`), **et** `!.env.example` — sans cette
+  exception, la règle `.env.*` ajoutée au même moment aurait exclu le modèle qu'on venait d'écrire.
+
+---
+
+### 16.3 Mode démonstration — pouvoir *essayer*, pas seulement *lire*
+
+Jusqu'ici, essayer ce projet exigeait **cinq comptes externes** (Groq, Gemini, Tavily, un compte de
+service Google, un client OAuth Gmail). Une entreprise qui l'évalue pouvait donc lire le code,
+jamais l'exécuter — la différence entre « dépôt intéressant » et « je viens de le faire tourner ».
+
+`ACA_DEMO_MODE=1` substitue un modèle factice déterministe aux trois fabriques de LLM, en **un seul
+point** (`fast_llm`/`smart_llm`/`creative_llm`), si bien qu'un nœud ajouté demain en hérite
+gratuitement. **Le graphe reste le vrai** : mêmes nœuds, même superviseur, même auto-critique, même
+pause de validation. Six e-mails de démonstration couvrent tout l'éventail, dont un cas piégeux
+porteur d'une clause de responsabilité illimitée et d'une question hors FAQ.
+
+⚠️ **Limite du mode démonstration, constatée en l'exécutant** : ce 6e cas déclenche bien
+`risk_flags`, mais **pas** `knowledge_gap`. C'est structurel — `connaissance_node` renvoie en démo
+un `DEMO_FAQ_CONTEXT` jamais vide, donc le garde-fou déterministe n'appelle jamais `veille_node`,
+seul endroit où `knowledge_gap` est posé. Avec de vraies clés, la question sur le mainframe COBOL le
+déclenche. Simuler le drapeau aurait été pire que de ne pas l'avoir : une démonstration doit montrer
+ce que le système fait, pas ce qu'on aimerait qu'il montre.
+
+⚠️ **La seule exception assumée à la dégradation gracieuse de tout le projet.** `guard_write()`
+**lève** au lieu de dégrader, sur le seul point du graphe qui écrit réellement (`action_node`).
+« Absent = ignoré » est le bon défaut pour une fonctionnalité optionnelle, jamais pour une barrière
+de sécurité : écrire un faux lead dans le CRM d'un prospect pendant une démonstration serait un
+incident, un échec bruyant n'en est pas un. **30 tests**
+([test_demo_mode.py](../tests/test_demo_mode.py)), dont la vérification que le graphe complet tourne
+réellement de bout en bout **sans aucune clé d'API**.
+
+---
+
+### 16.4 Intégration continue — solde le §15.4.7
+
+Il n'y avait **aucun répertoire `.github/`**. [ci.yml](../.github/workflows/ci.yml) ajoute trois
+travaux : la suite de tests sur Python 3.11 (plancher annoncé au README) et 3.14 (version de
+développement réelle), `pip-audit`, et une vérification que les **artefacts dérivés**
+(`docs/openapi.json`, `docs/assets/graph.json`) n'ont pas dérivé du code.
+
+Deux points rendent cette CI possible et utile, dans cet ordre : (1) la suite est **entièrement hors
+ligne** — `conftest.py` vide toutes les clés avant tout import `aca.*` et redirige les 8 bases
+SQLite vers un répertoire temporaire — donc elle tourne sur un runner public **sans le moindre
+secret** ; (2) `pip-audit` avait trouvé 17 vulnérabilités dont 11 dans des paquets transitifs
+(§15.3.8), et un scan manuel, par nature, ne se refait pas.
+
+---
+
+### 16.5 Documentation et présentation
+
+- **[static/landing.html](../static/landing.html)** — page de pitch. Elle reprend la section « ce
+  qui est vérifié / ce qui ne l'est pas » : la mettre en page de vente plutôt que de l'enfouir dans
+  le dépôt est un choix, pas un oubli. Imprimable en PDF sans retouche.
+  - **Déplacée de `docs/landing/index.html` vers `static/` en §23**, pour une raison de fond : le
+    dossier `static/` est exposé par Streamlit sur `/app/static/`
+    (`server.enableStaticServing`), ce qui permet au bouton « Page de présentation » de la barre
+    latérale d'y mener. Un exemplaire dans `docs/` **et** un dans `static/` auraient divergé dès la
+    première mise à jour de contenu ; il n'y a donc qu'un fichier, à une seule URL.
+  - **La règle « aucune ressource distante » est assouplie, et c'est délibéré.** La version §16.5
+    n'admettait aucune police ni feuille de style externe (une page de pitch qui dépend d'un CDN ne
+    s'ouvre ni dans un train ni derrière le proxy d'un grand compte). La refonte §23 charge trois
+    polices Google, parce que la direction artistique demandée repose sur ces caractères
+    précisément. Le compromis est borné : le `<link>` est une amélioration, pas une dépendance —
+    chaque famille est suivie d'une pile système complète et la page reste entièrement lisible et
+    composée hors ligne. Aucun script ni feuille de style distants : tout le CSS et tout le JS
+    restent en ligne dans le fichier.
+  - **§23.1 — surface commerciale anglaise.** L'anglais devient la version par défaut (dans le
+    balisage) et le français voyage par attribut, basculé par un sélecteur : un seul fichier et non
+    deux, pour la raison ci-dessus. Reprend mot pour mot les formules du gabarit — vérification
+    faite, `acam.framer.website` est le déploiement de ce même gabarit — et le vocabulaire de
+    LangGraph là où il est vrai du projet (contrôle vs autonomie, human-in-the-loop, exécution
+    durable, mémoire, diffusion). Ajoute trois paliers de tarifs (**montants d'exemple**, marqués
+    `data-placeholder-price`), un calendrier de prise de rendez-vous et un formulaire de contact en
+    `mailto:` — aucun serveur derrière, et la page le dit plutôt que de le laisser croire.
+  - **Toutes les illustrations sont dessinées à l'exécution** (canevas → caractères ASCII, ou gros
+    pixels pour les quatre icônes) : c'est ce qui permet de reproduire le style du modèle sans en
+    copier les ressources, tout en gardant la propriété « aucune image distante ». Les défauts
+    trouvés — étoile sans pointes, halo qui l'effaçait, main réduite à une tache, icône « flux »
+    qui se lisait comme un cadre, et le piège de proportion des cellules à chasse fixe — sont
+    détaillés dans l'entrée du 2026-08-06 (fin) de [PROJECT_JOURNAL.md](PROJECT_JOURNAL.md).
+- **Cette section §16**, l'entrée du 2026-07-26 dans [PROJECT_JOURNAL.md](PROJECT_JOURNAL.md), et la
+  mise à jour de `CLAUDE.md` (nouveaux modules, variables d'environnement, nombre de tests).
+
+---
+
+### 16.6 Ce que la passe a trouvé, au-delà du plan
+
+Comme au §15.6, ce sont ces points-là qui justifient d'auditer le code plutôt que la documentation.
+
+1. **Aucun planificateur n'existait.** Trois modules documentés « à planifier périodiquement », zéro
+   mécanisme de planification, sur une machine sans `cron`. La purge RGPD ne partait jamais.
+2. **Le schéma du graphe affiché dans l'interface était faux** — arête `supervisor → routing`
+   manquante. La dérive que le §12bis annonçait comme un *risque* s'était déjà produite, et rien ne
+   pouvait la signaler puisque rien ne comparait les deux listes.
+3. **L'analyse multimodale était inatteignable depuis l'API** : `attachments_raw` câblé à `[]`. Le
+   pilier d'innovation n° 1 du projet, invisible depuis sa propre interface HTTP.
+4. **Le webhook livrait un `reasoning_log` en retard d'une ligne** sur le même lead lu via
+   `GET /threads/{id}` : `notification_node` émettait *avant* que LangGraph n'ait fusionné l'entrée
+   que le nœud s'apprêtait à renvoyer. Corrigé à la source (recollement explicite) plutôt que dans le
+   test, et verrouillé par `test_webhook_payload_matches_api_snapshot_shape`.
+5. **`analysis.clarification` était déclaré, documenté… et jamais émis.** Trouvé en rédigeant ce
+   §16.5 : la constante existait, `n8n/README.md` la présentait comme émise, aucun appelant. C'était
+   la **seule branche où le graphe s'arrête sans rien émettre** — un workflow lancé en `?mode=async`
+   restait donc muet sur un e-mail ambigu, attendant un `analysis.paused` qui n'arrive jamais tant
+   que la question est sans réponse. Émis depuis `api._run_analysis` et non depuis
+   `clarification_node`, parce qu'`interrupt()` **rejoue le nœud depuis son début** à la reprise :
+   un envoi placé dans le nœud partirait deux fois pour une seule question.
+6. **Le README avait cinq versions de retard**, et un détail de `.gitignore` : ajouter `.env.*`
+   sans `!.env.example` aurait exclu le modèle de configuration écrit le même jour.
+
+**Une correction au plan initial, notée pour l'honnêteté du journal :** le plan affirmait que
+`ui.py` contenait un `st.title` dupliqué. Vérification faite, ce sont deux écrans mutuellement
+exclusifs (le gate d'authentification et l'application) — aucun doublon, rien n'a été touché.
+
+---
+
+### 16.7 Ce qui reste ouvert après cette passe
+
+| Point | État | Raison |
+|---|---|---|
+| Workflow n8n | Écrit, jamais importé | Aucune instance n8n n'existe pour ce projet ; les `typeVersion` des nœuds peuvent demander un ajustement à l'import |
+| Webhooks sortants | Testés hors ligne, jamais reçus par un vrai n8n | Même raison ; le contrat (enveloppe, signature) est verrouillé par les tests |
+| Image Docker | Écrite, `compose config` validé par profil | Jamais construite ni exécutée — Docker n'est pas installé sur la machine de développement |
+| CI GitHub Actions | Écrite | Ne s'exécutera qu'au premier push sur un dépôt distant |
+| One-pager | Écrit | Non hébergé (même raison que le TLS du §15.1.9) |
+| Tout le §15.4 hors 15.4.7 | Inchangé | Tests de charge, E2E navigateur, processus de revue — hors périmètre |
+
+Aucun de ces points n'est une pièce de code manquante : ce sont, à chaque fois, un compte, une
+instance ou un hébergement qui n'existe pas encore.
+
+---
+
+## §17 — Marque blanche, animations, et journal d'activité attribuable (2026-07-30)
+
+Demande initiale, en trois volets : rendre l'interface Streamlit « plus belle, avec beaucoup
+d'animations », rendre **tout paramétrable** (logo et couleurs) pour que l'entreprise qui reçoit ACA
+puisse l'aligner sur son cahier des charges, et créer un **profil d'audit du rôle `operator`** afin
+qu'un administrateur voie « qui a fait quel changement, depuis quel poste, quand et où ».
+
+### 17.1 Ce que l'audit du code a trouvé avant d'écrire quoi que ce soit
+
+Comme aux passes précédentes, l'inventaire préalable a révélé davantage que la demande ne le
+laissait supposer.
+
+1. **Le rôle `operator` existait depuis §15.1.6 sans qu'aucune de ses actions ne soit tracée.**
+   `audit_log.py` ne consigne qu'**un** type d'événement : la validation d'un lead. Ni les
+   connexions, ni les **échecs de connexion**, ni les rejets, ni les changements de réglages, ni la
+   curation de la base de connaissances, ni la gestion des comptes ne laissaient de trace. La
+   question « qu'a fait cette personne cette semaine ? » n'avait aucune réponse dans le produit.
+
+2. **Le verrou anti-force brute bloquait en silence.** `auth_lockout.py` (§14, US-41) empêchait un
+   bot de tester des mots de passe — sans que personne ne puisse jamais **constater** qu'une série
+   de tentatives avait eu lieu. Un dispositif de sécurité qui ne laisse pas de trace ne permet ni de
+   détecter, ni de dater, ni de rattacher un incident.
+
+3. **Le rejet d'un lead n'était consigné nulle part.** Ajouté à l'UI et à l'API, il restait
+   indistinguable d'un lead jamais traité — alors que c'est une décision commerciale qu'on peut
+   avoir à expliquer.
+
+4. **L'apparence n'était pas un paramètre, c'était un fichier du dépôt.** Livrer ACA à une entreprise
+   imposant son logo et ses couleurs supposait de **modifier le produit** pour chaque client
+   (`.streamlit/config.toml`, statique, lu au démarrage du serveur).
+
+### 17.2 Ce qui a été livré
+
+| Pièce | Rôle |
+|---|---|
+| [tamper_chain.py](aca/storage/tamper_chain.py) | Chaînage par hachage extrait de `audit_log.py`, désormais partagé par les deux journaux — une seule implémentation de la partie cryptographique, pas deux qui divergeront |
+| [activity_log.py](aca/storage/activity_log.py) | Journal d'activité : 25 actions déclarées, `outcome` (succès/refusé/échec), `source` (streamlit/api/slack), poste, IP, session, hôte serveur, chaîné et cloisonné par tenant |
+| [branding.py](aca/core/branding.py) | 22 jetons `BRAND_*` résolus à chaud, 7 préréglages, CSS + animations générées, thème natif `config.toml`, contrôles de contraste WCAG |
+| Onglet « Journal d'activité » | Admin uniquement : KPI, activité par personne, **fiche d'audit par opérateur avec les postes utilisés**, frise filtrable, export CSV, vérification d'intégrité |
+| Panneau « Apparence » | Admin uniquement : préréglages, 11 sélecteurs de couleur, téléversement du logo, police/densité/arrondi/animations, nuancier, avertissements d'accessibilité |
+| 87 tests | `test_branding.py` (46) + `test_activity_log.py` (41) — suite portée de 352 à **451** |
+
+### 17.3 Deux décisions de conception à assumer
+
+**La CSS injectée, contre la doctrine par défaut du projet.** La skill `developing-with-streamlit`
+prescrit « jamais de CSS, tout dans `config.toml` », et c'est la bonne règle pour un thème figé. Elle
+est écartée ici en connaissance de cause : un thème qui change **à l'exécution**, par tenant, ne peut
+pas être un fichier statique lu au démarrage. D'où **deux couches** — la CSS vivante (effet immédiat,
+porte les animations) et le thème natif `config.toml` (seul à atteindre l'intérieur des composants
+React : menu déroulant ouvert, en-tête de `st.dataframe`, palette Vega), écrit sur action explicite
+et effectif au rechargement. Le prix est énoncé dans la docstring : les sélecteurs `data-testid` sont
+des détails d'implémentation Streamlit, donc une montée de version peut rendre la page **moins
+jolie** — jamais cassée, aucune règle ne conditionne une fonctionnalité.
+
+**« Depuis quel poste », sans surpromesse.** Une application web ne peut pas identifier une machine.
+Ce qui est réellement stocké : l'IP vue par le serveur (celle du proxy si `X-Forwarded-For` n'est pas
+propagé), le user-agent (déclaratif, donc falsifiable), une empreinte `device_id` = hachage tronqué
+de (IP, user-agent) qui **regroupe** les actions d'un même poste sans déposer de cookie de traçage,
+et le nom de la machine serveur — qui, en déploiement « Solo » (`run_solo.py` sur le portable d'un
+commercial), **est** justement le poste. Prétendre à une identification matérielle dans un journal
+d'audit serait pire que de ne rien écrire.
+
+### 17.4 Trois défauts trouvés par la vérification, pas par la relecture
+
+1. **`log()` pouvait lever, en violation de son propre contrat.** La sérialisation de `details` avait
+   lieu *hors* du `try` : un objet non JSON levait avant d'entrer dans la protection. Or ce module
+   s'intercale dans le chemin d'une écriture CRM — l'exception aurait fait échouer une validation
+   légitime pour cause de journal indisponible. Corrigé, plus `default=str` : mieux vaut un détail
+   approximatif qu'une entrée d'audit manquante.
+
+2. **Une entrée d'audit était perdue en silence.** Premier essai de bout en bout dans l'UI :
+   l'action « analyse lancée » n'apparaissait pas. Cause — `st.context.ip_address` ne renvoie pas
+   forcément une chaîne ; la valeur descendait jusqu'à SQLite (`Error binding parameter 13`), `log()`
+   attrapait l'exception au titre de son contrat « ne lève jamais »… et la ligne disparaissait avec.
+   **Un journal de sécurité qu'on croit complet et qui ne l'est pas est plus dangereux qu'un journal
+   absent.** Corrigé aux deux bouts (conversion dans `ui.py`, normalisation dans le magasin) et
+   verrouillé par un test de régression. C'est le défaut le plus instructif de la passe : il ne se
+   voyait *que* dans une exécution réelle, et le mécanisme censé protéger l'application était
+   précisément ce qui masquait la perte.
+
+3. **`merge_config_toml` n'était pas idempotent.** Réappliquer la marque laissait une section
+   `[theme]` vide en tête de fichier. Trouvé par le test d'idempotence — et au passage, la première
+   version du test était elle-même fausse (elle comptait le texte « [theme] », qui apparaît aussi
+   dans le commentaire d'en-tête généré) : comparer le fichier entier est le bon contrôle.
+
+### 17.5 Ce qui reste ouvert
+
+| Point | État | Raison |
+|---|---|---|
+| Sélecteurs CSS `data-testid` | Fonctionnels sur Streamlit 1.59 | Non contractuels ; à revérifier à chaque montée de version (dégradation cosmétique uniquement) |
+| SSO / SCIM, domaine personnalisé | Non fait | Attentes classiques d'un achat grand compte, hors périmètre du prototype — cf. les recommandations de `docs/AMELIORATIONS_SUGGEREES.md` |
+| Journal d'activité sur un vrai multi-poste | Testé hors ligne + une exécution locale réelle | Aucun déploiement multi-utilisateur n'existe encore : l'IP est celle de la boucle locale |
+| Alerte sur incident | Non fait | Les échecs de connexion sont consignés et visibles, mais rien ne prévient personne en temps réel |
+
+---
+
+## §18 — Suggestions produit, restructuration multi-pages, second facteur (2026-07-30)
+
+Demande initiale : mettre en œuvre **toutes** les suggestions de `docs/AMELIORATIONS_SUGGEREES.md`,
+à l'exception de l'hébergement (§1.2, §10 du récapitulatif) et de l'alerte Slack sur incident (§1.1,
+§3 du récapitulatif) — les deux seules exigeant une infrastructure réelle qui n'existe pas pour ce
+projet — accompagnée d'une passe de design délibérée via `/example-skills:frontend-design` pour que
+l'interface reste structurée à mesure que les nouvelles surfaces s'ajoutent.
+
+### 18.1 Portée retenue
+
+Le tableau récapitulatif (§7 du document de suggestions) classe 12 actions par ordre de priorité ;
+les items 11 et 12 (SSO/SCIM, multilingue) y sont explicitement marqués « à n'engager que sur
+demande d'un client réel », donc hors périmètre d'une mise en œuvre spéculative. Les 8 items
+restants — rôle lecture seule, favicon (les deux déjà faits au §17), journalisation des actions
+machine, vue chronologique par lead, avertissement avant expiration de session, export mensuel
+archivé, export PDF de la proposition, TOTP sur les comptes admin — constituent donc la portée
+réelle de cette passe, complétée par les items du §5 (interface) les moins coûteux à livrer dans le
+même mouvement.
+
+### 18.2 Ce qui a été livré
+
+| Pièce | Rôle |
+|---|---|
+| [totp.py](aca/core/totp.py) | Second facteur RFC 6238, stdlib uniquement (`hmac`/`hashlib`/`struct`/`base64`) — pas de nouvelle dépendance |
+| [ui_kit.py](aca/core/ui_kit.py) | Vocabulaire d'interface réutilisable : `decision_rail` (composant signature), `timeline`, `diff`, `stat`/`chip`/`empty_state` |
+| [pdf_export.py](aca/integrations/pdf_export.py) | Export PDF de la proposition à la marque du client, via PyMuPDF déjà épinglé (aucune nouvelle dépendance) |
+| `activity_log.py` (étendu) | `lead_timeline`, `is_new_device`/`known_devices`, purge à deux vitesses, `archive_period` signée |
+| `user_store.py` (étendu) | `ROLE_VIEWER` (lecture seule stricte), colonnes/fonctions TOTP, CLI `totp-off` |
+| `poller.py`/`relance.py`/`retention.py`/`scheduler.py` (étendus) | Journalisation des actions machine (`SOURCE_POLLER`/`SOURCE_CLI`), nouveau travail planifié `archive` |
+| `ui.py` → routeur + `aca/ui/shared.py` + `app_pages/*.py` | Découpe d'un fichier unique de ~1700 lignes en un routeur `st.navigation` fin + cinq pages |
+| 99 tests | `test_ui_kit.py` (24) + `test_totp.py` (19) + `test_pdf_export.py` (14) + `test_retention.py` (3) + `test_ui_shared.py` (2, QR code) + extensions de `test_security.py`/`test_activity_log.py`/`test_storage.py` — suite portée de 451 à **550** |
+
+### 18.3 Ce que l'audit du code a trouvé avant d'écrire quoi que ce soit
+
+1. **La journalisation des actions machine était déjà à moitié construite, et inutilisée.** Les
+   constantes `SOURCE_POLLER`/`SOURCE_CLI` existaient dans `activity_log.py` depuis le §17 — le
+   document de suggestions le relève lui-même (§4 item 5, marqué « raccordement trivial ») — mais
+   aucun appelant ne s'en servait : `poller.py`, `scheduler.py`, `relance.py` et `retention.py`
+   agissaient chacun sans laisser de trace attribuable à un acteur.
+
+2. **La rétention à deux vitesses existait dans `activity_log.py`, mais n'était jamais invoquée.**
+   `purge_older_than(days, sensitive_days=None)` était déjà écrite (le paramètre existait dès le
+   §17) — mais `retention.py`, le seul appelant réel en production, ne passait jamais
+   `sensitive_days`. Sans ce raccordement, les événements sensibles (échecs de connexion,
+   verrouillages, changements de rôle) auraient continué à purger à la même échéance que le bruit
+   d'usage courant, exactement le manque que le document de suggestions signale au §4 item 4 —
+   trouvé en écrivant les tests de la passe, pas en la planifiant.
+
+3. **Un fichier unique de ~1700 lignes n'était plus tenable pour recevoir de nouvelles surfaces.**
+   Ni la vue chronologique par lead, ni le bouton d'export PDF, ni l'interface d'inscription TOTP
+   n'avaient d'endroit raisonnable où vivre dans l'ancien `ui.py` monolithique — la découpe en pages
+   `st.navigation` n'était donc pas une fin en soi, mais la condition pour livrer le reste
+   proprement.
+
+### 18.4 Deux décisions de conception à assumer
+
+**Le rail de décision, pas un simple indicateur d'étapes numéroté.** Numéroter des étapes est
+d'ordinaire un tic décoratif. Ici la séquence — e-mail reçu, classé, enrichi, proposition rédigée,
+**décision humaine** — est réelle, et le dernier maillon est précisément le geste qu'on demande au
+lecteur. `decision_rail()` rend donc visible que la décision humaine est le terminus du travail de
+la machine, pas une case à cocher accessoire — cohérent avec la garantie centrale du produit
+(« rédige et attend »).
+
+**TOTP réservé au rôle `admin`, jamais imposé à `operator`.** Un opérateur qui valide vingt leads
+par jour se verrait imposer un coût disproportionné pour un gain de sécurité marginal — et
+l'expérience documentée ailleurs dans ce projet est que ce type de contrainte se paie en
+contournements (secret partagé, application d'authentification sur un seul téléphone de service),
+qui affaiblissent la sécurité plutôt que de la renforcer. Seul un compte capable de créer d'autres
+administrateurs, de rediriger les alertes commerciales et de curer ce que le Stratège affirmera aux
+prospects justifie la contrainte.
+
+### 18.5 Défauts trouvés par la vérification, pas par la relecture
+
+1. **`st.navigation` n'exécute que la page sélectionnée, contrairement à `st.tabs()`.** Sous l'ancien
+   régime, le corps de *tous* les onglets s'exécutait à chaque rerun — un résultat chargé depuis la
+   barre latérale ("Ouvrir" sur une analyse en file, "Charger cet e-mail" depuis Gmail) apparaissait
+   donc quel que soit l'onglet visuellement actif. Sous `st.navigation`, ce n'est plus vrai : sans un
+   `st.switch_page("app_pages/1_inbox.py")` explicite après ces deux actions, le résultat chargé
+   restait invisible tant que la personne ne cliquait pas elle-même sur « Nouvel e-mail ». Trouvé en
+   vérifiant le comportement de bout en bout via `AppTest`, pas en relisant le code.
+
+2. **L'avertissement de session vérifiait le temps restant *après* `touch()`.** `session.touch()`
+   repousse systématiquement le compteur d'inactivité à sa valeur maximale — vérifier le temps
+   restant après cet appel aurait rendu l'avertissement d'inactivité pratiquement inatteignable en
+   usage réel (la borne TTL absolue, elle, n'est pas affectée par `touch()`). Corrigé en inversant
+   l'ordre : vérifier avant de repousser.
+
+3. **`streamlit.testing.v1` classe tout `st.expander(..., icon=...)` sous son type interne
+   `Status`, jamais `Expander`.** Un artefact de l'outillage de test de cette version de Streamlit
+   (le tri se fait sur la seule présence de `proto.icon`), qui touche tous les accordéons à icône
+   déjà présents dans le code, pas seulement les nouveaux — `at.expander` n'en trouve aucun ;
+   `at.status` est le bon accessoire. Consigné ici pour ne pas être redécouvert à la prochaine
+   session de vérification.
+
+### 18.6 Ce qui reste ouvert, par exclusion délibérée
+
+| Point | État | Raison |
+|---|---|---|
+| Hébergement, TLS, domaine personnalisé | Non fait | Exclu explicitement par la demande initiale — nécessite une infrastructure réelle |
+| Alerte Slack en temps réel sur incident | Non fait | Exclu explicitement par la demande initiale — nécessite une application Slack réelle à tester |
+| Raccourcis clavier valider/rejeter | Non fait | Nécessite `st.components.v2` — effort disproportionné pour cette passe |
+| Traitement par lot | Non fait | Le document lui-même appelle à la prudence : diluerait la garantie de validation humaine |
+| Vue mobile | Non fait | Rien à tester contre — aucun appareil mobile disponible dans cet environnement |
+| Recherche globale inter-pages | Non fait | Effort disproportionné pour cette passe, reportée sans avoir été commencée |
+| SSO / SCIM | Non fait | Le document lui-même déconseille de les construire par anticipation |
+| Multilingue | Partiel (§18.7, 2026-07-31) | Engagé un jour plus tard sur demande explicite, portée réduite au chrome principal |
+
+### 18.7 Addendum (2026-07-31) — QR code, style de la barre de navigation, bascule FR/EN
+
+Trois demandes de suivi sur la découpe qui vient d'être livrée, pas de nouveaux items de la feuille
+de route : (1) le secret d'inscription TOTP (§18.2), jusque-là affiché en texte brut `otpauth://`,
+se rend maintenant en QR code scannable (`_totp_qr_png()`, `aca/ui/shared.py`, via `segno` — même
+raisonnement stdlib/zéro-dépendance que `totp.py` lui-même) ; (2) la barre de navigation et le
+bandeau de sécurité admin gagnent un style plus visible et animé, centré — voir `branding.py` ;
+(3) [i18n.py](../aca/core/i18n.py), un sélecteur de langue FR/EN, referme l'item 12 du tableau
+§18.6 ci-dessus, laissé « non fait » à la fin du §18 principal.
+
+**Le premier essai du point (2) ne fonctionnait pas réellement.** Les sélecteurs choisis en
+grep-ant le bundle JS compilé (`data-testid="stTopNavLinkContainer"`/`stTopNavLink`) étaient les
+bons noms, mais `*:has(> [data-testid="stTopNavLinkContainer"])` cible le parent *direct* du
+testid — un `div` privé, propre à Streamlit, qui n'enveloppe qu'**un seul** lien à la fois, jamais
+la rangée flexbox des quatre. Le fond, la bordure et le centrage (`margin-inline: auto`) tombaient
+donc chacun sur quatre petites boîtes individuelles, quasi invisibles, jamais sur une seule barre
+partagée — exactement le retour de l'utilisateur (« ni visible, ni centrée »). Trouvé en lançant un
+vrai navigateur (Playwright, installé pour l'occasion) contre l'application réelle plutôt qu'en
+relisant seulement le bundle minifié : l'inspection du DOM effectivement rendu a montré que le
+vrai conteneur flexbox est fourni par `rc-overflow`, la bibliothèque tierce de liste que Streamlit
+utilise ici — `.rc-overflow`/`.rc-overflow-item` sont ses propres classes, stables (pas hachées par
+Streamlit à chaque version), et la bonne cible. Au passage, l'animation « échelonnée » de l'entrée
+des liens était morte pour la même raison : `:nth-child(N)` sur un élément qui est toujours l'unique
+enfant de son parent vaut toujours `:nth-child(1)`, donc les quatre liens recevaient systématiquement
+le même délai. Corrigé en ciblant `.rc-overflow`/`.rc-overflow-item` (confirmé en direct : `justify-
+content`, fond et ombre corrects sur l'élément réellement rendu, avant/après capturés à l'écran).
+
+**Portée du multilingue, décidée par l'utilisateur** : interrogé sur traduire tout le projet (des
+centaines de chaînes, ~15 fichiers) ou seulement le chrome principal, l'utilisateur a choisi le
+chrome principal — navigation, en-têtes/légendes de page, boutons/étiquettes premiers, messages
+clés. Les écrans de curation admin, le détail du journal d'activité, l'export PDF et les logs
+console restent français par ce choix, pas par oubli. Dictionnaire fait main (pas de Babel/gettext,
+même raisonnement stdlib que `totp.py`/`slack_verify.py`) ; `translate()` ne lève jamais (clé
+inconnue → la clé elle-même, langue inconnue → repli sur le français).
+
+**Un bug trouvé par la vérification** : le sélecteur de langue, placé d'abord après la porte
+`check_auth()`/`st.stop()` de `ui.py`, ne s'affichait jamais sur l'écran de connexion — corrigé en
+le déplaçant avant `prod_check.enforce()`. Suite : 550 → **561 tests** (`test_i18n.py`, 11 tests).
+Vérifié en direct via `AppTest` : connexion admin avec inscription TOTP forcée, bascule vers
+l'anglais en cours de session, puis les cinq pages confirmées sans exception avec la légende propre
+à chacune (`dashboard.caption`/`history.caption`/`activity.caption`) réellement traduite dans la
+langue active — pas seulement l'absence d'erreur. Détail complet :
+`docs/PROJECT_JOURNAL.md` (entrée du 2026-07-31).
+
+---
+
+## §20 — Relectures transmises, rapport mensuel, rapport paramétrable (2026-08-04)
+
+Trois demandes en une passe, formulées par l'utilisateur : (1) qu'un **opérateur puisse transmettre
+à l'administrateur des e-mails précis** à faire relire, plusieurs d'un seul geste, et que
+l'administrateur les voie en se connectant ; (2) qu'un **rapport PDF mensuel** raconte ce qui s'est
+passé, chiffres et graphiques compris, **en comparant au mois précédent** ; (3) que ce rapport soit
+**paramétrable au maximum** — choix des sections, des colonnes, des dates — « toujours avec le
+contexte » et « toujours avec un thème ».
+
+### 20.1 Le geste qui manquait : « je ne tranche pas, quelqu'un doit regarder »
+
+Un opérateur devant un lead qui le dépasse — clause inhabituelle, prix qu'il ne se sent pas
+d'arrêter seul, prospect stratégique — n'avait que trois issues : valider (donc écrire au CRM),
+rejeter (donc faire disparaître le lead de la file de tout le monde), ou ne rien faire et prévenir
+son responsable **hors de l'outil**, là où l'information cesse d'être traçable. Le troisième geste
+n'existait pas.
+
+[review_store.py](../aca/storage/review_store.py) l'enregistre. Registre **distinct** de
+`task_store.py`, et la distinction est la raison d'être du module — exactement le raisonnement qui
+avait déjà séparé `task_store` de `followup_store`/`schedule_store` au §19 :
+
+| | `task_store` (§19) | `review_store` (§20) |
+|---|---|---|
+| Déclencheur | une **échéance** (`list_due` interroge une horloge) | un **destinataire** (la connexion de la personne) |
+| Fin de vie | s'exécute toute seule | attend la **décision d'un humain**, qui peut répondre |
+| Question posée | « qu'est-ce qui est échu ? » | « qu'est-ce qui m'attend ? » |
+
+Les fusionner aurait imposé trois exceptions (`list_due` doit exclure ce type, le planificateur doit
+le sauter, la purge doit le traiter à part) au cœur d'une table dont la docstring vante justement
+l'uniformité.
+
+**Un lot, pas un envoi à l'unité.** Une demande porte sur un e-mail, mais la personne en désigne
+plusieurs d'un coup — c'était la demande explicite. Chaque e-mail a donc sa ligne (il se traite et
+se clôt individuellement), mais toutes les lignes d'un même geste partagent un `batch_id`, une note
+et une priorité : le destinataire lit « Marie vous a transmis 4 e-mails » et peut répondre au lot
+d'un seul clic, sans perdre la granularité quand il veut trancher au cas par cas.
+
+**Le destinataire est résolu à la lecture, pas à l'écriture.** `@admins` désigne la *fonction* : un
+administrateur recruté demain voit ce qui a été adressé à sa fonction hier. Écrire une ligne par
+administrateur au moment de l'envoi aurait figé la liste et multiplié les clôtures pour une seule
+demande.
+
+**« Vu » ≠ « traité »**, comme `acknowledged_at` au §19 : ouvrir une demande ne la retire pas de la
+file, sinon une relecture consultée puis oubliée serait perdue pour tout le monde.
+
+**« Quand l'admin se connecte, il les voit »** est porté par trois surfaces dans `ui.py` : une
+pastille d'alerte dans l'en-tête (en *alerte* et non en *normal* : contrairement à la file
+d'attente, cette demande bloque quelqu'un d'autre), un panneau dans la barre latérale, et un toast
+annoncé **une fois par lot et par session** — quatre toasts pour un seul geste d'un collègue
+seraient lus comme quatre demandes distinctes.
+
+### 20.2 Un seul moteur pour les deux rapports
+
+Le rapport mensuel automatique et le rapport paramétrable ne sont **pas deux mécanismes** : c'est
+[reporting.py](../aca/core/reporting.py) appelé avec deux spécifications. Le mensuel est une
+spécification figée (mois civil écoulé, presque toutes les sections, comparaison activée). Deux
+chemins auraient garanti qu'un jour l'un affiche un chiffre que l'autre ne connaît pas.
+
+Toutes les données existaient déjà — `analytics_store` compte les e-mails, `audit_log` les
+validations, `activity_log` les gestes, `task_store` les envois, `review_store` les relectures.
+Elles n'existaient qu'**à l'écran, en « N derniers jours », et jamais comparées** : personne ne
+pouvait répondre à « qu'est-ce que cet outil nous a apporté en juillet par rapport à juin ? », qui
+est pourtant la seule question qui justifie de reconduire l'outil. Un tableau de bord montre un
+état ; un rapport raconte une évolution.
+
+**Décisions structurantes, et pourquoi :**
+
+- **Séparation collecte / rendu.** `reporting.py` ignore ce qu'est un PDF : il produit des blocs
+  typés (`kpis`/`bars`/`line`/`table`/`text`) que
+  [report_pdf.py](../aca/integrations/report_pdf.py) dessine. Le contenu est donc testable sans
+  ouvrir un document, et un export HTML ou CSV ne demanderait pas de retoucher une requête.
+- **La comparaison porte sur la fenêtre de même durée qui précède**, pas sur « le mois d'avant ».
+  Comparer 31 jours à 28 ferait apparaître février en recul de 10 % chaque année sans qu'il s'y
+  passe quoi que ce soit.
+- **Bornes hautes exclues** partout (`analytics_store._window`). Sans cela l'événement tombant pile
+  à la frontière serait compté dans deux mois consécutifs, et la comparaison gonflerait des deux
+  côtés.
+- **Comparaison honnête** : chaque indicateur déclare le sens qui lui est favorable (`better`). Un
+  délai médian qui monte est une dégradation ; peindre toute hausse en vert produirait un rapport
+  flatteur et faux. Et une progression « de 0 à 3 » n'affiche **aucun** pourcentage, seulement
+  l'écart absolu — « +100 % » raconterait une croissance sans base.
+- **Un classement en quatre familles** (activité commerciale, qualité et intervention humaine,
+  traçabilité, exploitation), qui correspondent à quatre lecteurs différents. Quinze tableaux dans
+  l'ordre où le code les a produits ne se lisent pas. Chaque famille commence sur une page neuve :
+  c'est ce qui rend le document feuilletable.
+- **Toujours avec le contexte.** Chaque bloc porte une phrase qui dit d'où vient le chiffre et sur
+  quoi il porte, et la couverture liste les sections demandées — sans quoi un lecteur ne peut pas
+  distinguer « il ne s'est rien passé » de « cette section n'a pas été demandée ».
+- **Toujours à la marque, jamais illisible.** Le papier est forcé au clair et l'encre du client
+  n'est conservée que si son contraste tient (seuil WCAG AA 4.5) : un thème sombre est correct à
+  l'écran et désastreux sur un document imprimé puis transféré.
+- **Aucune dépendance nouvelle.** Les graphiques sont tracés avec les primitives de PyMuPDF, déjà
+  épinglé. Ajouter matplotlib pour quatre diagrammes aurait fait entrer des dizaines de mégaoctets,
+  une police à embarquer et un moteur de rendu de plus — pour produire des images matricielles
+  qu'il aurait fallu re-thématiser à la main de toute façon, puisque la palette vient du client.
+- **Le détail e-mail par e-mail est exclu du rapport mensuel automatique** : il peut faire des
+  dizaines de pages et recopie des adresses de prospects dans un fichier qui circulera. Il reste à
+  un clic dans le rapport paramétrable, où c'est une décision consciente.
+- **Les sections nominatives sont réservées aux administrateurs**, dans la page comme dans la liste
+  des rapports archivés : elles reproduisent le Journal d'activité, admin-only depuis le §17. Un
+  rapport qui les servirait sans la même garde serait un contournement pur et simple de cette règle.
+
+### 20.3 Deux défauts trouvés en regardant le document, pas en relisant le code
+
+1. **Chaque paragraphe en français débordait de la marge droite.** `fitz.get_text_length()`
+   sous-évalue gravement les caractères accentués (« ééééééééée » mesurait 22,8 points contre 45,6
+   pour « eeeeeeeeee ») : le calcul de retour à la ligne se croyait dans les clous et le texte se
+   faisait couper au bord de la page. Corrigé en mesurant via `fitz.Font(...).text_length()`.
+2. **« … » et « — » sortaient en points parasites**, dans chaque cellule tronquée et à chaque
+   valeur absente. Les polices Base-14 d'un PDF sont écrites avec un encodage Latin-1 : les glyphes
+   existent dans la police mais le document ne peut pas les désigner. Les lettres accentuées, elles,
+   sont dans Latin-1 et s'affichaient correctement — ce qui rendait le défaut d'autant plus facile à
+   ne pas voir. Corrigé **à la frontière du dessin** (un seul `_put`) plutôt qu'aux vingt-trois
+   points d'appel, même raisonnement que `console.py` pour l'encodage console. Le repli
+   `encode('latin-1', 'replace')` n'est pas de la ceinture-bretelle : un objet d'e-mail entrant peut
+   contenir n'importe quel caractère Unicode.
+
+Un troisième défaut a été trouvé par un test plutôt que par relecture : une faute de frappe dans un
+`BRAND_PRIMARY` d'un fichier `.env` faisait échouer tout le rendu (`build_report_pdf` renvoyait
+`None` conformément à son contrat), donc **plus aucun rapport mensuel n'était produit, en silence,
+la nuit**. Une couleur est un ornement ; elle ne décide plus si le document existe.
+
+### 20.4 Ce qui n'est pas fait, et pourquoi
+
+- Le rapport mensuel n'a **jamais tourné sur douze mois réels** : il est vérifié sur des données
+  synthétiques et par le travail planifié en test. Même limite que tout ce qui dépend du temps long
+  dans ce projet.
+- La notification de disponibilité du rapport passe par `notify.send()` — donc **rien n'est envoyé
+  si ni Slack ni `NOTIFY_EMAIL` ne sont configurés** (contrat inchangé). Le rapport reste visible
+  dans l'onglet « Rapports ».
+- Le PDF n'est **pas joint** à la notification : `notify.py` n'envoie que du texte, et lui ajouter
+  la gestion des pièces jointes dépassait la demande.
+- L'aperçu à l'écran est borné à 50 lignes par tableau ; le PDF, lui, les contient toutes.
+
+Suite : 620 → **697 tests** (`test_review_store.py` 21, `test_reporting.py` 27,
+`test_report_pdf.py` 25, plus 4 tests de planificateur pour le travail `report`). Vérifié en direct
+via `AppTest` : les deux nouvelles pages rendues pour les trois rôles, un parcours réel
+opérateur → administrateur (transmission d'un lot de 2, visible côté admin, invisible côté
+expéditeur), la garde admin-only des archives, et l'en-tête/barre latérale/toast de `ui.py` — un
+seul toast pour un lot de deux e-mails. Détail complet : `docs/PROJECT_JOURNAL.md`
+(entrée du 2026-08-04).
+
+## §23.2 — Réservation réelle, moments de paiement, sécurité repliée (2026-08-06)
+
+Quatre demandes sur `static/landing.html` : un calendrier qui réserve vraiment et grise les journées
+prises ; savoir quand le client paie et ce que change chaque palier, en vue de Stripe ; désencombrer
+la section sécurité ; et compléter la page — dont **comment un client qui paie obtient son
+interface Streamlit**.
+
+### Ce qui a été construit
+
+- **Deux branches de réservation**, décidées par `CONFIG.calendly` (nouvel objet en tête de script,
+  seul endroit où coller une URL commerciale). Renseigné ⇒ `<iframe>` Calendly thémé, injecté à
+  l'approche, disponibilités réelles et journées complètes grisées **par Calendly** : la page n'a pas
+  de backend, c'est la seule façon que la promesse soit vraie. Vide ⇒ le sélecteur dessiné reste,
+  inchangé — ce qui préserve le fichier comme document autonome (hors ligne, impression). Jamais
+  `widget.js` : zéro script distant, propriété conservée.
+- **Trois paliers réellement distincts** : `data-tier`, libellés de bouton différents, et une ligne
+  `.tier__when` qui écrit le moment du paiement. Audit payé d'avance en ligne ; construction devisée
+  après l'appel ; maintenance mensuelle démarrant après la livraison. Le palier choisi survit au saut
+  vers `#book` (pastille visible, `utm_content`, corps du mail).
+- **Stripe : la couture, pas l'implémentation.** `CONFIG.pay.*` accepte un lien de paiement par
+  palier ; la redirection après paiement de Stripe pointée vers `CONFIG.calendly` enchaîne
+  payer → réserver sans serveur. Non construit et documenté comme tel : endpoint de session,
+  `POST /stripe/webhook` (à calquer sur `/slack/interactions`), registre de commandes.
+- **Sécurité : 12 lignes → 5 groupes repliables**, mécanique de la FAQ réutilisée telle quelle.
+  Groupement **contigu** sur l'ordre existant (5 groupes et non 4) : aucune des douze chaînes
+  bilingues n'a eu à être déplacée, donc aucune n'a pu être corrompue. Panneaux indépendants,
+  contrairement à la FAQ. Les douze restent dans le DOM une fois repliés.
+- **Nouvelle section « 05 — Comment vous y accédez »** (FAQ → 06, Contact → 07) : essai en
+  démonstration, paiement ou cadrage, provisionnement **chez le client**, mise aux couleurs. Plus
+  deux entrées de FAQ que la page esquivait (« je paie quoi, et quand ? », « qui détient les clés et
+  paie les jetons ? »), les balises de partage et un JSON-LD volontairement limité.
+- **Modèle de livraison tranché : hybride.** La démonstration est hébergée par nous et sans donnée
+  réelle ; la production vit chez le client. Les deux réponses de FAQ qui affirmaient « rien n'est
+  hébergé de notre côté » ont été réécrites plutôt que laissées en contradiction avec ce qu'on vend.
+
+### Défauts trouvés (aucun n'était visible en relecture)
+
+1. **Le formulaire de contact n'arrivait nulle part** — `mailto:?subject=…` sans destinataire, donc
+   client mail ouvert sur un champ « À : » vide. Le seul chemin de conversion de la page, cassé
+   depuis l'origine et silencieux : le formulaire « marchait ».
+2. **`[hidden]` ne cachait rien** sur `.chip`/`.btn` — règle d'auteur de même spécificité que la
+   règle navigateur, l'auteur gagne. Une pastille vide en permanence et les deux boutons de
+   démonstration affichés sans démonstration configurée, soit exactement ce que l'attribut devait
+   empêcher.
+3. **Un accordéon ouvert affichait « | »** — la rotation de 90° échange les deux barres, c'était donc
+   la mauvaise qui était effacée. Défaut préexistant de la FAQ, corrigé pour les deux.
+4. Créneau horaire survivant au changement de date ; focus clavier détruit à chaque sélection ;
+   navigation de mois sans borne basse.
+
+### Limites, dites franchement
+
+Le **grisage d'une journée complète n'a pas été observé** : c'est Calendly qui le rend et aucun
+compte n'existe pour ce projet. Ce qui est vérifié est notre part — la carte lui est cédée, l'iframe
+s'injecte au bon moment avec les bons paramètres. Aucun lien Stripe créé ni testé. Les trois montants
+restent des valeurs d'exemple (`data-placeholder-price`). Rien vu sur un téléphone réel. Détail
+complet : `docs/PROJECT_JOURNAL.md` (entrée du 2026-08-06, suite 2).
+
+
+## §24 — Se souvenir de cet appareil (2026-08-06)
+
+Demande : ne plus saisir le code TOTP à chaque connexion, via une case « se souvenir de cet
+appareil » ramenant la demande à tous les trois jours.
+
+**Le choix technique déterminant, tranché par un essai et non d'après la documentation.** Une case de
+ce genre ne vaut que par ce qu'elle reconnaît. L'empreinte `(IP, user-agent)` existait déjà dans
+`activity_log` — et l'employer aurait été une faute : elle n'est pas un secret, deux postes derrière
+le même NAT avec le même navigateur la partagent. L'alternative supposait de poser un cookie, ce que
+Streamlit n'expose pas côté Python. Une page jetable a montré qu'un `components.html` **peut** écrire
+dans le `document.cookie` du parent et que `st.context.cookies` le relit ensuite. D'où un vrai jeton
+de 256 bits, stocké **haché**.
+
+**Livré :** [device_trust.py](../aca/core/device_trust.py) (pur, stdlib, `now` injecté — même posture
+que `session.py`/`totp.py`), [device_trust_store.py](../aca/storage/device_trust_store.py) (registre
+distinct : une ligne par *navigateur*, datée, expirante, révocable — ni `user_store` ni `session.py`
+ne répondent à cette question), `user_store.auth_state_fingerprint()`, la case sur l'écran du second
+facteur, le panneau « Appareils de confiance » dans Réglages, trois actions de journal placées dans
+`SENSITIVE_ACTIONS`, le nettoyage dans `retention.py`, et `ACA_TOTP_TRUST_DAYS` (`0` désactive).
+
+**Ce qui est affaibli, sans détour :** le code est sauté, jamais le mot de passe, et aucune session
+n'est allongée. Garde-fous : jeton jamais stocké en clair ; révocation **automatique** dès que le mot
+de passe ou le secret TOTP change (`auth_state_fingerprint`, sans couplage entre magasins) ;
+expiration jugée côté serveur ; liaison au user-agent contre le rejeu ; chaque saut consigné.
+
+**Défaut évité de justesse :** poser le cookie au moment du clic n'aurait rien fait — `_open_session`
+appelle `st.rerun()` juste après, ce qui jette le rendu en cours. L'écriture est différée à la passe
+suivante (`flush_device_cookie`). Même famille de panne muette que les règles CSS écrites et jamais
+rendues, trouvées le matin même (§21, §23.2).
+
+**Vérifié :** 773 → **795 tests**, plus la boucle complète en navigateur réel (le code est demandé,
+la case cochée pose le cookie, une nouvelle session serveur n'exige plus que le mot de passe, la
+révocation le réexige). **Non vérifié :** rien sur plusieurs postes réels ni en HTTPS — l'attribut
+`Secure`, ajouté seulement dans ce cas, n'a jamais été observé en conditions réelles. Détail :
+`docs/PROJECT_JOURNAL.md` (entrée du 2026-08-06, fin).
+
+
+## §25 — Correctif d'appareil de confiance, et passe de design (2026-08-07)
+
+**Le défaut.** « Se souvenir de cet appareil » ne fonctionnait pas après une déconnexion suivie
+d'une reconnexion dans le même onglet. Cause mesurée : `st.context.cookies` est figé au handshake de
+la session Streamlit, donc un cookie posé pendant la session en cours y est invisible, même après
+plusieurs reruns. La vérification de la veille ouvrait une nouvelle page et ne pouvait pas le voir.
+Corrigé par **deux sources** — `st.session_state` (survit à la déconnexion, couvre le même onglet) et
+le cookie (survit à la fermeture, couvre le rechargement et le nouvel onglet) — aucune n'étant
+suffisante seule.
+
+**Design.** Une teinte par bloc au tableau de bord au lieu d'une seule pour tout l'écran (le défaut
+était l'index `[0]`, pas la palette : une rotation de teinte a été écrite, mesurée, jugée criarde et
+supprimée) ; hauteurs de graphe accordées aux hauteurs de carte, ce qui supprime les zones vides ;
+entrée des cartes liée au défilement plutôt qu'au montage ; onglet actif en dégradé court avec
+enfoncement au clic ; et les neuf cartes de « 02 — Depuis la v1 » empilées en paquet, passant de
+trois écrans à un.
+
+**Vérifié :** **795 tests**, dont deux tombés sur mes propres modifications et corrigés sans
+affaiblir la règle qu'ils protègent. Rendu mesuré : six couleurs réellement peintes, paquet piloté
+au clavier avec cartes cachées `inert`, section à 772 px, pas de débordement de 390 à 1440 px.
+Détail : `docs/PROJECT_JOURNAL.md` (entrée du 2026-08-07).
+
+
+## §26 — L'artwork refait en blocs typographiques, et une vraie photographie (2026-08-07)
+
+**La demande.** La section « The Human-AI Intersection » ne ressemblait pas à ce qui était voulu :
+il fallait le rendu des captures fournies — la masse pixellisée qui scintille et vire du gris au
+bleu — et réutiliser les visuels de <https://acam.framer.website/> pour le reste de la page.
+
+**Ce que la rétro-ingénierie a trouvé, et c'est le résultat de la passe.** La page de référence n'a
+été ni devinée ni recopiée d'après une capture : elle a été mesurée dans un navigateur. Toutes ses
+illustrations sont **une seule et même technique**, et il n'y a ni canvas, ni SVG, ni image derrière
+aucune d'elles. Chacune est un `<div>` de texte monospace n'utilisant que **trois glyphes Unicode**
+— ░ ▒ ▓ (U+2591-93) —, en 10 px, `line-height: 1em`, `letter-spacing: 0`, couleur `rgb(176,176,176)`,
+**dessiné deux fois** : une copie nette au-dessus d'une copie floutée à `blur(11px)`. Le flou n'est
+pas une finition, c'est *l'effet* : c'est lui qui transforme une grille de caractères en masse
+diffuse et lumineuse. Six instances, relevées une par une : la masse (47×170, grise), les quatre
+icônes (39×64 `#00a2ff`, 51×83 `#ff4ffc`, 63×104 `#47e6c3`, 60×98 `#ffbd2e`) et la main du pied de
+page (69×170). La seule image téléchargée de tout le site est la **photographie de la main**.
+
+**Ce qui a été fait.** Le moteur d'artwork est passé de la rampe de ponctuation `" .:-=+*#%@"` aux
+trois blocs. La différence n'est pas cosmétique : la ponctuation a une forme interne, donc le champ
+se lit comme *de l'écriture* ; les blocs remplissent leur cadratin, donc à `line-height: 1` ils se
+juxtaposent en aplat continu. La section Intersection oppose désormais une masse **générée à chaque
+image** à une **photographie réelle** — le contraste passe par les médias eux-mêmes, pas seulement
+par la légende. Les quatre icônes et la main du pied de page suivent la même technique.
+
+**Trois défauts que seul le rendu a montrés.**
+1. **Les deux mains ASCII n'ont jamais fonctionné et ne pouvaient pas.** À cette résolution, l'écart
+   entre deux doigts fait moins d'une cellule ; le tramage les fusionne. Trois versions successives
+   ont fini en ovale. Abandonner le dessin de la main pour une photographie n'est pas un renoncement :
+   c'est reconnaître ce que le médium sait faire (une masse diffuse sans silhouette à perdre) et ce
+   qu'il ne sait pas.
+2. **Trois icônes sur quatre sont sorties en pavés uniformes.** Sur l'ancien canvas, un pixel de
+   sprite valait 5,3 pixels écran ; à travers une grille de 27 lignes il en vaut un, et le pré-flou
+   le referme. Règle désormais explicite : aucun détail ni aucun écart sous **2 pixels de sprite**,
+   et un contour plutôt qu'un aplat. La grille est passée à 40 lignes et le pré-flou de 0,9 à 0,55.
+3. **Un `*/` de trop a fermé un commentaire CSS en avance**, laissant six lignes de prose dans la
+   feuille de style. Le navigateur les a ignorées, la page s'est affichée, et le seul symptôme était
+   une règle « qui ne s'applique pas ». Une assertion a été ajoutée à la vérification.
+
+**Un aveu porté dans le fichier lui-même.** L'en-tête affirmait « aucune image distante, tout est
+dessiné à l'exécution ». C'est encore vrai pour les distantes, mais `aca-hand.png` est un fichier
+**local** de 163 Ko, et un fichier qui documente ses propres compromis n'a pas le droit d'en
+acquérir un en silence. Stockée en **niveaux de gris + alpha** et non en couleur : la page la rend
+désaturée de toute façon, la couleur était 250 Ko que personne ne voit. **Provenance dite** : c'est
+un détourage issu du modèle Framer dont cette page suit la direction artistique, pas un visuel
+original — acceptable pour un prototype, à remplacer ou à licencier avant toute publication
+commerciale.
+
+**Ce qui n'a délibérément pas été fait.** Les trois portraits du site de référence n'ont pas été
+repris. La section « témoignages » de cette page dit explicitement qu'il n'y a pas encore de client
+et cite trois découvertes (§16, §17, §21) à la place ; y coller des photos de mannequins
+transformerait une section honnête en section fabriquée.
+
+**Vérifié :** **795 tests** inchangés. Rendu mesuré à 1440 et 390 px : chaque champ a une largeur de
+ligne unique (une ligne irrégulière signifierait que l'espace et le bloc viennent de deux polices
+différentes — d'où une pile `--font-block` distincte de `--font-mono`, Fragment Mono n'ayant pas les
+blocs) ; les deux copies se superposent au pixel près (`dx: 0, dy: 0`) ; la photographie se charge ;
+aucun débordement horizontal ; aucune erreur console. Branches rejouées : `prefers-reduced-motion`
+(les 7 champs sont **dessinés**, 0 animation en cours, la masse reste grise — « pas d'animation » ne
+doit jamais vouloir dire « pas d'image »), bascule FR (les 7 champs survivent), et impression (tout
+l'artwork masqué, 12 titres conservés). Détail : `docs/PROJECT_JOURNAL.md` (entrée du 2026-08-07).
+
+**Non vérifié, et dit comme tel :** rien n'a été ouvert sur un vrai téléphone (uniquement un
+navigateur redimensionné à 390 px) ; la page n'est toujours hébergée nulle part ; et le rendu des
+blocs dépend de la police système retenue par la pile `--font-block`, contrôlée sur Chromium/Windows
+seulement.
+
+### §26.1 — Icônes réduites, et le même fond dans Streamlit
+
+Deux demandes de suite : les icônes de capacités étaient trop grandes, et l'application devait
+reprendre le même fond que la page de présentation.
+
+**Redimensionner ces icônes n'est pas un réglage de largeur.** Le nombre de colonnes vaut
+largeur ÷ (corps × chasse), et le nombre de lignes en découle — réduire la largeur seule divise donc
+les lignes et détruit à nouveau les icônes, exactement le défaut corrigé plus haut. En tenant le
+rapport à 40 px de largeur pour 1 px de corps, la grille reste à ~73×40 à n'importe quelle taille :
+280 px/7 px sont devenus **200 px/5 px** sans perdre un seul détail.
+
+**Le fond de l'application reprend le motif** ([branding.py](../aca/core/branding.py),
+`_ambient_texture`). Une seconde couche `::after` répète une tuile SVG de blocs éparpillés en
+`--aca-primary`, **découpée par les mêmes rayons radiaux** que les voiles du §21 — les pixels
+n'existent donc que là où il y a déjà de la couleur — et animée par **la même** image-clé
+`aca-ambient`, pour que les deux couches dérivent ensemble ; deux fonds qui glissent l'un sur
+l'autre cessent de se lire comme une matière. Ce n'est délibérément **pas** le moteur de la page de
+présentation : là-bas les blocs sont du vrai texte régénéré par un canvas à chaque image, et
+`branding.py` n'émet que du CSS — une contrainte qu'on ne lève pas pour une décoration. Coût dit :
+le masque fait **fondre** les blocs vers les bords là où un vrai tramage les **raréfie** ; à 5 %
+d'opacité sur une tuile couverte à 27 % l'écart est imperceptible, mais c'est une approximation.
+
+Trois détails sont des décisions, pas des réglages : la tuile est tirée par un **hachage de
+coordonnées et non par une matrice de Bayer** (seuillée à une seule valeur, Bayer donne des rangées
+de 4, 2, 4, 0 cellules, soit un tissage à coutures visibles — essayé, rendu, rejeté ; et une texture
+statique n'a aucune raison d'être ordonnée, puisqu'il n'y a pas de scintillement d'image à image à
+éviter) ; **chaque rangée et chaque colonne compte au moins 2 cellules**, parce qu'un tirage à 30 %
+laisse une rangée de seize vide environ une fois sur trois cents et qu'une rangée vide dans une
+tuile répétée tous les 96 px devient une couture ; et la **même** URI est posée deux fois à 96 et
+138 px avec des décalages premiers entre eux, de sorte que la période combinée dépasse tout écran.
+
+**Le défaut le plus instructif de la passe, commis DEUX FOIS.** En rallongeant un commentaire CSS
+existant, un `*/` s'est retrouvé au milieu du bloc : la première fois il a annulé en silence les
+règles du pied de page, la seconde il a supprimé la dérive du fond sur **les deux** couches — et
+dans les deux cas la page s'affichait sans erreur. D'où un test qui ne concerne pas cette
+fonctionnalité mais tout le fichier : `test_les_commentaires_css_sont_tous_refermes` équilibre les
+délimiteurs sur la feuille **émise**, et refuse aussi une fermeture orpheline suivie d'une
+ouverture plus loin (un simple comptage égal ne l'aurait pas vue).
+
+**Vérifié :** **802 tests** (7 ajoutés). Dans l'application réellement lancée : la couche existe,
+porte ses deux calques aux bonnes échelles, est masquée, et `::before` comme `::after` portent
+`aca-ambient 48s`. Peinture mesurée par **différence d'images** — capture, couche désactivée,
+seconde capture — et non par échantillonnage, qui ne mesurait que l'interface : 18,7 % des pixels
+échantillonnés changent, dans deux amas correspondant aux deux voiles. Un premier essai annonçait
+un écart maximal de 86/255 pour une couche à 5 % d'opacité, ce qui est arithmétiquement impossible :
+les animations n'étaient pas figées entre les deux captures et la mesure suivait le voile en train
+de dériver.
+
+**Non vérifié :** rien sur un vrai téléphone ; le mode sombre et les 18 préréglages ne sont vérifiés
+que par calcul ; et `mask-image` reste un détail d'implémentation navigateur — contrôlé sur
+Chromium/Windows uniquement.
+
+### §26.2 — Un fond qui bouge vraiment, un pied de page, et une palette réunifiée
+
+**« Le fond ne bouge pas vraiment. »** Exact, et mesurable. La texture partageait la boucle du
+voile : 2,5 % d'un calque d'environ 1650 px, soit 41 px en 24 s — 1,7 px/s. Sur un dégradé énorme
+sans contour, c'est le réglage voulu. Sur un motif **répété tous les 96 px**, c'est invisible : une
+translation périodique inférieure à une période, à cette vitesse, se lit comme immobile. La texture
+a donc désormais sa propre image-clé (`aca-grain`, 26 s, trois amplitudes et un changement de
+direction — ce qui rend un mouvement perceptible n'est pas sa vitesse mais son changement de cap),
+et elle dérive **contre** le voile au lieu d'avec lui : le grain se lit comme des particules qui
+traversent le fond, ce que fait la masse de la page de présentation. Toujours `transform` seul,
+donc toujours composé par le GPU. Mesuré : **36 à 39 % des pixels échantillonnés changent en 4 s**,
+contre un fond auparavant jugé fixe à l'œil.
+
+**Icônes, troisième passe** : 200 px/5 px lisaient encore « massif » contre un texte de carte à
+15 px. 152 px/3,8 px les met au poids optique du titre de la carte. Toujours le même rapport
+40 px de largeur pour 1 px de corps, donc la grille reste à ~73×40 et aucun détail ne se perd.
+
+**Pied de page** refait sur la forme de la page de référence : deux colonnes *Pages* et *Support*.
+Les entrées `[Terms & Conditions]` et `[Acceptable Use]` du modèle ne sont **pas** reprises — ces
+documents n'existent pas dans ce projet, et un lien de pied de page vers une page jamais écrite est
+la façon la moins chère de perdre la crédibilité que tout le reste de la page dépense à gagner.
+Les huit liens conservés ont été vérifiés un par un ; l'un d'eux, `#faq`, pointait dans le vide :
+la section Questions fréquentes était la seule sans `id`, personne ne l'ayant jamais liée.
+
+**« Prototype de stage · 8 semaines » retiré**, et deux autres tournures du même registre revues
+(« le prototype savait lire un e-mail » → « la première version ») — sans toucher à une seule
+affirmation de fait. La phrase des témoignages devient « ce produit n'a pas encore de client » :
+plus sobre, exactement aussi honnête, et la section continue de dire pourquoi elle ne contient pas
+de témoignages.
+
+**Palette réunifiée, sur décision explicite.** Mesuré : l'instance tournait sur le préréglage
+`Émeraude` (primaire `#0F4C81`, accent `#3E8FD0`) dont la **séparation de signal vaut 0,08 sur 1** —
+le défaut même que `signal_separation()` avait été écrite pour attraper au §21, ici en production :
+l'ambre réservé à « une personne doit trancher » était remplacé par un bleu de la même famille que
+la primaire, donc le repère n'existait plus. Pire, la divergence était **interne** : `config.toml`
+portait déjà le pétrole tandis que le CSS injecté portait le bleu, si bien que les composants
+propres à Streamlit (listes déroulantes, en-têtes de `st.dataframe`, palette Vega) et l'habillage
+ne s'accordaient pas. Réglages passés à la palette conçue (`#125E6B` / `#B4622A`, surface `#FFFFFF`
+au lieu d'un `#F2F6FB` presque confondu avec le fond) : séparation **0,744**, et
+`accessibility_report()` ne renvoie plus **aucun** avertissement. Le logo du client est conservé
+intact, et le panneau « Apparence » revient en arrière en un clic.
+
+**Vérifié :** **802 tests**. Bouton « Send request » exercé de bout en bout sur une copie sonde de
+la page : jour et créneau choisis dans le calendrier, destinataire réellement présent
+(`hajriismail7@gmail.com`), et le corps du message porte « Preferred slot: Friday, 7 August 2026 —
+09:00 ». Aucun débordement à 390 et 1440 px, aucune erreur console, `prefers-reduced-motion`,
+bascule FR et impression rejouées.
+
+### §26.3 — Fond d'ambiance réglable, et réservation réellement automatique
+
+**Le fond devient un réglage.** Il était figé depuis le §21 (deux voiles radiaux), puis §26 y avait
+ajouté une trame de blocs — sans jamais aucun moyen d'y toucher sans modifier le code. Sur un
+produit livré en marque blanche c'est l'incohérence la plus voyante : tout le reste de l'apparence
+se règle depuis « Apparence », et c'est justement l'élément qui couvre le plus de surface. Trois
+jetons : `BRAND_AMBIENT` (**particules**, voile, grille, cadre, aucun), `BRAND_AMBIENT_INTENSITY`
+(discret / normal / marqué, agissant sur **toutes** les couches d'un seul curseur — sinon on obtient
+des combinaisons où le dégradé crie pendant que le grain chuchote) et `BRAND_AMBIENT_COLOR`.
+
+Opacité de la trame portée de 0,05 à **0,075** par couche : elle était rapportée comme à peine
+visible. « Marqué » la porte à 0,135, « discret » la ramène à 0,041.
+
+**« Cadre » est l'autre façon demandée.** Le filet est tracé par `box-shadow: inset` sur le
+conteneur et non par un pseudo-élément bordé : un pseudo-élément aurait dû se placer dans le
+contexte d'empilement de `stMain`, où il serait passé soit derrière le fond, soit par-dessus le
+contenu selon l'ordre des couches. Une ombre interne n'a aucune de ces deux questions à trancher et
+ne peut pas recouvrir un widget.
+
+**La couleur, et le défaut qui compte.** Vide = suit `BRAND_PRIMARY`. C'est le seul défaut sûr :
+sans lui, un client qui change sa marque garderait un fond dans l'ancienne teinte, et le réglage
+censé unifier l'identité produirait exactement l'incohérence qu'il doit empêcher. Un
+`st.color_picker` ne sait pas exprimer « vide » — il renvoie toujours une couleur —, d'où la case
+« suivre la couleur principale » dans le panneau. La règle du §21 est **reformulée, pas
+abandonnée** : le garde-fou porte sur le DÉFAUT (jamais l'ambre), pas sur un choix explicite ;
+imposer une décoration contre un choix fait en connaissance de cause serait un autre défaut.
+
+Les voiles quittent la constante `_SURFACES` pour `_ambient()` : ils dépendent désormais de trois
+réglages, ce qu'une chaîne statique ne peut pas porter.
+
+**Réservation : Cal.com.** Le paramétrage était écrit pour Calendly seul. Cal.com fait le même
+travail avec **d'autres paramètres d'URL** (`layout`, `theme`, `metadata[…]` contre
+`hide_event_type_details`, `background_color`, `utm_content`). Le fournisseur est déduit de l'hôte
+plutôt que configuré à part : un champ à remplir au lieu de deux, et aucun moyen de régler l'URL sur
+l'un et le drapeau sur l'autre. `CONFIG.booking` remplace `CONFIG.calendly`, qui reste lu pour
+qu'un déploiement existant ne perde pas son calendrier. La couleur de marque n'est **pas** envoyée à
+Cal.com : elle se règle dans son propre type d'événement, et un paramètre inconnu qu'il ignore en
+silence se lirait comme un défaut de style de notre côté.
+
+Les trois branches ont été rejouées dans un navigateur, la requête vers le tiers étant bloquée pour
+que rien ne parte réellement : **cal.com** → `?layout=month_view&theme=dark&name=…&email=…`,
+picker hors ligne retiré, note « disponibilités réelles » affichée ; **calendly** → ses propres
+paramètres ; **vide** → picker hors ligne conservé, note « cette page ne réserve rien » affichée.
+
+**Ce que cette page ne fait toujours pas, et ne doit pas prétendre faire.** Elle n'envoie aucun
+e-mail et n'écrit dans aucun agenda : c'est Cal.com qui réserve, bloque le créneau et envoie la
+confirmation. Le lien Google Meet n'apparaît que si l'agenda Google est connecté **et** que le lieu
+de l'événement est réglé sur Google Meet côté Cal.com — cette page ne peut pas le faire à sa place.
+Et l'expéditeur de la confirmation est Cal.com, pas l'adresse personnelle du vendeur, tant qu'aucun
+expéditeur propre n'est configuré chez eux.
+
+**Vérifié :** **804 tests** (+2). Cinq styles rendus côte à côte dans un navigateur — chacun émet
+exactement ses couches, ni une de plus (deux décors superposés) ni une de moins (un réglage sans
+effet visible) —, une valeur de style inconnue retombe sur le défaut plutôt que de supprimer le
+fond, et une couleur corrompue n'emporte pas la couche.
+
+### §26.4 — Le bouton envoie vraiment, et les invités
+
+**Le vrai défaut de `mailto:`, et ce n'était pas le clic en trop.** Le bouton « Envoyer la demande »
+ouvrait le client e-mail du visiteur, qui devait encore appuyer sur Envoyer. Le problème n'est pas
+l'étape supplémentaire : **sur un téléphone d'entreprise, dans un navigateur sans compte mail ou
+depuis un webmail, `mailto:` n'ouvre rien du tout**. La demande était alors perdue en silence — et
+côté vendeur, indiscernable d'une personne qui n'aurait jamais rempli le formulaire.
+
+`CONFIG.form` (+ `CONFIG.formKey`) branche un point de collecte (Web3Forms, Formspree) : le
+formulaire part en `fetch` POST, le visiteur voit « Demande envoyée » sans quitter la page, et
+l'e-mail arrive sans aucune action de sa part. `fetch` et non un POST natif : un POST natif quitte
+la page pour celle du prestataire, c'est-à-dire égare le visiteur à l'instant précis où il vient de
+se déclarer intéressé.
+
+**L'échec retombe sur `mailto:` au lieu d'afficher une erreur.** Réseau coupé, service en panne, clé
+expirée : la demande de quelqu'un qui a pris la peine d'écrire ne doit pas disparaître parce qu'un
+tiers est indisponible.
+
+**La note sous le bouton a deux versions, et le script SUPPRIME celle qui ne s'applique pas** plutôt
+que de la masquer — deux promesses contradictoires sur le même bouton finiraient toutes les deux à
+l'impression, où `display:none` ne protège plus. C'est la règle déjà appliquée aux deux notes du
+calendrier au §23.2.
+
+**Les invités** (la capture envoyée : l'écran « Ajouter des invités » de Cal.com). Un champ
+facultatif a été ajouté au formulaire, et il **pré-remplit** cet écran au lieu de le remplacer :
+quelqu'un qui veut son directeur technique dans la réunion le sait en écrivant, pas trois écrans
+plus loin. Envoyé en `guests` **répété**, un paramètre par adresse — c'est la forme attendue, une
+chaîne séparée par des virgules arriverait comme une adresse unique et invalide. Sans calendrier
+configuré, la liste part simplement dans le corps du message : le champ n'est jamais un contrôle
+sans effet. Séparateurs virgule, point-virgule ou espace acceptés, filtrage sur la seule présence
+d'une arobase — le but est d'écarter les fragments vides, pas de valider une adresse, ce que le
+prestataire fera de toute façon.
+
+L'en-tête du fichier est **amendé** : il annonçait « aucun script distant, aucune image distante ».
+C'est toujours vrai, mais il existe désormais **deux requêtes sortantes**, toutes deux facultatives
+et déclenchées par une action — l'iframe du calendrier à l'approche de la section, et le POST du
+formulaire à l'envoi. Un fichier qui documente ses propres compromis n'a pas le droit d'en acquérir
+un en silence.
+
+**Mise en route pas à pas** : `docs/STRIPE_CALENDLY_SETUP.md`, section « Cal.com + envoi direct ».
+Elle insiste sur les deux réglages qu'on oublie et qui ne se voient qu'à l'usage — *Location →
+Google Meet* (sans quoi la confirmation part sans lien) et *Booking questions → Add guests* (sans
+quoi le champ de la page pré-remplit un écran qui n'existe pas).
+
+**Vérifié :** **804 tests**, et les quatre branches du bouton rejouées dans un navigateur avec le
+point de collecte simulé par interception, donc sans qu'aucune requête ne sorte de la machine :
+(1) envoi direct — le corps POSTé contient bien nom, société, invités, palier, créneau et la clé
+d'accès, le formulaire se vide, seule la note « envoi direct » subsiste ; (2) réponse 500 — message
+de repli affiché et bascule vers `mailto:` ; (3) sans point de collecte — `mailto:` vers
+`hajriismail7@gmail.com` avec la ligne « Guests: » ; (4) Cal.com — les invités arrivent en
+`&guests=…&guests=…`.
+
+
+### §26.5 — Pages support, Cal.com réellement branché, formulaire déplacé
+
+**Cal.com est en service.** `CONFIG.booking` pointe sur l'événement réel, et trois défauts trouvés
+au rendu ont été corrigés. (1) La capture rapportée comme « calendrier cassé » montrait en fait un
+**état de chargement** : Cal.com met une dizaine de secondes à peindre son premier pixel, et un
+rectangle vide à l'endroit exact où la page vient de promettre « disponibilités réelles » se lit
+comme une panne. Un repère d'attente est posé avant le cadre et retiré à son `load`. (2) Le cadre
+faisait 640 px pour une page qui en dispose 1 500 : les créneaux tombaient sous la ligne de
+flottaison. Porté à 1 150 px — valeur mesurée, la carte de Cal.com s'ÉTIRANT pour remplir le cadre
+qu'on lui donne, il n'y a pas de hauteur naturelle à découvrir mais un seuil sous lequel grille du
+mois et créneaux ne tiennent plus ensemble. (3) `?theme=dark` **ne fait rien** : mesuré, la page rend
+`<html class="notranslate light">` que l'on demande `dark` ou `light`, le thème étant réglé dans le
+type d'événement. Paramètre mort retiré — un paramètre sans effet est pire qu'aucun, la prochaine
+personne qui cherchera pourquoi la carte est blanche le lira comme une piste.
+
+**Formulaire : envoi réel, puis déplacement.** `CONFIG.form`/`formKey` branchent Web3Forms (clé
+**publique** par déclaration de son émetteur, contrairement à une clé d'API Cal.com qui ne doit
+jamais figurer dans un fichier servi). Le vrai défaut corrigé n'est pas le clic en trop : sur un
+téléphone d'entreprise ou depuis un webmail, `mailto:` n'ouvre **rien**, et la demande était perdue
+en silence. Le formulaire a ensuite quitté la page d'accueil pour la page de contact — le dupliquer
+aurait garanti qu'un jour l'un des deux reçoive un champ que l'autre n'a pas. Ce qui reste sur la
+page d'accueil est le CHEMIN et non le formulaire : réserver est l'action principale, mais quelqu'un
+qui n'est pas prêt à céder trente minutes d'agenda doit pouvoir écrire, et c'est souvent le lecteur
+le plus haut placé.
+
+**`static/legal.html`** — Contact, Confidentialité, Conditions générales, Usage acceptable.
+**Un fichier, quatre sections ancrées**, et c'est une décision : quatre fichiers auraient porté
+quatre copies de la même feuille de style, lesquelles divergent à la première modification — le
+raisonnement qui garde déjà le français en attribut `data-fr` plutôt qu'en second fichier traduit.
+Une navigation latérale collante marque la position, ce qui est la seule chose que des pages
+séparées offrent gratuitement. La confidentialité est **dérivée de `docs/PRIVACY_POLICY.md`**, écrit
+contre le code (liste des sous-traitants, 365 jours, absence de décision entièrement automatisée),
+augmentée de Cal.com et Web3Forms qui reçoivent désormais des données de visiteurs. Les conditions
+générales et l'usage acceptable sont des **projets non relus par un juriste**, et le disent sur la
+page. Les sept valeurs qu'aucune décision technique ne peut fournir — raison sociale, contact RGPD,
+autorité de contrôle, juridiction — restent des marqueurs `[TO COMPLETE]` visibles plutôt que des
+inventions plausibles : un blanc se fait remplir, une invention se fait croire. Même raisonnement
+que le retrait des prix fictifs.
+
+**Vérifié :** 804 tests inchangés. Quatre branches du bouton rejouées avec le point de collecte
+intercepté (rien n'est sorti de la machine) ; les quatre liens du pied de page atteignent leurs
+ancres ; aucune ancre morte sur la page support ; aller-retour FR/EN sur les trois titres
+juridiques ; aucun débordement à 390 et 1440 px ; aucune erreur console. Page de réservation réelle
+inspectée jusqu'à l'étape de confirmation **sans jamais confirmer** : lieu Google Meet, 16 journées
+sélectionnables (agenda connecté), « Ajouter des invités » présent.
+
+**Non vérifié, et dit comme tel :** aucun envoi Web3Forms réel n'a pu être effectué depuis cette
+machine — toutes les vérifications utilisent une réponse simulée. La livraison effective reste à
+tester par l'exploitant.

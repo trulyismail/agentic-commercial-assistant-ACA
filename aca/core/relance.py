@@ -17,7 +17,7 @@ import os
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
-from aca.storage import followup_store
+from aca.storage import activity_log, followup_store
 from aca.integrations import gmail_reader
 
 load_dotenv()
@@ -92,6 +92,14 @@ def check_one(service, our_email: str, lead: dict) -> None:
         body=relance_body,
     )
     followup_store.mark_followed_up(lead["thread_id"])
+    # §18 — trace machine (`SOURCE_CLI`, aucun humain n'a déclenché cette relance) : jusqu'ici la
+    # rédaction d'un brouillon de relance ne laissait aucune trace dans le journal d'activité —
+    # seule une validation/rejet humain en laissait une.
+    activity_log.log(
+        activity_log.ACTION_FOLLOWUP_DRAFTED, actor="(relance)", target_type="thread",
+        target_id=lead["thread_id"], source=activity_log.SOURCE_CLI,
+        details={"expéditeur": lead["sender"], "objet": lead["subject"], "tour": round_index + 1},
+    )
     print(f"   → brouillon de relance n°{round_index + 1} créé pour « {lead['subject']} » ({lead['sender']}).")
 
 

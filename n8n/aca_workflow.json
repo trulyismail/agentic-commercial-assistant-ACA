@@ -1,0 +1,424 @@
+{
+  "name": "ACA — ingestion Gmail + validation humaine",
+  "meta": {
+    "description": "Palier Enterprise (§16.1.5). Deux flux indépendants : (1) un Gmail Trigger pousse chaque e-mail non lu, pièces jointes comprises, vers POST /threads en mode asynchrone ; (2) un Webhook reçoit l'événement analysis.paused émis par ACA quand une analyse atteint la pause de validation humaine, et alerte l'équipe sur Slack. Aucune écriture CRM n'est déclenchée par ce workflow : seul POST /threads/{id}/valider le fait, et il reste derrière une action humaine."
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "readStatus": "unread"
+        },
+        "options": {
+          "downloadAttachments": true
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000001",
+      "name": "Gmail Trigger (non lus)",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [-460, -120],
+      "notes": "Remplace poller.py au palier Enterprise. Au palier Solo, poller.py fait exactement la même chose sans n8n."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Convertit un e-mail Gmail (n8n) en charge utile `EmailIn` de l'API ACA.\n//\n// Les pièces jointes arrivent en binaire dans n8n ; l'API les attend en base64 (§16.1.1).\n// C'est ce nœud qui rend l'analyse multimodale — le pilier d'innovation n°1 — accessible\n// depuis n8n : avant, POST /threads ignorait purement et simplement les pièces jointes.\n//\n// `thread_id` est dérivé de l'identifiant Gmail : POST /threads est idempotent (§16.1.4),\n// donc un réessai du nœud HTTP ne relance pas l'analyse et ne renotifie pas l'équipe.\n\nconst items = $input.all();\nconst out = [];\n\nfor (let i = 0; i < items.length; i++) {\n  const item = items[i];\n  const headers = item.json.headers || {};\n  const attachments = [];\n\n  // `i` — l'index de l'item DANS LE LOT — est indispensable ici. Un item n8n expose `.json`,\n  // `.binary` et `.pairedItem`, mais PAS `.index` : écrire `item.index ?? 0` vaut donc toujours 0\n  // et lit les pièces jointes du PREMIER e-mail pour tous les autres. Avec deux e-mails dans un\n  // même cycle de scrutation, le lead n°2 héritait des documents du lead n°1 — c'est-à-dire une\n  // proposition rédigée à partir du mauvais dossier, sans aucun message d'erreur.\n  for (const [key, meta] of Object.entries(item.binary || {})) {\n    const buffer = await this.helpers.getBinaryDataBuffer(i, key);\n    attachments.push({\n      filename: meta.fileName || key,\n      content_b64: buffer.toString('base64'),\n    });\n  }\n\n  out.push({\n    json: {\n      sender: headers.from || item.json.from || '',\n      subject: headers.subject || item.json.subject || '(sans objet)',\n      body: item.json.text || item.json.snippet || '',\n      thread_id: `n8n-${item.json.id}`,\n      // L'API borne à 10 pièces jointes / 20 Mo décodés et refuse en 422 avant tout appel LLM.\n      attachments: attachments.slice(0, 10),\n    },\n    pairedItem: { item: i },\n  });\n}\n\nreturn out;"
+      },
+      "id": "a1000000-0000-4000-8000-000000000002",
+      "name": "Préparer la charge utile",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-240, -120]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ACA_API_URL || 'http://api:8000' }}/threads?mode=async",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.ACA_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000003",
+      "name": "ACA — lancer l'analyse",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-20, -120],
+      "onError": "continueErrorOutput",
+      "notes": "mode=async → 202 immédiat. Le graphe (2 appels 70B + RAG + réflexion) prend 30 à 90 s ; en mode synchrone la requête HTTP resterait ouverte tout ce temps, ce qui devient fragile dès que les réessais de n8n croisent le backoff 429 du palier gratuit de Groq. La fin est signalée par le webhook ci-dessous. En cas d'échec, la sortie d'erreur part sur la sonde de santé plutôt que d'arrêter le workflow : un e-mail qui échoue ne doit pas interrompre l'ingestion des suivants."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.ACA_API_URL || 'http://api:8000' }}/health",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000020",
+      "name": "ACA — sonde de santé",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [200, -40],
+      "notes": "Branchée sur la SORTIE D'ERREUR du nœud précédent. /health ne joint aucun service externe (§16.1.3), on peut donc l'appeler librement : si elle répond, ACA est debout et c'est cet e-mail précis qui a échoué ; si elle échoue aussi, c'est ACA qui est tombé. Sans ce branchement le nœud n'avait aucune entrée et ne pouvait jamais s'exécuter."
+    },
+
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "aca-events",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000010",
+      "name": "Webhook ACA (analysis.paused)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-460, 180],
+      "webhookId": "a1000000-0000-4000-8000-000000000010",
+      "notes": "Renseigner l'URL de production de ce nœud dans ACA_WEBHOOK_URL côté ACA : elle est de la forme /webhook/aca-events, c'est-à-dire /webhook/<path>. Le webhookId ne sert qu'à engendrer un chemin quand `path` est vide ; il n'apparaît PAS dans l'URL ici — vérifié en conditions réelles le 2026-07-28 (/webhook/aca-events répond 200 « Workflow was started », la forme avec webhookId répond 404 « not registered »). C'est ce nœud qui rend le workflow ÉVÉNEMENTIEL : sans lui, il faudrait un nœud Schedule interrogeant GET /threads/pending en boucle, c'est-à-dire réimplémenter poller.py dans n8n."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-paused",
+              "leftValue": "={{ $json.body.event }}",
+              "rightValue": "analysis.paused",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000011",
+      "name": "Est-ce une pause de validation ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [-240, 180],
+      "notes": "ACA émet aussi analysis.clarification, analysis.routed, lead.validated et lead.rejected sur la même URL. Filtrer ici évite d'alerter l'équipe sur un événement qui n'attend aucune décision. La sortie « faux » est volontairement libre : c'est là qu'on branche le traitement des autres événements."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Met en forme l'alerte destinée à l'équipe commerciale.\n//\n// Les drapeaux de risque contractuel (§13) et d'injection de prompt (§15.1.4) sont remontés en\n// tête : c'est exactement l'information qui doit changer la façon dont un humain relit le\n// brouillon avant de valider.\n//\n// Ce nœud ne fait que METTRE EN FORME ; l'envoi est le nœud suivant. Séparer les deux permet de\n// remplacer Slack par Teams, un e-mail ou un ticket sans toucher à cette logique.\n\nconst data = $json.body.data || {};\nconst info = data.extracted_info || {};\nconst alerts = [];\n\nif ((data.risk_flags || []).length) {\n  alerts.push(`:warning: Risques contractuels : ${data.risk_flags.join(', ')}`);\n}\nif ((data.injection_flags || []).length) {\n  alerts.push(`:shield: Tentative d'injection de prompt détectée — relire avec méfiance.`);\n}\nif (data.knowledge_gap) {\n  alerts.push(`:grey_question: Question sans réponse en base de connaissances.`);\n}\n\nconst resume = `${data.classification} — ${info.entreprise || 'entreprise inconnue'} (${data.sender})`;\n\nconst lignes = [\n  `:inbox_tray: *Analyse en attente de validation* — ${resume}`,\n  `Urgence : ${info.urgence || '?'} · Fil : \\`${data.thread_id}\\``,\n];\nif (alerts.length) {\n  lignes.push(alerts.join('\\n'));\n}\nlignes.push(\"_Aucune écriture CRM n'a eu lieu : elle attend une validation humaine._\");\n\nreturn [{\n  json: {\n    thread_id: data.thread_id,\n    classification: data.classification,\n    entreprise: info.entreprise || 'entreprise inconnue',\n    urgence: info.urgence || '?',\n    sender: data.sender,\n    alerts: alerts.join('\\n'),\n    resume,\n    slack_text: lignes.join('\\n'),\n    // Repris tels quels par le formulaire d'approbation : c'est le brouillon que l'humain relit,\n    // corrige éventuellement, puis valide — l'équivalent exact du `st.text_area` de ui.py.\n    draft: data.draft_response || '',\n    besoin: info.besoin_principal || '',\n  },\n}];"
+      },
+      "id": "a1000000-0000-4000-8000-000000000012",
+      "name": "Mettre en forme l'alerte",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-20, 140]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.slack_text }) }}",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000013",
+      "name": "Alerter l'équipe (Slack)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [200, 140],
+      "onError": "continueRegularOutput",
+      "notes": "Envoi via le webhook entrant Slack déjà utilisé par notify.py — même variable SLACK_WEBHOOK_URL, donc aucun identifiant n8n à créer. Sans ce nœud, le workflow mettait l'alerte en forme puis ne l'envoyait à personne. `onError: continueRegularOutput` reprend la dégradation gracieuse du projet : SLACK_WEBHOOK_URL absente ⇒ l'événement reste consultable dans le journal d'exécution, mais le workflow ne tombe pas. Pour Teams, un e-mail ou un ticket : remplacer ce seul nœud."
+    },
+
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $env.NOTIFY_EMAIL }}",
+        "subject": "=[ACA] Validation requise — {{ $json.resume }}",
+        "emailType": "text",
+        "message": "=Une analyse attend votre validation.\n\nEntreprise : {{ $json.entreprise }}\nExpéditeur : {{ $json.sender }}\nCatégorie  : {{ $json.classification }}\nUrgence    : {{ $json.urgence }}\nBesoin     : {{ $json.besoin }}\nFil        : {{ $json.thread_id }}\n\n{{ $json.alerts }}\n\n--- BROUILLON PROPOSÉ ---\n{{ $json.draft }}\n-------------------------\n\nAucune écriture CRM n'a eu lieu. Pour relire, corriger et décider :\n{{ $execution.resumeFormUrl }}\n\n(Ce lien est unique à cette analyse. Tant qu'il n'est pas ouvert et soumis, le workflow reste en attente et le CRM reste intact.)",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000014",
+      "name": "Envoyer le lien d'approbation",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [200, 300],
+      "onError": "continueRegularOutput",
+      "notes": "Prévient l'humain qu'un lead l'attend, et lui transmet l'URL du formulaire d'approbation. La variable est `$execution.resumeFormUrl` et NON `$execution.resumeUrl` : les deux pointent vers des chemins DIFFÉRENTS (`/form-waiting/<id>` contre `/webhook-waiting/<id>`), et seul le premier est enregistré par un nœud Wait en mode `form` — c'est ce que confirme la définition du nœud, qui ne mentionne `resumeFormUrl` que sous `resume: [\"form\"]` et réserve `resumeUrl` au mode `webhook`. Envoyer la seconde revient donc à envoyer un lien mort (404) ou, s'il reprend l'exécution, une reprise SANS réponses de formulaire : `Décision` serait vide et l'aiguillage retomberait sur « Rejeter ». Dans les deux cas la boucle d'approbation est cassée. Elle est fournie par le nœud « Attendre la décision humaine » ci-après et **peut être référencée avant lui** : c'est le motif documenté par n8n (« send the yet-to-be-generated URL … in an email »). Sans cet envoi, le workflow attendrait indéfiniment une décision que personne ne sait devoir prendre. `onError: continueRegularOutput` : un échec d'envoi ne doit pas empêcher l'attente — le formulaire reste accessible depuis la liste des exécutions n8n."
+    },
+    {
+      "parameters": {
+        "resume": "form",
+        "formTitle": "=Validation — {{ $('Mettre en forme l\\'alerte').first().json.resume }}",
+        "formDescription": "=Relisez le brouillon ci-dessous. Il n'a PAS été envoyé au prospect et rien n'a été écrit dans le CRM.\n\nBesoin : {{ $('Mettre en forme l\\'alerte').first().json.besoin }}\nUrgence : {{ $('Mettre en forme l\\'alerte').first().json.urgence }}\n{{ $('Mettre en forme l\\'alerte').first().json.alerts }}\n\n--- BROUILLON PROPOSÉ ---\n{{ $('Mettre en forme l\\'alerte').first().json.draft }}",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Décision",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  { "option": "Valider" },
+                  { "option": "Rejeter" }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Brouillon corrigé",
+              "fieldType": "textarea",
+              "placeholder": "Laisser vide pour conserver le brouillon proposé tel quel.",
+              "requiredField": false
+            },
+            {
+              "fieldLabel": "Validé par",
+              "fieldType": "text",
+              "placeholder": "votre nom",
+              "requiredField": false
+            }
+          ]
+        },
+        "options": {
+          "respondWithOptions": {
+            "values": {
+              "respondWith": "text",
+              "formSubmittedText": "Décision enregistrée. Vous pouvez fermer cette page."
+            }
+          }
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000015",
+      "name": "Attendre la décision humaine",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [420, 300],
+      "webhookId": "a1000000-0000-4000-8000-000000000015",
+      "notes": "LA barrière humaine, équivalent n8n du bouton « Valider » de ui.py. L'exécution se met réellement en pause : tant que le formulaire n'est pas soumis, `action_node` n'est jamais atteint et le CRM reste intact. Le brouillon est affiché dans la description ; le champ « Brouillon corrigé » reprend le `st.text_area` éditable de l'interface Streamlit. Les valeurs sont exposées en sortie sous le LIBELLÉ du champ (`$json['Décision']`), et non sous un identifiant technique."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-valider",
+              "leftValue": "={{ $json['Décision'] }}",
+              "rightValue": "Valider",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000016",
+      "name": "Décision = Valider ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [640, 300],
+      "notes": "Aiguille vers l'écriture CRM ou vers le rejet. Le défaut est SÛR : toute réponse autre que « Valider » part vers le rejet, qui n'écrit rien."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ACA_API_URL || 'http://api:8000' }}/threads/{{ $(\"Mettre en forme l'alerte\").first().json.thread_id }}/valider",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.ACA_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json['Brouillon corrigé'] ? { validated_by: $json['Validé par'] || 'n8n', edited_draft: $json['Brouillon corrigé'] } : { validated_by: $json['Validé par'] || 'n8n' }) }}",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000017",
+      "name": "ACA — valider (écriture CRM)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [860, 220],
+      "notes": "LE SEUL nœud de tout ce workflow qui écrit dans le CRM. Il lève la pause `interrupt_before=[\"action\"]` du graphe : Sheets + HubSpot + brouillon de réponse Gmail. `edited_draft` n'est transmis que si l'humain a réellement modifié le texte — sinon le brouillon d'origine est conservé, exactement comme dans ui.py. Le `thread_id` est relu depuis « Mettre en forme l'alerte » car après le formulaire, `$json` ne contient plus que les réponses de celui-ci."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ACA_API_URL || 'http://api:8000' }}/threads/{{ $(\"Mettre en forme l'alerte\").first().json.thread_id }}/rejeter",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.ACA_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000018",
+      "name": "ACA — rejeter (aucune écriture)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [860, 380],
+      "notes": "`action_node` n'est jamais invoqué : rien n'est écrit nulle part. Le fil est simplement retiré de la file d'attente pour ne pas réapparaître indéfiniment. Sans ce chemin, « rejeter » se réduirait à ne jamais cliquer — et le lead resterait en attente pour toujours."
+    }
+  ],
+  "connections": {
+    "Gmail Trigger (non lus)": {
+      "main": [
+        [
+          {
+            "node": "Préparer la charge utile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Préparer la charge utile": {
+      "main": [
+        [
+          {
+            "node": "ACA — lancer l'analyse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ACA — lancer l'analyse": {
+      "main": [
+        [],
+        [
+          {
+            "node": "ACA — sonde de santé",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook ACA (analysis.paused)": {
+      "main": [
+        [
+          {
+            "node": "Est-ce une pause de validation ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Est-ce une pause de validation ?": {
+      "main": [
+        [
+          {
+            "node": "Mettre en forme l'alerte",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Mettre en forme l'alerte": {
+      "main": [
+        [
+          {
+            "node": "Alerter l'équipe (Slack)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Envoyer le lien d'approbation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Envoyer le lien d'approbation": {
+      "main": [
+        [
+          {
+            "node": "Attendre la décision humaine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attendre la décision humaine": {
+      "main": [
+        [
+          {
+            "node": "Décision = Valider ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Décision = Valider ?": {
+      "main": [
+        [
+          {
+            "node": "ACA — valider (écriture CRM)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "ACA — rejeter (aucune écriture)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "active": false,
+  "versionId": "aca-16-1-5",
+  "tags": []
+}

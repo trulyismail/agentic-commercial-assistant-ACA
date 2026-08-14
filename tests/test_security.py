@@ -147,6 +147,110 @@ def test_unknown_role_holds_nothing():
     assert not user_store.can("", user_store.PERM_VIEW_DASHBOARD)
 
 
+def test_viewer_role_reads_but_cannot_reject_a_lead():
+    """§18 — rejeter retire l'analyse de la file de tout le monde : ce n'est pas de la consultation,
+    contrairement à valider/rejeter pour `operator`."""
+    for permission in (user_store.PERM_VIEW_DASHBOARD, user_store.PERM_VIEW_HISTORY):
+        assert user_store.can(user_store.ROLE_VIEWER, permission)
+    for permission in (user_store.PERM_VALIDATE_LEAD, user_store.PERM_REJECT_LEAD,
+                       user_store.PERM_EDIT_SETTINGS, user_store.PERM_CURATE_KNOWLEDGE,
+                       user_store.PERM_MANAGE_USERS):
+        assert not user_store.can(user_store.ROLE_VIEWER, permission)
+
+
+def test_viewer_account_authenticates_like_any_other_role(tmp_path, monkeypatch):
+    monkeypatch.setattr(user_store, "DB_PATH", str(tmp_path / "users.sqlite"))
+    user_store.create_user("dir1", "mot-de-passe-solide", role=user_store.ROLE_VIEWER)
+    assert user_store.verify_credentials("dir1", "mot-de-passe-solide") == {
+        "username": "dir1", "role": "viewer",
+    }
+
+
+# ── user_store : second facteur TOTP (§18) ────────────────────────────────────────────────────
+def test_totp_required_only_for_admin():
+    assert user_store.totp_required(user_store.ROLE_ADMIN) is True
+    assert user_store.totp_required(user_store.ROLE_OPERATOR) is False
+    assert user_store.totp_required(user_store.ROLE_VIEWER) is False
+    assert user_store.totp_required("inconnu") is False
+
+
+def test_totp_secret_round_trip(tmp_path, monkeypatch):
+    monkeypatch.setattr(user_store, "DB_PATH", str(tmp_path / "users.sqlite"))
+    user_store.create_user("henri", "mot-de-passe-solide", role=user_store.ROLE_ADMIN)
+
+    assert user_store.has_totp("henri") is False
+    assert user_store.get_totp_secret("henri") is None
+
+    assert user_store.set_totp_secret("henri", "JBSWY3DPEHPK3PXP") is True
+    assert user_store.has_totp("henri") is True
+    assert user_store.get_totp_secret("henri") == "JBSWY3DPEHPK3PXP"
+
+
+def test_totp_off_disables_the_second_factor(tmp_path, monkeypatch):
+    """CLI `totp-off` — l'échappatoire d'un admin qui a perdu son téléphone."""
+    monkeypatch.setattr(user_store, "DB_PATH", str(tmp_path / "users.sqlite"))
+    user_store.create_user("iris", "mot-de-passe-solide", role=user_store.ROLE_ADMIN)
+    user_store.set_totp_secret("iris", "JBSWY3DPEHPK3PXP")
+    assert user_store.has_totp("iris") is True
+
+    assert user_store.set_totp_secret("iris", None) is True
+    assert user_store.has_totp("iris") is False
+    assert user_store.get_totp_secret("iris") is None
+
+
+def test_set_totp_secret_on_unknown_account_returns_false(tmp_path, monkeypatch):
+    monkeypatch.setattr(user_store, "DB_PATH", str(tmp_path / "users.sqlite"))
+    assert user_store.set_totp_secret("personne", "JBSWY3DPEHPK3PXP") is False
+
+
+def test_verify_totp_without_secret_configured_is_false(tmp_path, monkeypatch):
+    """`has_totp()` doit être vérifié en amont par l'appelant — sans secret, on refuse plutôt que
+    de lever."""
+    monkeypatch.setattr(user_store, "DB_PATH", str(tmp_path / "users.sqlite"))
+    user_store.create_user("jules", "mot-de-passe-solide", role=user_store.ROLE_ADMIN)
+    assert user_store.verify_totp("jules", "123456") is False
+
+
+def test_verify_totp_accepts_the_real_code_and_rejects_a_wrong_one(tmp_path, monkeypatch):
+    from aca.core import totp as totp_module
+
+    monkeypatch.setattr(user_store, "DB_PATH", str(tmp_path / "users.sqlite"))
+    user_store.create_user("kevin", "mot-de-passe-solide", role=user_store.ROLE_ADMIN)
+    secret = totp_module.generate_secret()
+    user_store.set_totp_secret("kevin", secret)
+
+    now = 1_800_000_000.0
+    valid_code = totp_module.current_code(secret, now=now)
+    assert user_store.verify_totp("kevin", valid_code, now=now) is True
+    assert user_store.verify_totp("kevin", "000000", now=now) is False
+
+
+def test_totp_secret_is_isolated_by_tenant(tmp_path, monkeypatch):
+    """Même cloisonnement `org_id` que le reste de `user_store` (§12 item 3)."""
+    monkeypatch.setattr(user_store, "DB_PATH", str(tmp_path / "users.sqlite"))
+    monkeypatch.setenv("ACA_ORG_ID", "acme")
+    user_store.create_user("laure", "mot-de-passe-solide", role=user_store.ROLE_ADMIN)
+    user_store.set_totp_secret("laure", "JBSWY3DPEHPK3PXP")
+
+    monkeypatch.setenv("ACA_ORG_ID", "globex")
+    user_store.create_user("laure", "autre-mot-de-passe", role=user_store.ROLE_ADMIN)
+    assert user_store.has_totp("laure") is False  # le secret d'« acme » ne fuit pas vers « globex »
+
+    monkeypatch.setenv("ACA_ORG_ID", "acme")
+    assert user_store.has_totp("laure") is True
+
+
+def test_list_users_reports_totp_status_without_leaking_the_secret(tmp_path, monkeypatch):
+    monkeypatch.setattr(user_store, "DB_PATH", str(tmp_path / "users.sqlite"))
+    user_store.create_user("marc", "mot-de-passe-solide", role=user_store.ROLE_ADMIN)
+    user_store.set_totp_secret("marc", "JBSWY3DPEHPK3PXP")
+
+    accounts = {row["username"]: row for row in user_store.list_users()}
+    assert accounts["marc"]["totp"] is True
+    assert "totp_secret" not in accounts["marc"]
+    assert "JBSWY3DPEHPK3PXP" not in str(accounts["marc"])
+
+
 # ── session : TTL et inactivité (§15.1.7) ─────────────────────────────────────────────────────
 def test_fresh_session_is_valid():
     now = time.time()
@@ -189,6 +293,45 @@ def test_session_expires_on_inactivity(monkeypatch):
     # Une interaction avant l'échéance remet le compteur à zéro.
     session.touch(current, started + 59)
     assert session.expiry_reason(current, started + 100) is None
+
+
+# ── session : avertissement avant expiration (§18, recap #6) ─────────────────────────────────
+def test_seconds_until_expiry_reports_the_stricter_bound(monkeypatch):
+    monkeypatch.setenv("ACA_SESSION_TTL_SECONDS", "28800")  # 8 h
+    monkeypatch.setenv("ACA_SESSION_IDLE_SECONDS", "1800")  # 30 min, la borne la plus stricte
+    started = 1_000.0
+    current = session.new_session("alice", "admin", started)
+    assert session.seconds_until_expiry(current, started) == 1800
+
+
+def test_seconds_until_expiry_switches_to_the_absolute_bound_near_ttl(monkeypatch):
+    monkeypatch.setenv("ACA_SESSION_TTL_SECONDS", "100")
+    monkeypatch.setenv("ACA_SESSION_IDLE_SECONDS", "1800")
+    started = 1_000.0
+    current = session.new_session("alice", "admin", started)
+    session.touch(current, started + 90)  # inactivité remise à zéro, seul le TTL absolu approche
+    assert session.seconds_until_expiry(current, started + 90) == 10
+
+
+def test_seconds_until_expiry_none_when_both_bounds_disabled(monkeypatch):
+    monkeypatch.setenv("ACA_SESSION_TTL_SECONDS", "0")
+    monkeypatch.setenv("ACA_SESSION_IDLE_SECONDS", "0")
+    started = 1_000.0
+    current = session.new_session("alice", "admin", started)
+    assert session.seconds_until_expiry(current, started) is None
+
+
+def test_seconds_until_expiry_zero_for_absent_session():
+    assert session.seconds_until_expiry(None, time.time()) == 0
+    assert session.seconds_until_expiry({}, time.time()) == 0
+
+
+def test_seconds_until_expiry_never_negative_past_expiry(monkeypatch):
+    monkeypatch.setenv("ACA_SESSION_TTL_SECONDS", "100")
+    monkeypatch.setenv("ACA_SESSION_IDLE_SECONDS", "0")
+    started = 1_000.0
+    current = session.new_session("alice", "admin", started)
+    assert session.seconds_until_expiry(current, started + 500) == 0
 
 
 def test_absent_session_is_never_valid():
